@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
- PCBench Suite  ·  Benchmark + Auditoría de Optimización
+ Quilate Suite  ·  Benchmark + Auditoría de Optimización
 --------------------------------------------------------------------------------
  Autor : Cristian Alonso
  Web   : https://cristianac.es
@@ -21,15 +21,15 @@
  puedes revisar y ejecutar tú mismo.
 
  Uso:
-   python pcbench.py                      # análisis completo
-   python pcbench.py --quick              # benchmark rápido (sin test de disco largo)
-   python pcbench.py --no-bench           # solo auditoría
-   python pcbench.py --disk-size 1024     # tamaño del fichero de test de disco (MB)
-   python pcbench.py --export-plan        # genera plan_optimizacion.ps1
-   python pcbench.py --html informe.html --json datos.json
+   python quilate.py                      # análisis completo
+   python quilate.py --quick              # benchmark rápido (sin test de disco largo)
+   python quilate.py --no-bench           # solo auditoría
+   python quilate.py --disk-size 1024     # tamaño del fichero de test de disco (MB)
+   python quilate.py --export-plan        # genera plan_optimizacion.ps1
+   python quilate.py --html informe.html --json datos.json
 
  Este fichero es solo el lanzador. La implementación vive en el paquete
- `pcbench/`, dividida por responsabilidades:
+ `quilate/`, dividida por responsabilidades:
 
    const.py          branding y detección de plataforma
    console.py        color ANSI, cajas, barras y formato de texto
@@ -58,7 +58,7 @@ except ImportError:
     print("\n[!] Falta la dependencia 'psutil'.\n    Instálala con:  pip install psutil\n")
     sys.exit(1)
 
-from pcbench.cli import run
+from quilate.cli import run
 
 if __name__ == "__main__":
     sys.exit(run())

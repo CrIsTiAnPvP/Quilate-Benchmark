@@ -1,4 +1,4 @@
-"""PCBench Suite · benchmark, auditoría de optimización y estimación de mejora.
+"""Quilate Suite · benchmark, auditoría de optimización y estimación de mejora.
 
 El paquete está dividido por responsabilidades y el orden de importación va
 siempre de lo general a lo concreto, sin ciclos:
@@ -7,7 +7,7 @@ siempre de lo general a lo concreto, sin ciclos:
       └─ workloads ─ sysinfo ─ benchmark ─ audit ─ projection ─ components
            └─ report ─ export/{json,html,plan} ─ cli
 
-`pcbench.py`, en la raíz del proyecto, es solo el lanzador.
+`quilate.py`, en la raíz del proyecto, es solo el lanzador.
 """
 
 from __future__ import annotations

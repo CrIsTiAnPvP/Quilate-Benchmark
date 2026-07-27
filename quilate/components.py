@@ -14,7 +14,8 @@ from .audit import Auditor, Finding, SEVERITY_ORDER
 from .benchmark import BenchResult, Benchmark, SCORE_CAP, WEIGHTS
 from .console import grade, human_bytes
 from .projection import combine_gains
-from .sysinfo import SystemInfo
+from .sensors import temperature_source
+from .sysinfo import KIND_LABELS, SystemInfo, local_volumes
 
 
 # (clave, etiqueta, componentes de los hallazgos, claves del benchmark)
@@ -69,9 +70,20 @@ def _component_specs(key: str, si: SystemInfo, bench: Benchmark | None,
             pct = f" ({sustained / si.cpu_max_mhz * 100:.0f}% del máximo)" if si.cpu_max_mhz else ""
             out.append(("Frecuencia sostenida", f"{sustained:.0f} MHz{pct}"))
         temps = bench.thermal_samples if bench else []
-        out.append(("Temperatura bajo carga", f"{max(temps):.0f} °C" if temps else "no disponible"))
+        if temps:
+            source = temperature_source()
+            out.append(("Temperatura bajo carga",
+                        f"{max(temps):.0f} °C" + (f"  ·  {source}" if source else "")))
+        else:
+            out.append(("Temperatura bajo carga",
+                        "sin sensor accesible (instala LibreHardwareMonitor)"))
         if bench and bench.scaling_efficiency is not None:
             out.append(("Escalado multihilo", f"{bench.scaling_efficiency:.0f}%"))
+        if bench:
+            for key_metric in ("sustained", "freq_under_load"):
+                m = bench.metrics.get(key_metric)
+                if m:
+                    out.append((m["label"], f"{m['value']} {m['unit']}".strip()))
 
     elif key == "memory":
         total_gb = si.ram_total / 1024**3
@@ -94,24 +106,29 @@ def _component_specs(key: str, si: SystemInfo, bench: Benchmark | None,
                 out.append((f"  {s['slot']}", f"{desc}{'  ·  ' + extra if extra else ''}"))
         else:
             out.append(("Módulos instalados", "sin datos (requiere Windows)"))
+        if bench and bench.memory_hierarchy:
+            out.append(("Jerarquía de caché",
+                        " · ".join(f"{lv['level']} {lv['gbs']:.0f} GB/s"
+                                   for lv in bench.memory_hierarchy)))
 
     elif key == "disk":
         out.append(("Unidad de sistema", f"{si.system_drive}  ·  {si.system_drive_media}"))
-        seen: set[tuple] = set()
+        for p in si.physical_disks:
+            out.append(("Disco físico",
+                        f"{p['name']}  ·  {p['media']}  ·  {p['bus']}  ·  "
+                        f"{human_bytes(p['size'])}  ·  salud {p['health'] or 'n/d'}"))
+        for d in local_volumes(si):
+            out.append((f"Volumen {d['mount']}",
+                        f"{human_bytes(d['free'])} libres de {human_bytes(d['total'])} "
+                        f"({100 - d['percent']:.0f}% libre)  [{d['fstype']}]"))
         for d in si.disks:
-            for c in d.get("candidates", []):
-                ident = (c.get("name"), c.get("media"), c.get("health"))
-                if ident in seen or not c.get("name"):
-                    continue
-                seen.add(ident)
-                media = c.get("media")
-                out.append(("Disco físico", f"{c['name']}  ·  {media or 'tipo n/d'}"
-                                            f"  ·  salud {c.get('health') or 'n/d'}"))
-        for d in si.disks:
-            if d["total"] > 5 * 1024**3:
+            if d["ignored"] and d["total"] > 5 * 1024**3:
                 out.append((f"Volumen {d['mount']}",
-                            f"{human_bytes(d['free'])} libres de {human_bytes(d['total'])} "
-                            f"({100 - d['percent']:.0f}% libre)  [{d['fstype']}]"))
+                            f"{d['label'] or 'sin etiqueta'} — {KIND_LABELS.get(d['kind'], d['kind'])}"
+                            f", excluido de la auditoría"))
+        if bench and bench.metrics.get("disk_latency"):
+            m = bench.metrics["disk_latency"]
+            out.append((m["label"], f"{m['value']} {m['unit']}"))
 
     elif key == "gpu":
         for g in si.gpus:
@@ -120,7 +137,21 @@ def _component_specs(key: str, si: SystemInfo, bench: Benchmark | None,
             out.append(("  Driver", f"{g.get('driver')}  ·  {g.get('driver_date') or 'fecha n/d'}"
                                     + (f"  ({age} días)" if age is not None else "")))
             if g.get("vram"):
-                out.append(("  VRAM declarada", human_bytes(g["vram"])))
+                detail = human_bytes(g["vram"])
+                if g.get("vram_used"):
+                    detail += f"  ·  {human_bytes(g['vram_used'])} en uso"
+                if g.get("vram_source"):
+                    detail += f"  ·  según {g['vram_source']}"
+                out.append(("  VRAM", detail))
+            if g.get("temperature") is not None:
+                live = f"{g['temperature']:.0f} °C"
+                if g.get("utilization") is not None:
+                    live += f"  ·  {g['utilization']:.0f}% de uso"
+                if g.get("clock_mhz"):
+                    live += f"  ·  {g['clock_mhz']:.0f} MHz"
+                if g.get("power_w"):
+                    live += f"  ·  {g['power_w']:.0f} W"
+                out.append(("  Estado actual", live))
             if g.get("resolution"):
                 out.append(("  Modo de pantalla", str(g["resolution"])))
 

@@ -13,7 +13,8 @@ from typing import Any
 import psutil
 
 from .const import IS_LINUX, IS_WINDOWS
-from .platform_utils import is_admin, ps_json
+from .platform_utils import is_admin, ps_json, reg_read, winreg
+from .sensors import gpu_telemetry
 
 
 @dataclass
@@ -36,8 +37,10 @@ class SystemInfo:
     ram_channels: int | None = None
     gpus: list[dict] = field(default_factory=list)
     disks: list[dict] = field(default_factory=list)
+    physical_disks: list[dict] = field(default_factory=list)
     system_drive: str = ""
     system_drive_media: str = "Desconocido"
+    system_disk_number: int | None = None
     bios_date: str | None = None
     is_laptop: bool = False
     is_admin: bool = False
@@ -86,6 +89,11 @@ def collect_system_info() -> SystemInfo:
             "used": usage.used,
             "free": usage.free,
             "percent": usage.percent,
+            "label": "",
+            "kind": "local",     # local | cloud | network | removable | cdrom | virtual
+            "ignored": False,    # los que no son almacenamiento físico local no se auditan
+            "disk_number": None,
+            "physical": None,
         })
 
     si.system_drive = os.environ.get("SystemDrive", "C:") + "\\" if IS_WINDOWS else "/"
@@ -134,33 +142,40 @@ def _collect_windows_info(si: SystemInfo) -> None:
     gpus = ps_json("Get-CimInstance Win32_VideoController | "
                    "Select-Object Name,DriverVersion,DriverDate,AdapterRAM,CurrentHorizontalResolution,"
                    "CurrentVerticalResolution,CurrentRefreshRate")
+    vram_by_name = _vram_from_registry()
+    telemetry = {str(t["name"]).lower(): t for t in gpu_telemetry()}
     for g in gpus:
         drv_date = _parse_cim_date(g.get("DriverDate"))
+        name = str(g.get("Name") or "")
+        # AdapterRAM es un entero de 32 bits: se satura en 4 GB, así que una GPU
+        # de 8, 12 o 24 GB aparece siempre como 4 GB. El tamaño real está en el
+        # registro (qwMemorySize, 64 bits) y, en NVIDIA, en nvidia-smi.
+        vram = int(g.get("AdapterRAM") or 0)
+        vram_source = "Win32_VideoController"
+        reg_vram = vram_by_name.get(name.lower())
+        if reg_vram and reg_vram > vram:
+            vram, vram_source = reg_vram, "registro (qwMemorySize)"
+        live = telemetry.get(name.lower())
+        if live and live.get("vram"):
+            vram, vram_source = live["vram"], "nvidia-smi"
         si.gpus.append({
-            "name": g.get("Name"),
+            "name": name,
             "driver": g.get("DriverVersion"),
             "driver_date": drv_date.strftime("%Y-%m-%d") if drv_date else None,
             "driver_age_days": (datetime.now() - drv_date).days if drv_date else None,
-            "vram": int(g.get("AdapterRAM") or 0),
+            "vram": vram,
+            "vram_source": vram_source,
+            "vram_used": (live or {}).get("vram_used"),
+            "temperature": (live or {}).get("temperature"),
+            "utilization": (live or {}).get("utilization"),
+            "clock_mhz": (live or {}).get("clock_mhz"),
+            "power_w": (live or {}).get("power_w"),
             "resolution": f"{g.get('CurrentHorizontalResolution') or '?'}x"
                           f"{g.get('CurrentVerticalResolution') or '?'}"
                           f" @ {g.get('CurrentRefreshRate') or '?'}Hz",
         })
 
-    phys = ps_json("Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,BusType,"
-                   "Size,HealthStatus,SpindleSpeed")
-    media_types = []
-    for p in phys:
-        mt = p.get("MediaType")
-        if isinstance(mt, int):
-            mt = {3: "HDD", 4: "SSD", 5: "SCM"}.get(mt, "Desconocido")
-        media_types.append(str(mt))
-        for d in si.disks:
-            d.setdefault("candidates", []).append({
-                "name": p.get("FriendlyName"), "media": mt, "bus": p.get("BusType"),
-                "health": p.get("HealthStatus"),
-            })
-    si.system_drive_media = _guess_system_media(media_types)
+    _map_storage(si)
 
     bios = ps_json("Get-CimInstance Win32_BIOS | Select-Object ReleaseDate,SMBIOSBIOSVersion,Manufacturer")
     if bios:
@@ -175,8 +190,127 @@ def _collect_windows_info(si: SystemInfo) -> None:
         si.is_laptop = any(t in (8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32) for t in types)
 
 
+def _vram_from_registry() -> dict[str, int]:
+    """VRAM real por adaptador, leída de la clase de dispositivos de pantalla."""
+    if not IS_WINDOWS or winreg is None:
+        return {}
+    base = (r"SYSTEM\CurrentControlSet\Control\Class"
+            r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
+    out: dict[str, int] = {}
+    for index in range(12):
+        path = f"{base}\\{index:04d}"
+        desc = reg_read(winreg.HKEY_LOCAL_MACHINE, path, "DriverDesc")
+        if not desc:
+            continue
+        for value_name in ("HardwareInformation.qwMemorySize",
+                           "HardwareInformation.MemorySize"):
+            raw = reg_read(winreg.HKEY_LOCAL_MACHINE, path, value_name)
+            size = 0
+            if isinstance(raw, int):
+                size = raw
+            elif isinstance(raw, bytes):     # algunos drivers lo guardan binario
+                size = int.from_bytes(raw, "little")
+            if size > 0:
+                out[str(desc).lower()] = max(out.get(str(desc).lower(), 0), size)
+    return out
+
+
+# Etiquetas de volumen que delatan un almacenamiento sincronizado en la nube.
+CLOUD_HINTS = ("google drive", "onedrive", "one drive", "dropbox", "icloud",
+               "mega", "pcloud", "box", "nextcloud", "owncloud", "yandex",
+               "tresorit", "sharepoint", "sync.com", "proton drive", "koofr")
+
+DRIVE_TYPES = {2: "removable", 3: "local", 4: "network", 5: "cdrom", 6: "virtual"}
+
+BUS_TYPES = {1: "SCSI", 2: "ATAPI", 3: "ATA", 4: "1394", 5: "SSA", 6: "Fibre Channel",
+             7: "USB", 8: "RAID", 9: "iSCSI", 10: "SAS", 11: "SATA", 12: "SD",
+             13: "MMC", 15: "Virtual", 16: "Storage Spaces", 17: "NVMe", 18: "SCM"}
+
+KIND_LABELS = {"local": "local", "cloud": "nube (sincronizado)", "network": "unidad de red",
+               "removable": "extraíble", "cdrom": "óptica", "virtual": "virtual"}
+
+
+def _map_storage(si: SystemInfo) -> None:
+    """Clasifica cada volumen y lo une con su disco físico.
+
+    Hace falta porque psutil ve «un disco fijo de 930 GB con FAT32» donde en
+    realidad hay una carpeta de Google Drive montada como unidad. Auditar el
+    espacio libre de eso no tiene sentido: no es almacenamiento del equipo, su
+    tamaño es ficticio y no se puede liberar borrando archivos locales.
+    """
+    logical = {}
+    for row in ps_json("Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,"
+                       "DriveType,ProviderName,VolumeName,FileSystem"):
+        letter = str(row.get("DeviceID") or "")[:1].upper()
+        if letter:
+            logical[letter] = row
+
+    letter_to_disk: dict[str, int] = {}
+    for row in ps_json("Get-Partition | Where-Object DriveLetter | "
+                       "Select-Object DriveLetter,DiskNumber"):
+        letter = str(row.get("DriveLetter") or "")[:1].upper()
+        number = row.get("DiskNumber")
+        if letter and number is not None:
+            letter_to_disk[letter] = int(number)
+
+    for p in ps_json("Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,"
+                     "BusType,Size,HealthStatus,SpindleSpeed"):
+        media = p.get("MediaType")
+        if isinstance(media, int):
+            media = {3: "HDD", 4: "SSD", 5: "SCM"}.get(media, "Desconocido")
+        bus = p.get("BusType")
+        if isinstance(bus, int):
+            bus = BUS_TYPES.get(bus, f"tipo {bus}")
+        try:
+            number = int(p.get("DeviceId"))
+        except (TypeError, ValueError):
+            number = None
+        si.physical_disks.append({
+            "number": number,
+            "name": p.get("FriendlyName"),
+            "media": str(media or "Desconocido"),
+            "bus": str(bus or "?"),
+            "size": int(p.get("Size") or 0),
+            "health": p.get("HealthStatus"),
+            "rpm": p.get("SpindleSpeed"),
+        })
+    by_number = {d["number"]: d for d in si.physical_disks if d["number"] is not None}
+
+    for d in si.disks:
+        letter = str(d["mount"])[:1].upper()
+        info = logical.get(letter, {})
+        label = str(info.get("VolumeName") or "").strip()
+        provider = str(info.get("ProviderName") or "").strip()
+        drive_type = info.get("DriveType")
+        kind = DRIVE_TYPES.get(int(drive_type), "local") if drive_type is not None else "local"
+
+        if provider or kind == "network":
+            kind = "network"
+        elif any(h in label.lower() for h in CLOUD_HINTS):
+            kind = "cloud"
+        elif kind == "local" and letter not in letter_to_disk:
+            # Sin partición detrás no hay disco: subst, ramdisk, contenedor cifrado
+            # o un cliente de nube que monta su propio sistema de ficheros.
+            kind = "virtual"
+
+        d["label"] = label
+        d["kind"] = kind
+        d["ignored"] = kind != "local"
+        d["disk_number"] = letter_to_disk.get(letter)
+        d["physical"] = by_number.get(d["disk_number"]) if d["disk_number"] is not None else None
+
+    sys_letter = str(si.system_drive)[:1].upper()
+    si.system_disk_number = letter_to_disk.get(sys_letter)
+    system_disk = by_number.get(si.system_disk_number) if si.system_disk_number is not None else None
+    if system_disk:
+        si.system_drive_media = system_disk["media"]
+    else:
+        si.system_drive_media = _guess_system_media(
+            [d["physical"]["media"] for d in si.disks if d.get("physical")])
+
+
 def _guess_system_media(media_types: list[str]) -> str:
-    """Determina el tipo de disco de sistema de forma conservadora."""
+    """Respaldo cuando no se puede resolver el disco exacto del volumen."""
     if not media_types:
         return "Desconocido"
     normalized = [m.upper() for m in media_types]
@@ -185,6 +319,11 @@ def _guess_system_media(media_types: list[str]) -> str:
     if all("HDD" in m for m in normalized):
         return "HDD"
     return "Mixto (" + ", ".join(sorted(set(media_types))) + ")"
+
+
+def local_volumes(si: SystemInfo, min_size: int = 5 * 1024**3) -> list[dict]:
+    """Volúmenes que son almacenamiento físico del equipo y merecen auditarse."""
+    return [d for d in si.disks if not d["ignored"] and d["total"] >= min_size]
 
 
 def _collect_linux_info(si: SystemInfo) -> None:

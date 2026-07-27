@@ -12,15 +12,15 @@ import time
 from dataclasses import dataclass
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import psutil
 
 from .console import C, section, spinner_done, spinner_step
-from .const import IS_WINDOWS
-from .platform_utils import ps_json
-from .workloads import (_mp_unit, build_corpus, work_compress, work_float,
-                        work_hash, work_memcpy, work_sieve)
+from .sensors import (cpu_frequency_mhz, cpu_temperature, gpu_telemetry,
+                      temperature_source)
+from .workloads import (_mp_unit, build_corpus, memcpy_bandwidth, work_compress,
+                        work_float, work_hash, work_memcpy, work_sieve)
 
 
 REFERENCE = {
@@ -70,6 +70,10 @@ class Benchmark:
         self.freq_samples: list[float] = []
         self.disk_on_ram = False
         self.scaling_efficiency: float | None = None
+        # Métricas que no puntúan pero explican el porqué de la puntuación.
+        self.metrics: dict[str, dict] = {}
+        self.memory_hierarchy: list[dict] = []
+        self.load_snapshots: list[dict] = []   # antes / después de la carga pesada
 
     # -- helpers ----------------------------------------------------------------
     def _timed(self, fn: Callable, *args, runs: int | None = None) -> float:
@@ -90,13 +94,32 @@ class Benchmark:
                 self.freq_samples.append(freq.current)
         except Exception:
             pass
-        temp = read_cpu_temperature()
+        temp = cpu_temperature()
         if temp:
             self.thermal_samples.append(temp)
 
     def _register(self, key: str, name: str, unit: str, raw: float, score: float,
                   detail: str = "") -> None:
         self.results[key] = BenchResult(name, unit, raw, max(0.0, score), detail)
+
+    def _metric(self, key: str, label: str, value: Any, unit: str = "", note: str = "") -> None:
+        """Dato medido que no entra en la nota pero sí en el diagnóstico."""
+        self.metrics[key] = {"label": label, "value": value, "unit": unit, "note": note}
+
+    def _snapshot(self, moment: str) -> dict:
+        """Foto de frecuencia, temperatura y GPU en un instante de la sesión."""
+        mhz, freq_source = cpu_frequency_mhz()
+        gpu = gpu_telemetry()
+        snap = {
+            "moment": moment,
+            "cpu_mhz": mhz,
+            "cpu_mhz_source": freq_source,
+            "cpu_temp": cpu_temperature(),
+            "gpu_temp": max((g["temperature"] for g in gpu if g.get("temperature")), default=None),
+            "gpu_power_w": max((g["power_w"] for g in gpu if g.get("power_w")), default=None),
+        }
+        self.load_snapshots.append(snap)
+        return snap
 
     def _target_fstype(self) -> str:
         """Sistema de ficheros del directorio de pruebas (para detectar ramdisks)."""
@@ -151,6 +174,7 @@ class Benchmark:
         threads = psutil.cpu_count(logical=True) or 1
         tasks = threads * (2 if self.quick else 4)
         spinner_step(f"CPU {threads}T · carga paralela ({tasks} uds)".ljust(38))
+        before = self._snapshot("antes de la carga")
         t0 = time.perf_counter()
         try:
             with Pool(processes=threads) as pool:
@@ -159,6 +183,8 @@ class Benchmark:
             spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
             return
         wall = time.perf_counter() - t0
+        after = self._snapshot("con todos los núcleos cargados")
+        self._register_thermal_behaviour(before, after, per_task)
         tps = tasks / wall
         score = tps / REFERENCE["mp_tps"] * 100
         single_task = statistics.median(per_task)
@@ -168,6 +194,61 @@ class Benchmark:
                        f"{threads} hilos · escalado {efficiency:.0f}%")
         self.scaling_efficiency = efficiency
         spinner_done(f"{tps:.2f} uds/s → {score:.0f} pts  (escalado {efficiency:.0f}%)")
+
+    def _register_thermal_behaviour(self, before: dict, after: dict,
+                                    per_task: list[float]) -> None:
+        """Comportamiento bajo carga sostenida.
+
+        Es la métrica que más explica el rendimiento real de un equipo ya usado:
+        dos máquinas idénticas puntúan igual en una ráfaga corta y muy distinto
+        cuando una de ellas baja de frecuencia a los treinta segundos. Comparar
+        las primeras unidades de trabajo con las últimas lo detecta sin
+        necesidad de sensores: si las últimas tardan más, algo está limitando.
+        """
+        if len(per_task) >= 4:
+            quarter = max(1, len(per_task) // 4)
+            first = statistics.mean(per_task[:quarter])
+            last = statistics.mean(per_task[-quarter:])
+            if first > 0:
+                retention = min(100.0, first / last * 100) if last else 100.0
+                self._metric("sustained", "Rendimiento sostenido", round(retention, 1), "%",
+                             "trabajo del último cuarto frente al primero; por debajo de "
+                             "~90% indica límite térmico o de potencia")
+        if before.get("cpu_mhz") and after.get("cpu_mhz"):
+            note = f"en reposo marcaba {before['cpu_mhz']:.0f} MHz"
+            if "nominal" in after.get("cpu_mhz_source", ""):
+                note += " · dato nominal: este sistema no expone la frecuencia real"
+            self._metric("freq_under_load", "Frecuencia con todos los núcleos",
+                         round(after["cpu_mhz"]), "MHz", note)
+        if after.get("cpu_temp"):
+            delta = ""
+            if before.get("cpu_temp"):
+                delta = f"subió {after['cpu_temp'] - before['cpu_temp']:+.0f} °C durante la carga"
+            self._metric("cpu_temp_load", "Temperatura de CPU bajo carga",
+                         round(after["cpu_temp"], 1), "°C", delta)
+        if after.get("gpu_temp"):
+            self._metric("gpu_temp", "Temperatura de GPU", round(after["gpu_temp"], 1), "°C",
+                         "leída del propio driver (nvidia-smi)")
+        if after.get("gpu_power_w"):
+            self._metric("gpu_power", "Consumo de GPU", round(after["gpu_power_w"], 1), "W",
+                         "en reposo durante el test de CPU")
+
+    def run_memory_hierarchy(self) -> None:
+        """Recorre la jerarquía de cachés hasta la RAM."""
+        spinner_step("RAM · jerarquía de caché".ljust(38))
+        budget = 0.15 if self.quick else 0.3
+        levels = [("L1/L2", 16 * 1024), ("L2", 192 * 1024),
+                  ("L3", 4 * 1024**2), ("RAM", 64 * 1024**2)]
+        for label, size in levels:
+            gbs = memcpy_bandwidth(size, budget)
+            self.memory_hierarchy.append({"level": label, "size": size, "gbs": round(gbs, 2)})
+        best = max(self.memory_hierarchy, key=lambda x: x["gbs"])
+        dram = self.memory_hierarchy[-1]
+        ratio = best["gbs"] / dram["gbs"] if dram["gbs"] else 0
+        spinner_done(" · ".join(f"{lv['level']} {lv['gbs']:.0f}" for lv in self.memory_hierarchy)
+                     + " GB/s")
+        self._metric("cache_ratio", "Caché frente a RAM", round(ratio, 1), "×",
+                     "cuánto más rápida es la caché que la memoria principal")
 
     def run_memory(self) -> None:
         spinner_step("RAM · ancho de banda".ljust(38))
@@ -189,7 +270,7 @@ class Benchmark:
                   f"que quieras medir.{C.RESET}")
             self.disk_on_ram = True
 
-        path = Path(self.target_dir) / f".pcbench_{os.getpid()}.tmp"
+        path = Path(self.target_dir) / f".quilate_{os.getpid()}.tmp"
         size = self.disk_size_mb * 1024 * 1024
         block = os.urandom(1024 * 1024)
         try:
@@ -250,6 +331,16 @@ class Benchmark:
                            "cifras muy altas (>200k) indican que el fichero cabía en la caché "
                            "del SO: usa --disk-size 2048 o mayor para medir el disco de verdad")
             spinner_done(f"{iops:,.0f} IOPS → {iscore:.0f} pts")
+
+            # La latencia por operación es lo que se percibe al abrir programas:
+            # más representativa que las IOPS agregadas, y comparable entre equipos.
+            latency_us = it / ops * 1e6
+            note = ("tiempo de una lectura aleatoria con cola 1: <100 µs NVMe, "
+                    "~200 µs SATA, >5.000 µs disco mecánico")
+            if latency_us < 20:
+                note += (" · por debajo de 20 µs el fichero se estaba sirviendo desde la "
+                         "caché del SO, no desde el disco: sube --disk-size")
+            self._metric("disk_latency", "Latencia media 4K", round(latency_us, 1), "µs", note)
         except Exception as exc:
             spinner_done(f"error: {exc}", ok=False)
         finally:
@@ -264,7 +355,23 @@ class Benchmark:
         self.run_cpu_single()
         self.run_cpu_multi()
         self.run_memory()
+        self.run_memory_hierarchy()
         self.run_disk()
+        self._finish()
+
+    def _finish(self) -> None:
+        """Cierra la sesión anotando de dónde salió (o no) cada dato sensible."""
+        source = temperature_source()
+        if source:
+            self._metric("temp_source", "Fuente de temperatura de CPU", source)
+        elif self.thermal_samples:
+            self._metric("temp_source", "Fuente de temperatura de CPU", "sensores del sistema")
+        for g in gpu_telemetry():
+            if g.get("utilization") is not None:
+                self._metric("gpu_idle_load", "GPU en reposo durante el test",
+                             round(g["utilization"]), "%",
+                             f"{g['name']} · {g['clock_mhz']:.0f} MHz" if g.get("clock_mhz") else "")
+            break
 
     # -- agregación ------------------------------------------------------------
     def component_scores(self) -> dict[str, float]:
@@ -293,28 +400,3 @@ class Benchmark:
             return 0.0
         total_w = sum(WEIGHTS[k] for k in comp)
         return sum(min(comp[k], SCORE_CAP) * WEIGHTS[k] for k in comp) / total_w
-
-
-def read_cpu_temperature() -> float | None:
-    """Temperatura de CPU (°C) por el método disponible en la plataforma."""
-    try:
-        temps = psutil.sensors_temperatures()  # type: ignore[attr-defined]
-        for key in ("coretemp", "k10temp", "zenpower", "cpu_thermal", "acpitz"):
-            if key in temps and temps[key]:
-                return max(t.current for t in temps[key] if t.current)
-        for entries in temps.values():
-            vals = [t.current for t in entries if t.current]
-            if vals:
-                return max(vals)
-    except (AttributeError, OSError):
-        pass
-    if IS_WINDOWS:
-        data = ps_json('Get-CimInstance -Namespace "root/WMI" -ClassName MSAcpi_ThermalZoneTemperature '
-                       '-ErrorAction SilentlyContinue | Select-Object CurrentTemperature', timeout=12)
-        for d in data:
-            raw = d.get("CurrentTemperature")
-            if raw:
-                celsius = (int(raw) / 10.0) - 273.15
-                if 10 < celsius < 120:
-                    return round(celsius, 1)
-    return None

@@ -19,7 +19,8 @@ from ..console import grade
 from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE, WEBSITE_URL
 from ..projection import priority_rank
 from ..report import build_verdict
-from ..sysinfo import SystemInfo
+from ..storage_scan import (RECLAIMABLE, REVIEWABLE, ScanResult, candidate_bytes)
+from ..sysinfo import KIND_LABELS, SystemInfo
 
 COMPONENT_LABELS = {"cpu_single": "CPU monohilo", "cpu_multi": "CPU multihilo",
                     "memory": "Memoria", "disk": "Almacenamiento"}
@@ -70,6 +71,12 @@ ICONS = {
     "i-chev": '<polyline points="9 18 15 12 9 6"/>',
     "i-up": '<line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>',
     "i-clock": '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    "i-wrench": '<path d="M14.7 6.3a4 4 0 0 0 5 5l-9.4 9.4a2.1 2.1 0 0 1-3-3z"/>'
+                '<path d="M14.7 6.3 18 3l3 3-3.3 3.3"/>',
+    "i-folder": '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 '
+                '2 2z"/>',
+    "i-gauge": '<path d="M12 21a9 9 0 1 1 9-9"/><line x1="12" y1="12" x2="17" y2="8"/>'
+               '<circle cx="12" cy="12" r="1.6"/>',
     "i-shield": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
 }
 
@@ -197,6 +204,25 @@ border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:14px}
 .finding ul{margin:0;padding-left:20px;color:#c9d1d9;font-size:14px}
 .finding li{margin-bottom:5px}
 .finding:target{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+details.howto{margin-top:14px;border:1px solid var(--line);border-radius:9px;
+background:rgba(88,166,255,.04)}
+details.howto>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:9px;
+padding:10px 13px;font-size:13px;font-weight:600;color:var(--acc);user-select:none}
+details.howto>summary::-webkit-details-marker{display:none}
+details.howto>summary:hover{background:rgba(88,166,255,.07)}
+details.howto>summary .cnt{margin-left:auto;color:var(--dim);font-size:11px;font-weight:500}
+details.howto>summary .chev{color:var(--dim);transition:transform .18s}
+details.howto[open]>summary{border-bottom:1px solid var(--line)}
+details.howto[open]>summary .chev{transform:rotate(90deg)}
+.howto-body{padding:6px 14px 14px}
+.howto-item{padding:12px 0;border-bottom:1px dashed var(--line)}
+.howto-item:last-child{border-bottom:none;padding-bottom:0}
+.howto-item h4{margin:0 0 5px;font-size:14px}
+.howto-item ol{margin:9px 0 0;padding-left:20px;font-size:14px;color:#c9d1d9}
+.howto-item li{margin-bottom:6px}
+.scan-note{color:var(--dim);font-size:13px;margin:0 0 12px}
+.pathcell{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;
+word-break:break-all}
 code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:13px;
 font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 .verdict{border-left:3px solid var(--acc);background:rgba(88,166,255,.06)}
@@ -413,31 +439,41 @@ def _inventory(si: SystemInfo) -> str:
     kvs = "".join(f'<div class="k">{_e(k)}</div><div>{_e(v)}</div>' for k, v in rows)
     out = [f'<div class="card"><div class="kvs">{kvs}</div></div>']
 
-    # Get-PhysicalDisk devuelve el mismo disco repetido por cada volumen.
-    seen: set[tuple] = set()
     phys = ""
-    for d in si.disks:
-        for c in d.get("candidates", []):
-            ident = (c.get("name"), c.get("media"), c.get("health"))
-            if not c.get("name") or ident in seen:
-                continue
-            seen.add(ident)
-            health = str(c.get("health") or "n/d")
-            color = "var(--ok)" if health.lower() in ("healthy", "sano", "0") else "var(--bad)"
-            phys += (f"<tr><td>{_e(c['name'])}</td><td>{_e(c.get('media') or 'n/d')}</td>"
-                     f'<td style="color:{color}">{_e(health)}</td></tr>')
+    for p in si.physical_disks:
+        health = str(p.get("health") or "n/d")
+        color = "var(--ok)" if health.lower() in ("healthy", "sano", "0") else "var(--bad)"
+        phys += (f"<tr><td>{_e(p['name'])}</td><td>{_e(p['media'])}</td>"
+                 f"<td>{_e(p['bus'])}</td><td>{_human(p['size'])}</td>"
+                 f'<td style="color:{color}">{_e(health)}</td></tr>')
     if phys:
         out.append('<div class="card"><div class="sub-h">Discos físicos</div><div class="tw">'
-                   "<table><tr><th>Unidad</th><th>Tipo</th><th>Salud</th></tr>"
-                   + phys + "</table></div></div>")
+                   "<table><tr><th>Unidad</th><th>Tipo</th><th>Conexión</th><th>Capacidad</th>"
+                   "<th>Salud</th></tr>" + phys + "</table></div></div>")
 
     vols = ""
     for d in si.disks:
         if d["total"] <= 5 * 1024**3:
             continue
+        name = f"<b>{_e(d['mount'])}</b>"
+        if d["label"]:
+            name += f'<div class="tags">{_e(d["label"])}</div>'
+        if d["ignored"]:
+            # Un volumen de nube o de red informa de un tamaño que no es del
+            # equipo: se muestra para que se vea, pero sin barra ni semáforo,
+            # porque «liberar espacio» ahí no significa nada.
+            kind = KIND_LABELS.get(d["kind"], d["kind"])
+            vols += (f"<tr><td>{name}</td><td>{_e(d['fstype'])}</td>"
+                     f"<td>{_human(d['free'])}</td><td>{_human(d['total'])}</td>"
+                     f'<td colspan="2"><span class="badge b-info">{_e(kind)}</span> '
+                     f'<span style="color:var(--dim)">excluido de la auditoría</span></td></tr>')
+            continue
         free_pct = 100 - d["percent"]
         color = "var(--bad)" if free_pct < 10 else "var(--warn)" if free_pct < 20 else "var(--ok)"
-        vols += (f"<tr><td><b>{_e(d['mount'])}</b></td><td>{_e(d['fstype'])}</td>"
+        disk = d.get("physical") or {}
+        media = f'<div class="tags">{_e(disk.get("media", ""))} · {_e(disk.get("bus", ""))}</div>' \
+            if disk else ""
+        vols += (f"<tr><td>{name}</td><td>{_e(d['fstype'])}{media}</td>"
                  f"<td>{_human(d['free'])}</td><td>{_human(d['total'])}</td>"
                  f'<td style="color:{color}">{free_pct:.0f}% libre</td>'
                  f'<td><div class="track"><div class="fill" style="width:{d["percent"]:.0f}%;'
@@ -467,6 +503,35 @@ def _benchmark_table(bench: Benchmark) -> str:
               f'<td style="color:{_score_color(overall)}"><b>{overall:.0f}</b></td>'
               f"<td><b>{letter}</b></td><td>{_html_bar(overall)}</td></tr>"
               "</table></div></div>")
+
+
+def _howto_subcard(card: ComponentCard) -> str:
+    """Subtarjeta plegada con el «cómo» de cada mejora del componente.
+
+    Va cerrada por defecto a propósito: la ficha se lee de un vistazo para
+    decidir, y solo se despliega el procedimiento del que se vaya a aplicar.
+    """
+    steps_total = sum(len(f.steps) for f in card.findings)
+    if not steps_total:
+        return ""
+    blocks = ""
+    for i, f in enumerate(card.findings, 1):
+        if not f.steps:
+            continue
+        steps = "".join(f"<li>{_e(s)}</li>" for s in f.steps)
+        gain = (f'<span class="gain">+{f.gain * 100:.0f}%</span> ' if f.gain else "")
+        blocks += (f'<div class="howto-item"><h4>{i}. {_e(f.title)}</h4>'
+                   f'<div class="tags">{gain}<span class="badge b-{f.severity}">{f.severity}'
+                   f"</span> &nbsp; esfuerzo {_e(f.effort)} · riesgo {_e(f.risk)}"
+                   f"{' · ' + _e(f.gain_note) if f.gain_note else ''}</div>"
+                   f"<ol>{steps}</ol></div>")
+    procedures = sum(1 for f in card.findings if f.steps)
+    count = (f"{procedures} procedimiento{'s' if procedures != 1 else ''} · "
+             f"{steps_total} paso{'s' if steps_total != 1 else ''}")
+    return (f'<details class="howto"><summary>{_icon("i-wrench")}'
+            f'Cómo aplicar estas mejoras<span class="cnt">{count}</span>'
+            f'{_icon("i-chev", "ic chev")}</summary>'
+            f'<div class="howto-body">{blocks}</div></details>')
 
 
 def _html_component_cards(cards: list[ComponentCard]) -> str:
@@ -514,6 +579,7 @@ def _html_component_cards(cards: list[ComponentCard]) -> str:
                           f"</span> &nbsp; {_e(f.category)} · esfuerzo {_e(f.effort)} · riesgo "
                           f"{_e(f.risk)} · {_e(f.gain_note)}</div></li>")
             block.append(f'<div class="sub-h">{head}</div><ul class="imp">{items}</ul>')
+            block.append(_howto_subcard(card))
         else:
             block.append('<div class="sub-h">Mejoras aplicables</div>'
                          '<p class="ok-note">Sin mejoras pendientes.</p>')
@@ -521,6 +587,97 @@ def _html_component_cards(cards: list[ComponentCard]) -> str:
         block.append("</div>")
         parts.append("".join(block))
     return "".join(parts)
+
+
+def _metrics_block(bench: Benchmark) -> str:
+    """Métricas que no puntúan pero explican el porqué de la puntuación."""
+    if not bench.metrics and not bench.memory_hierarchy:
+        return ""
+    out = ""
+    if bench.memory_hierarchy:
+        peak = max(lv["gbs"] for lv in bench.memory_hierarchy) or 1
+        trs = ""
+        for lv in bench.memory_hierarchy:
+            trs += (f"<tr><td><b>{_e(lv['level'])}</b></td><td>bloques de "
+                    f"{_human(lv['size'])}</td><td>{lv['gbs']:.1f} GB/s</td>"
+                    f'<td><div class="track"><div class="fill" '
+                    f'style="width:{lv["gbs"] / peak * 100:.0f}%;background:var(--acc)">'
+                    f"</div></div></td></tr>")
+        out += ('<div class="card"><div class="sub-h">Jerarquía de memoria</div>'
+                '<p class="scan-note">Ancho de banda de copia según el tamaño del bloque. '
+                'Mientras el dato cabe en caché la cifra se mantiene; la caída final es el '
+                'salto a la RAM.</p><div class="tw"><table>' + trs + "</table></div></div>")
+    if bench.metrics:
+        trs = ""
+        for m in bench.metrics.values():
+            value = f"{m['value']} {m['unit']}".strip()
+            note = f'<div class="tags">{_e(m["note"])}</div>' if m["note"] else ""
+            trs += f"<tr><td>{_e(m['label'])}{note}</td><td><b>{_e(value)}</b></td></tr>"
+        out += ('<div class="card"><div class="sub-h">Métricas de diagnóstico</div>'
+                '<div class="tw"><table>' + trs + "</table></div></div>")
+    return out
+
+
+def _storage_scan_block(scan: ScanResult) -> str:
+    safe, review = candidate_bytes(scan)
+    head = (f'<p class="scan-note">Umbral {_human(scan.min_size)} · '
+            f"{scan.scanned_files:,} ficheros y {scan.scanned_dirs:,} carpetas revisados en "
+            f"{scan.elapsed:.0f} s".replace(",", ".") + "</p>")
+    if scan.truncated:
+        head += ('<p class="scan-note" style="color:var(--warn)">Rastreo parcial: se agotó el '
+                 "presupuesto de tiempo. Amplíalo con <code>--scan-time 60</code>.</p>")
+    if not scan.files and not scan.special:
+        return head + '<p class="ok-note">Nada por encima del umbral.</p>'
+
+    out = f'<div class="card">{head}'
+    if scan.by_category:
+        trs = ""
+        biggest = max(v["size"] for v in scan.by_category.values()) or 1
+        for cat, data in scan.by_category.items():
+            if cat in RECLAIMABLE:
+                tag = '<span class="badge b-low">se puede borrar</span>'
+                color = "var(--ok)"
+            elif cat in REVIEWABLE:
+                tag = '<span class="badge b-medium">revisar</span>'
+                color = "var(--warn)"
+            else:
+                tag = ""
+                color = "var(--dim)"
+            trs += (f"<tr><td>{_e(cat.capitalize())}</td><td>{_human(data['size'])}</td>"
+                    f"<td>{data['count']}</td><td>{tag}</td>"
+                    f'<td><div class="track"><div class="fill" '
+                    f'style="width:{data["size"] / biggest * 100:.0f}%;background:{color}">'
+                    f"</div></div></td></tr>")
+        out += ('<div class="sub-h">Por tipo</div><div class="tw"><table>'
+                "<tr><th>Categoría</th><th>Tamaño</th><th>Ficheros</th><th></th><th></th></tr>"
+                + trs + "</table></div>"
+                f'<p class="scan-note">Total {_human(scan.total_large)}: '
+                f'<span class="gain">{_human(safe)}</span> es basura y '
+                f'<span style="color:var(--warn)">{_human(review)}</span> son candidatos '
+                f"a revisar antes de borrar.</p>")
+    out += "</div>"
+
+    if scan.files:
+        trs = ""
+        for f in scan.files:
+            trs += (f"<tr><td>{_human(f['size'])}</td><td>{_e(f['category'])}</td>"
+                    f"<td>{f['age_days']} días</td>"
+                    f'<td class="pathcell">{_e(f["path"])}</td></tr>')
+        out += ('<div class="card"><div class="sub-h">Los ficheros más grandes</div>'
+                '<div class="tw"><table><tr><th>Tamaño</th><th>Tipo</th><th>Sin tocar</th>'
+                "<th>Ruta</th></tr>" + trs + "</table></div></div>")
+
+    if scan.special:
+        trs = ""
+        for s in scan.special:
+            trs += (f"<tr><td>{_e(s['name'])}</td>"
+                    f"<td>{_human(s['size']) if s['size'] else '—'}</td>"
+                    f"<td>{_e(s['note'])}</td></tr>")
+        out += ('<div class="card"><div class="sub-h">Archivos de sistema</div>'
+                '<p class="scan-note">Ocupan mucho y tienen su función: no se borran a mano.'
+                '</p><div class="tw"><table><tr><th>Archivo</th><th>Tamaño</th><th>Qué es</th>'
+                "</tr>" + trs + "</table></div></div>")
+    return out
 
 
 def _projection_tables(projection: dict[str, Any]) -> str:
@@ -563,10 +720,17 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         ("inventario", "Inventario", "i-box", _inventory(si), ""),
     ]
     if bench and bench.results:
-        secs.append(("benchmark", "Benchmark", "i-chart", _benchmark_table(bench),
+        secs.append(("benchmark", "Benchmark", "i-chart",
+                     _benchmark_table(bench) + _metrics_block(bench),
                      f"{len(bench.results)} pruebas"))
     secs.append(("componentes", "Ficha por componente", "i-cpu",
                  _html_component_cards(cards), f"{len(cards)} componentes"))
+
+    scan = getattr(auditor, "scan", None)
+    if scan is not None and scan.available and (scan.files or scan.special):
+        safe, review = candidate_bytes(scan)
+        secs.append(("archivos", "Archivos grandes", "i-folder", _storage_scan_block(scan),
+                     f"{_human(safe + review)} prescindibles"))
     if projection.get("current_components"):
         secs.append(("proyeccion", "Proyección de mejora", "i-trend",
                      _projection_tables(projection),
@@ -622,7 +786,7 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         f"<style>{HTML_CSS}</style></head><body>"
         f"{_sprite()}"
         '<div class="topbar"><div class="tb">'
-        f'<div class="logo">PCBench <b>Suite</b></div><nav>{nav}</nav>'
+        f'<div class="logo">Quilate <b>Suite</b></div><nav>{nav}</nav>'
         '<button class="btn" id="toggle-all" data-open="1">'
         f'{_icon("i-list")}<span>Colapsar todo</span></button>'
         "</div></div>"

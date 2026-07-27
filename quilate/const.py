@@ -11,8 +11,8 @@ import platform
 # ------------------------------------------------------------------------------
 # BRANDING
 # ------------------------------------------------------------------------------
-APP_NAME = "PCBench Suite"
-APP_VERSION = "1.5.0"
+APP_NAME = "Quilate Suite"
+APP_VERSION = "2.0.0"
 AUTHOR = "Cristian Alonso"
 WEBSITE = "cristianac.es"
 WEBSITE_URL = "https://cristianac.es"

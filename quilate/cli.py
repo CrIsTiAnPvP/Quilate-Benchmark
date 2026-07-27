@@ -15,19 +15,20 @@ from .export import export_html, export_json, export_plan
 from .platform_utils import is_admin
 from .projection import project_improvement
 from .report import print_report
+from .storage_scan import ScanResult, default_roots, scan_large_files
 from .sysinfo import collect_system_info
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="pcbench",
+        prog="quilate",
         description=f"{APP_NAME} — benchmark, auditoría y estimación de mejora. "
                     f"{AUTHOR} · {WEBSITE_URL}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Ejemplos:\n"
-               "  python pcbench.py\n"
-               "  python pcbench.py --quick --no-color\n"
-               "  python pcbench.py --disk-size 1024 --html informe.html --export-plan\n",
+               "  python quilate.py\n"
+               "  python quilate.py --quick --no-color\n"
+               "  python quilate.py --disk-size 1024 --html informe.html --export-plan\n",
     )
     p.add_argument("--quick", action="store_true", help="benchmark rápido (menor precisión)")
     p.add_argument("--no-bench", action="store_true", help="solo auditoría, sin benchmark")
@@ -36,9 +37,17 @@ def parse_args() -> argparse.Namespace:
                    help="tamaño del fichero de prueba de disco (por defecto 512)")
     p.add_argument("--disk-path", metavar="RUTA", default=None,
                    help="carpeta donde hacer el test de disco (por defecto: temporal del sistema)")
-    p.add_argument("--json", metavar="FICHERO", nargs="?", const="pcbench_datos.json",
+    p.add_argument("--no-files", action="store_true",
+                   help="omitir el rastreo de archivos grandes")
+    p.add_argument("--scan-path", metavar="RUTA", action="append", default=None,
+                   help="carpeta extra a rastrear (repetible; por defecto perfil y disco de sistema)")
+    p.add_argument("--scan-time", type=float, default=30.0, metavar="SEG",
+                   help="presupuesto de tiempo del rastreo de archivos (por defecto 30 s)")
+    p.add_argument("--min-file-size", type=int, default=128, metavar="MB",
+                   help="tamaño mínimo para considerar un archivo grande (por defecto 128 MB)")
+    p.add_argument("--json", metavar="FICHERO", nargs="?", const="quilate_datos.json",
                    help="exportar los datos crudos a JSON")
-    p.add_argument("--html", metavar="FICHERO", nargs="?", const="pcbench_informe.html",
+    p.add_argument("--html", metavar="FICHERO", nargs="?", const="quilate_informe.html",
                    help="generar informe HTML")
     p.add_argument("--export-plan", metavar="FICHERO", nargs="?", const="plan_optimizacion.ps1",
                    help="generar script PowerShell de optimización (solo Windows)")
@@ -73,7 +82,23 @@ def main() -> int:
         except KeyboardInterrupt:
             print(f"\n  {C.YELLOW}Benchmark interrumpido; se continúa con lo medido.{C.RESET}")
 
-    auditor = Auditor(si, bench)
+    scan: ScanResult | None = None
+    if not args.no_files:
+        roots = args.scan_path or default_roots(si.system_drive)
+        section("Rastreo de almacenamiento")
+        spinner_step(f"Archivos de más de {args.min_file_size} MB".ljust(38))
+        try:
+            scan = scan_large_files(roots, min_size=args.min_file_size * 1024**2,
+                                    time_budget=args.scan_time)
+            detail = (f"{scan.scanned_files:,} ficheros en {scan.elapsed:.0f} s"
+                      f"{' · presupuesto agotado' if scan.truncated else ''}")
+            spinner_done(detail, ok=not scan.truncated)
+        except KeyboardInterrupt:
+            print(f"\n  {C.YELLOW}Rastreo interrumpido.{C.RESET}")
+        except Exception as exc:
+            spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
+
+    auditor = Auditor(si, bench, scan)
     try:
         auditor.run()
     except KeyboardInterrupt:

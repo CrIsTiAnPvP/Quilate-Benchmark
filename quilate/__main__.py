@@ -1,4 +1,4 @@
-"""Permite `python -m pcbench` además de `python pcbench.py`."""
+"""Permite `python -m quilate` además de `python quilate.py`."""
 
 from __future__ import annotations
 

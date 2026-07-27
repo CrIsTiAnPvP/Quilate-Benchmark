@@ -12,8 +12,10 @@ from pathlib import Path
 from ..audit import Auditor
 from ..benchmark import Benchmark
 from ..components import ComponentCard, build_component_cards
+from ..console import human_bytes
 from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
 from ..projection import priority_rank
+from ..storage_scan import ScanResult, candidate_bytes
 from ..sysinfo import SystemInfo
 
 
@@ -47,7 +49,7 @@ function Confirmar($texto) {{
 if (Confirmar "Crear un punto de restauracion del sistema antes de empezar?") {{
     try {{
         Enable-ComputerRestore -Drive "$env:SystemDrive\\"
-        Checkpoint-Computer -Description "Antes de PCBench" -RestorePointType MODIFY_SETTINGS
+        Checkpoint-Computer -Description "Antes de Quilate" -RestorePointType MODIFY_SETTINGS
         Write-Host "Punto de restauracion creado." -ForegroundColor Green
     }} catch {{
         Write-Host "No se pudo crear el punto de restauracion: $_" -ForegroundColor Red
@@ -170,8 +172,37 @@ def _plan_component_summary(cards: list[ComponentCard]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _plan_large_files(scan: ScanResult | None) -> str:
+    """Los archivos grandes van como comentario, nunca como borrado automatico:
+    solo el usuario sabe cual de sus ficheros sobra."""
+    if scan is None or not scan.available or not scan.files:
+        return ""
+    safe, review = candidate_bytes(scan)
+    lines = ["\n# ==============================================================================",
+             "#  ARCHIVOS GRANDES ENCONTRADOS (revisalos tu: aqui no se borra nada)",
+             "# ==============================================================================",
+             f"#  Umbral: {human_bytes(scan.min_size)} | total localizado: "
+             f"{human_bytes(scan.total_large)}",
+             f"#  Basura segura: {human_bytes(safe)} | a revisar antes de borrar: "
+             f"{human_bytes(review)}"]
+    if scan.truncated:
+        lines.append("#  Rastreo parcial: se agoto el presupuesto de tiempo (--scan-time)")
+    lines.append("#")
+    for f in scan.files[:20]:
+        lines.append(f"#  {human_bytes(f['size']).rjust(9)}  {f['category'][:18].ljust(19)}"
+                     f"{f['age_days']:>5}d  {f['path']}")
+    if scan.special:
+        lines.append("#")
+        lines.append("#  Archivos de sistema (NO borrar a mano):")
+        for s in scan.special:
+            size = human_bytes(s["size"]) if s["size"] else "-"
+            lines.append(f"#  {size.rjust(9)}  {s['name'].ljust(16)} {s['note']}")
+    return "\n".join(lines) + "\n"
+
+
 def export_plan(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Auditor) -> int:
-    blocks: list[str] = [_plan_component_summary(build_component_cards(si, bench, auditor))]
+    blocks: list[str] = [_plan_component_summary(build_component_cards(si, bench, auditor)),
+                         _plan_large_files(getattr(auditor, "scan", None))]
     n = 0
     for f in sorted([x for x in auditor.findings if x.gain > 0], key=priority_rank):
         action = PLAN_ACTIONS.get(f.id)

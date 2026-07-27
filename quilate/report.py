@@ -12,6 +12,7 @@ from .components import ComponentCard, _no_score_text, build_component_cards
 from .console import (BOX_W, C, _wrap, bar, grade, human_bytes, kv, section)
 from .const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
 from .projection import priority_rank
+from .storage_scan import RECLAIMABLE, REVIEWABLE, ScanResult, candidate_bytes
 from .sysinfo import SystemInfo
 
 
@@ -54,6 +55,58 @@ def print_component_cards(cards: list[ComponentCard]) -> None:
         else:
             print(f"      {C.GREEN}Sin mejoras pendientes.{C.RESET}")
         print()
+
+
+def print_storage_scan(scan: ScanResult | None) -> None:
+    """Lo encontrado por el rastreo de archivos grandes."""
+    if scan is None or not scan.available:
+        return
+    section("Archivos grandes")
+    cover = (f"{scan.scanned_files:,} ficheros y {scan.scanned_dirs:,} carpetas en "
+             f"{scan.elapsed:.0f} s".replace(",", "."))
+    print(f"  {C.DIM}Umbral: {human_bytes(scan.min_size)} · revisados {cover}{C.RESET}")
+    if scan.truncated:
+        print(f"  {C.YELLOW}Rastreo parcial: se agotó el presupuesto de tiempo. "
+              f"Amplíalo con --scan-time 60 para cubrir más.{C.RESET}")
+    if not scan.files and not scan.special:
+        print(f"\n  {C.GREEN}✓ Nada por encima del umbral. No hay grasa que recortar aquí."
+              f"{C.RESET}")
+        return
+
+    if scan.by_category:
+        safe, review = candidate_bytes(scan)
+        print(f"\n  {C.BOLD}Por tipo{C.RESET}")
+        for cat, data in scan.by_category.items():
+            if cat in RECLAIMABLE:
+                mark = f"{C.GREEN}se puede borrar{C.RESET}"
+            elif cat in REVIEWABLE:
+                mark = f"{C.YELLOW}revisar{C.RESET}"
+            else:
+                mark = ""
+            print(f"    {C.GREY}{cat.capitalize().ljust(24, '.')}{C.RESET} "
+                  f"{human_bytes(data['size']).rjust(10)}  "
+                  f"{C.DIM}{data['count']} ficheros{C.RESET}  {mark}")
+        print(f"    {C.GREY}{'TOTAL'.ljust(24, '.')}{C.RESET} "
+              f"{human_bytes(scan.total_large).rjust(10)}")
+        if safe or review:
+            print(f"    {C.DIM}De ese total, {C.RESET}{C.GREEN}{human_bytes(safe)}{C.RESET}"
+                  f"{C.DIM} es basura y {C.RESET}{C.YELLOW}{human_bytes(review)}{C.RESET}"
+                  f"{C.DIM} son candidatos a revisar.{C.RESET}")
+
+    if scan.files:
+        print(f"\n  {C.BOLD}Los más grandes{C.RESET}")
+        for f in scan.files[:12]:
+            path = f["path"]
+            if len(path) > 62:
+                path = path[:30] + "…" + path[-31:]
+            print(f"    {human_bytes(f['size']).rjust(9)}  {C.DIM}{f['category'][:20].ljust(21)}"
+                  f"{f['age_days']:>5}d{C.RESET}  {path}")
+
+    if scan.special:
+        print(f"\n  {C.BOLD}Archivos de sistema{C.RESET}  {C.DIM}(no los borres a mano){C.RESET}")
+        for s in scan.special:
+            size = human_bytes(s["size"]) if s["size"] else "—"
+            print(f"    {size.rjust(9)}  {s['name'].ljust(16)} {C.DIM}{s['note']}{C.RESET}")
 
 
 def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
@@ -121,8 +174,25 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
             print(f"  {C.YELLOW}▸ Cuello de botella principal: {label} "
                   f"({comp[weakest]:.0f} pts){C.RESET}")
 
+        # --- Métricas que no puntúan pero explican la puntuación ---
+        if bench.memory_hierarchy or bench.metrics:
+            print(f"\n  {C.BOLD}Métricas de diagnóstico{C.RESET}")
+            if bench.memory_hierarchy:
+                levels = "   ".join(f"{lv['level']} {C.CYAN}{lv['gbs']:.0f}{C.RESET} GB/s"
+                                    for lv in bench.memory_hierarchy)
+                print(f"    {C.GREY}{'Jerarquía de memoria'.ljust(26, '.')}{C.RESET} {levels}")
+            for m in bench.metrics.values():
+                value = f"{m['value']} {m['unit']}".strip()
+                print(f"    {C.GREY}{m['label'].ljust(26, '.')}{C.RESET} {value}")
+                if m["note"]:
+                    for line in _wrap(m["note"], 62):
+                        print(f"      {C.DIM}{line}{C.RESET}")
+
     # --- Ficha por componente ---
     print_component_cards(build_component_cards(si, bench, auditor))
+
+    # --- Archivos grandes ---
+    print_storage_scan(getattr(auditor, "scan", None))
 
     # --- Hallazgos ---
     section("Hallazgos de la auditoría")

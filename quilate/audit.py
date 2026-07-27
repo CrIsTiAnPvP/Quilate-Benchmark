@@ -9,12 +9,14 @@ from pathlib import Path
 
 import psutil
 
-from .benchmark import Benchmark, read_cpu_temperature
+from .benchmark import Benchmark
+from .sensors import cpu_temperature, gpu_temperature, temperature_report, temperature_source
+from .storage_scan import ScanResult, candidate_bytes
 from .console import C, human_bytes, section, spinner_done, spinner_step
 from .const import IS_LINUX, IS_WINDOWS
 from .platform_utils import (ps_json, reg_list_values, reg_read, run_cmd,
                              winreg)
-from .sysinfo import SystemInfo
+from .sysinfo import KIND_LABELS, SystemInfo, local_volumes
 
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -47,9 +49,11 @@ class Finding:
 
 
 class Auditor:
-    def __init__(self, si: SystemInfo, bench: Benchmark | None):
+    def __init__(self, si: SystemInfo, bench: Benchmark | None,
+                 scan: ScanResult | None = None):
         self.si = si
         self.bench = bench
+        self.scan = scan
         self.findings: list[Finding] = []
         self.checks_run = 0
         self.notes: list[str] = []
@@ -62,6 +66,7 @@ class Auditor:
         section("Auditoría del sistema")
         checks = [
             ("Espacio en disco", self.check_disk_space),
+            ("Archivos grandes y espacio recuperable", self.check_large_files),
             ("Tipo de disco de sistema", self.check_disk_media),
             ("Memoria RAM", self.check_memory),
             ("Configuración de canales de RAM", self.check_ram_channels),
@@ -104,15 +109,24 @@ class Auditor:
 
     # ------------------------------------------------------- comprobaciones --
     def check_disk_space(self) -> str:
+        # Solo almacenamiento físico local: una unidad de Google Drive, OneDrive
+        # o de red informa de un tamaño que no es del equipo y no se libera
+        # borrando archivos aquí. Auditarla solo genera avisos falsos.
+        ignored = [d for d in self.si.disks if d["ignored"] and d["total"] > 5 * 1024**3]
+        if ignored:
+            self.notes.append(
+                "Volúmenes excluidos de la auditoría de almacenamiento por no ser discos "
+                "locales: " + ", ".join(
+                    f"{d['mount']} ({d['label'] or KIND_LABELS.get(d['kind'], d['kind'])})"
+                    for d in ignored) + ".")
+
         worst = None
-        for d in self.si.disks:
-            if d["total"] < 5 * 1024**3:
-                continue
+        for d in local_volumes(self.si):
             free_pct = 100 - d["percent"]
             if worst is None or free_pct < worst[1]:
                 worst = (d, free_pct)
         if not worst:
-            return "sin datos"
+            return "sin volúmenes locales que auditar"
         d, free_pct = worst
         if free_pct < 10:
             self.add(
@@ -246,12 +260,49 @@ class Auditor:
 
     def check_thermals(self) -> str:
         samples = self.bench.thermal_samples if self.bench else []
-        current = read_cpu_temperature()
+        current = cpu_temperature()
         peak = max(samples) if samples else current
+        gpu = gpu_temperature()
+
         if peak is None:
-            self.notes.append("No se pudo leer la temperatura de la CPU. En Windows suele requerir "
-                              "HWiNFO64 o LibreHardwareMonitor con permisos de administrador.")
-            return "no disponible"
+            # Sin sensor no hay cifra, pero sí hay diagnóstico: si la CPU mantiene
+            # el mismo trabajo por segundo del principio al final de una carga
+            # larga, no está limitada térmicamente. Y la GPU casi siempre sí
+            # publica su temperatura, que sirve de referencia del interior.
+            sustained = (self.bench.metrics.get("sustained") if self.bench else None)
+            tried = "; ".join(f"{src}: {res}" for src, res in temperature_report())
+            self.notes.append(
+                "La temperatura de la CPU no está disponible en este equipo. Windows no la "
+                "expone: leerla requiere un driver en modo kernel. Instala y deja abierto "
+                "LibreHardwareMonitor (gratuito) y Quilate la tomará automáticamente en la "
+                "siguiente ejecución. Fuentes probadas → " + (tried or "ninguna"))
+            partes = []
+            if gpu is not None:
+                partes.append(f"GPU a {gpu:.0f} °C")
+            if sustained:
+                partes.append(f"rendimiento sostenido {sustained['value']:.0f}%")
+                if sustained["value"] < 90:
+                    self.add(
+                        id="thermal_sustained",
+                        title=f"La CPU pierde un {100 - sustained['value']:.0f}% de rendimiento "
+                              f"en carga sostenida",
+                        severity="high", category="térmico", component="cpu_multi",
+                        detail="Las últimas unidades de trabajo tardaron bastante más que las "
+                               "primeras con la misma carga. Sin sensor de temperatura no se "
+                               "puede confirmar la causa, pero el patrón es el de un límite "
+                               "térmico o de potencia: disipación degradada, curva de "
+                               "ventiladores demasiado silenciosa o límites PL1/PL2 bajos.",
+                        gain=0.15, gain_note="rendimiento en cargas largas",
+                        effort="medio", risk="bajo",
+                        steps=["Limpia el disipador y los ventiladores con aire comprimido",
+                               "Renueva la pasta térmica si el equipo tiene más de 3 años",
+                               "Instala LibreHardwareMonitor para confirmarlo con cifras reales",
+                               "Revisa los límites de potencia en la BIOS (PL1/PL2, PPT en AMD)"])
+            return " · ".join(partes) if partes else "no disponible (falta sensor)"
+
+        if gpu is not None:
+            self.notes.append(f"Temperatura de GPU durante las pruebas: {gpu:.0f} °C "
+                              f"(fuente: nvidia-smi).")
         if peak >= 95:
             self.add(
                 id="thermal_critical", title=f"Throttling térmico severo ({peak:.0f} °C bajo carga)",
@@ -281,7 +332,49 @@ class Auditor:
                        "Renovar pasta térmica si el equipo tiene más de 3 años",
                        "Revisar el flujo de aire de la caja (entrada frontal, salida trasera/superior)"])
             return f"{peak:.0f} °C (elevado)"
-        return f"{peak:.0f} °C (correcto)"
+        source = temperature_source()
+        return f"{peak:.0f} °C (correcto)" + (f" · {source}" if source else "")
+
+    def check_large_files(self) -> str:
+        """Espacio recuperable según el rastreo de archivos grandes."""
+        scan = self.scan
+        if scan is None or not scan.available:
+            return "omitido"
+        if not scan.files and not scan.special:
+            return f"nada por encima de {human_bytes(scan.min_size)}"
+
+        system_free = next((d["free"] for d in local_volumes(self.si)
+                            if d["mount"].upper().startswith(str(self.si.system_drive)[:1].upper())),
+                           0)
+        recoverable, review = candidate_bytes(scan)
+        candidates = recoverable + review
+
+        top = ", ".join(f"{f['name'][:38]} ({human_bytes(f['size'])})" for f in scan.files[:3])
+        if candidates >= 5 * 1024**3 or (recoverable >= 2 * 1024**3 and system_free
+                                         and candidates > system_free * 0.1):
+            severity = "medium" if candidates < 20 * 1024**3 else "high"
+            self.add(
+                id="large_files",
+                title=f"{human_bytes(candidates)} en archivos grandes prescindibles",
+                severity=severity, category="almacenamiento", component="disk",
+                detail=f"El rastreo encontró {human_bytes(scan.total_large)} en ficheros de más de "
+                       f"{human_bytes(scan.min_size)}, de los cuales {human_bytes(candidates)} son "
+                       "temporales, cachés, volcados, instaladores ya usados o copias antiguas. "
+                       "En un SSD el espacio libre no es solo capacidad: por debajo del 20% la "
+                       f"velocidad de escritura cae. Los más grandes: {top}.",
+                gain=0.06, gain_note="margen de escritura del SSD",
+                effort="bajo", risk="bajo",
+                steps=["Revisa la lista de la sección «Archivos grandes» antes de borrar nada",
+                       "Ejecuta `cleanmgr /sageset:1` y marca temporales, volcados y Windows Update",
+                       "Configuración → Sistema → Almacenamiento → Sensor de almacenamiento",
+                       "Los instaladores y comprimidos ya usados se pueden volver a descargar",
+                       "Mueve vídeos y copias a otra unidad en lugar de borrarlos"])
+        note = f"{human_bytes(scan.total_large)} en {len(scan.files)} ficheros grandes"
+        if candidates:
+            note += f" · {human_bytes(candidates)} prescindibles"
+        if scan.truncated:
+            note += " (rastreo parcial)"
+        return note
 
     def check_cpu_frequency(self) -> str:
         samples = self.bench.freq_samples if self.bench else []

@@ -88,6 +88,31 @@ def work_memcpy(mb: int, passes: int) -> float:
     return ((len(src) * passes) / 1e9) / elapsed if elapsed > 0 else 0.0
 
 
+def memcpy_bandwidth(size_bytes: int, budget: float = 0.25) -> float:
+    """Ancho de banda de copia para un tamano concreto de bloque, en GB/s.
+
+    Repetido con tamanos crecientes dibuja la jerarquia de memoria: mientras el
+    par origen+destino cabe en un nivel de cache la cifra se mantiene alta, y cae
+    en cada salto. Es la forma mas directa de ver si el equipo esta limitado por
+    la RAM (caida temprana y pronunciada) o no.
+    """
+    src = bytearray(size_bytes)
+    dst = bytearray(size_bytes)
+    view_src, view_dst = memoryview(src), memoryview(dst)
+    view_dst[:] = view_src  # calentar páginas y cargar cache
+
+    copies = 0
+    t0 = time.perf_counter()
+    while True:
+        for _ in range(8):     # amortiza el coste del reloj entre copias
+            view_dst[:] = view_src
+        copies += 8
+        elapsed = time.perf_counter() - t0
+        if elapsed >= budget:
+            break
+    return ((copies * size_bytes) / 1e9) / elapsed if elapsed > 0 else 0.0
+
+
 def _mp_unit(_seed: int) -> float:
     """Unidad de trabajo para el test multinúcleo (debe ser top-level por pickle)."""
     t0 = time.perf_counter()

@@ -12,7 +12,19 @@ from ..audit import Auditor
 from ..benchmark import Benchmark, REFERENCE
 from ..components import build_component_cards
 from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
+from ..sensors import cpu_temperature, gpu_telemetry, temperature_report, temperature_source
+from ..storage_scan import ScanResult, candidate_bytes
 from ..sysinfo import SystemInfo
+
+
+def _scan_payload(scan: ScanResult | None) -> dict | None:
+    if scan is None:
+        return None
+    safe, review = candidate_bytes(scan)
+    data = asdict(scan)
+    data["reclaimable_safe"] = safe
+    data["reclaimable_review"] = review
+    return data
 
 
 def export_json(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
@@ -25,6 +37,9 @@ def export_json(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         "system": asdict(si),
         "reference_baseline": REFERENCE,
         "benchmark": {k: asdict(v) for k, v in (bench.results.items() if bench else [])},
+        "metrics": bench.metrics if bench else {},
+        "memory_hierarchy": bench.memory_hierarchy if bench else [],
+        "load_snapshots": bench.load_snapshots if bench else [],
         "scores": {
             "components": bench.component_scores() if bench else {},
             "overall": bench.overall() if bench else None,
@@ -32,6 +47,14 @@ def export_json(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         "components": [asdict(c) for c in build_component_cards(si, bench, auditor)],
         "findings": [asdict(f) for f in auditor.findings],
         "projection": projection,
+        "storage_scan": _scan_payload(getattr(auditor, "scan", None)),
+        "sensors": {
+            "cpu_temperature": cpu_temperature(),
+            "cpu_temperature_source": temperature_source(),
+            "cpu_temperature_attempts": [{"source": s, "result": r}
+                                         for s, r in temperature_report()],
+            "gpu": gpu_telemetry(),
+        },
         "top_processes": getattr(auditor, "top_processes", []),
         "startup_items": getattr(auditor, "startup_items", []),
     }
