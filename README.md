@@ -95,6 +95,11 @@ python pcbench.py --disk-size 2048 --json despues.json --html despues.html
 - **Auditoría**: ~24 comprobaciones (espacio, tipo de disco, TRIM, canales de
   RAM, temperaturas, frecuencia sostenida, plan de energía, programas de inicio,
   servicios, SMART, antivirus solapados, antigüedad de la instalación...).
+- **Ficha por componente**: procesador, memoria, almacenamiento, gráfica y
+  sistema, cada uno con su inventario, la nota que ha sacado en las pruebas y
+  las mejoras que le corresponden agrupadas, con la ganancia combinada y la
+  puntuación que alcanzaría al aplicarlas. Va en la consola, en el JSON
+  (`components`), en el HTML y como resumen en cabecera del plan PowerShell.
 - **Proyección**: mejora estimada por componente y por área, con rendimientos
   decrecientes, y plan de acción ordenado por retorno dividido por esfuerzo.
 
