@@ -74,6 +74,8 @@ En los ejemplos siguientes, `python` asume el entorno ya activado.
 | `--html informe.html` | Informe HTML con branding |
 | `--json datos.json` | Datos crudos para comparar ejecuciones |
 | `--export-plan` | Genera `plan_optimizacion.ps1` (solo Windows) |
+| `--elevate` | Pide permisos de administrador aunque se lance desde una terminal |
+| `--no-elevate` | No pide permisos de administrador en ningún caso |
 | `--no-color` | Desactiva colores ANSI |
 
 ### Ejecutable (.exe)
@@ -89,6 +91,14 @@ puede copiar a un pendrive y ejecutar en cualquier Windows de 64 bits. Lleva el
 icono del proyecto, que se regenera desde `quilate.png` con
 `python tools/make_icon.py` cuando cambia el logo. Acepta
 las mismas opciones que el script.
+
+Al abrirlo con doble clic, y solo entonces, **pide permisos de administrador**
+con el aviso de UAC de Windows: es la única forma de que un doble clic llegue a
+leer SMART, TRIM y los servicios. Si el usuario rechaza el aviso, el análisis
+continúa en la misma ventana sin esos permisos, avisando de lo que se pierde.
+Desde una terminal no lo pide —relanzarse abriría una ventana nueva y le robaría
+la salida a quien lo invocó—; ahí se fuerza con `--elevate`, o se desactiva del
+todo con `--no-elevate`.
 
 Al abrir el `.exe` con doble clic no hay forma de pasarle flags, así que cuando
 termina el análisis —y solo si no se pidió ningún fichero por línea de comandos—

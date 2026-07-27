@@ -14,7 +14,7 @@ from .console import (C, banner, clear_screen, configure_output, enable_ansi,
                       read_key, section, spinner_done, spinner_step)
 from .const import APP_NAME, AUTHOR, IS_WINDOWS, WEBSITE_URL
 from .export import export_html, export_json, export_plan
-from .platform_utils import is_admin
+from .platform_utils import is_admin, owns_console, relaunch_as_admin
 from .projection import project_improvement
 from .report import print_report
 from .storage_scan import ScanResult, default_roots, scan_large_files
@@ -56,8 +56,43 @@ def parse_args() -> argparse.Namespace:
                    help="generar informe HTML")
     p.add_argument("--export-plan", metavar="FICHERO", nargs="?", const="plan_optimizacion.ps1",
                    help="generar script PowerShell de optimización (solo Windows)")
+    p.add_argument("--elevate", action="store_true",
+                   help="pedir permisos de administrador aunque se lance desde una terminal")
+    p.add_argument("--no-elevate", action="store_true",
+                   help="no pedir permisos de administrador en ningún caso")
     p.add_argument("--no-color", action="store_true", help="desactivar colores ANSI")
     return p.parse_args()
+
+
+_relaunched = False   # lo consulta _wait_before_closing(): ver su docstring
+
+
+def _try_elevate(args: argparse.Namespace) -> bool:
+    """Ofrece relanzarse como administrador. True si hay que ceder el turno.
+
+    El .exe se abre normalmente con doble clic, y ahí no hay forma de pedir
+    "ejecutar como administrador" salvo el menú contextual, que nadie usa: media
+    auditoría (SMART, TRIM, servicios) se quedaba fuera sin que el usuario
+    supiera por qué. Se le pregunta con el aviso de UAC de Windows, y si lo
+    rechaza el análisis continúa aquí mismo, sin los permisos.
+
+    Solo cuando somos dueños de la consola: relanzarse abre una ventana nueva, y
+    hacerlo desde una terminal ya abierta le robaría la salida y el código de
+    salida a quien nos invocó. Desde una terminal se pide con `--elevate`.
+    """
+    global _relaunched
+    if args.no_elevate or not IS_WINDOWS or not getattr(sys, "frozen", False):
+        return False
+    if not (args.elevate or owns_console()):
+        return False
+
+    print(f"  {C.CYAN}▸{C.RESET} Pidiendo permisos a Windows... "
+          f"{C.DIM}acepta el aviso para el análisis completo.{C.RESET}")
+    if relaunch_as_admin(["--no-elevate"]):
+        _relaunched = True
+        return True
+    print(f"  {C.DIM}Permisos denegados; se continúa sin ellos.{C.RESET}")
+    return False
 
 
 def main() -> int:
@@ -72,6 +107,8 @@ def main() -> int:
     if not is_admin():
         print(f"\n  {C.YELLOW}⚠ Sin permisos de administrador: algunas comprobaciones "
               f"(SMART, TRIM, servicios) pueden no estar disponibles.{C.RESET}")
+        if _try_elevate(args):
+            return 0
         print(f"  {C.DIM}Para un análisis completo, abre la terminal como administrador.{C.RESET}")
 
     section("Recopilando información del sistema")
@@ -272,8 +309,10 @@ def _wait_before_closing() -> None:
     con terminal interactivo: en línea de comandos o redirigido, estorbaría.
 
     Si el menú final llegó a mostrarse, la pausa ya la puso él y salir de allí es
-    un acto deliberado del usuario: encadenar otro "pulsa Enter" sobraría."""
-    if _menu_shown or not getattr(sys, "frozen", False):
+    un acto deliberado del usuario: encadenar otro "pulsa Enter" sobraría. Y si
+    nos hemos relanzado con permisos, esta ventana ya no pinta nada: el informe
+    sale en la otra y esta debe cerrarse sola."""
+    if _menu_shown or _relaunched or not getattr(sys, "frozen", False):
         return
     try:
         if sys.stdin and sys.stdin.isatty() and sys.stdout.isatty():

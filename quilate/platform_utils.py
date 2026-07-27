@@ -6,6 +6,7 @@ import ctypes
 import json
 import os
 import subprocess
+import sys
 from typing import Any
 
 from .const import CREATE_NO_WINDOW, IS_WINDOWS
@@ -121,5 +122,53 @@ def is_admin() -> bool:
         if IS_WINDOWS:
             return bool(ctypes.windll.shell32.IsUserAnAdmin())
         return os.geteuid() == 0
+    except Exception:
+        return False
+
+
+def owns_console() -> bool:
+    """True si somos el unico proceso de esta consola: es decir, doble clic.
+
+    Windows no dice "me han abierto con doble clic", pero al hacerlo se crea una
+    consola nueva cuya lista de procesos solo nos contiene a nosotros; lanzado
+    desde cmd o PowerShell, el interprete tambien esta en la lista. Sirve para
+    distinguir cuando podemos relanzarnos en una ventana nueva sin robarle la
+    sesion a nadie.
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        buf = (ctypes.c_uint * 8)()
+        n = ctypes.windll.kernel32.GetConsoleProcessList(buf, 8)
+        return n == 1
+    except Exception:
+        return False
+
+
+def relaunch_as_admin(extra_args: list[str] | None = None) -> bool:
+    """Vuelve a lanzarse pidiendo elevacion por UAC.
+
+    Devuelve True si el proceso elevado llego a arrancar —en cuyo caso quien
+    llama debe terminar, porque el trabajo continua en la ventana nueva— y False
+    si el usuario rechazo el aviso o la politica del equipo lo impidio.
+
+    No se puede elevar un proceso ya en marcha: hay que crear otro, y el unico
+    camino soportado es el verbo "runas" de ShellExecute. Se le pasa el
+    directorio actual para que los informes se generen donde el usuario espera y
+    no en system32, que es a donde va a parar un proceso elevado por defecto.
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        args = list(sys.argv[1:]) + list(extra_args or [])
+        shell32 = ctypes.windll.shell32
+        shell32.ShellExecuteW.restype = ctypes.c_void_p   # HINSTANCE: 64 bits
+        rc = shell32.ShellExecuteW(
+            None, "runas", sys.executable, subprocess.list2cmdline(args),
+            os.getcwd(), 1,   # SW_SHOWNORMAL
+        )
+        # ShellExecute mantiene la convencion de los tiempos de 16 bits: mayor
+        # que 32 es exito; 5 (acceso denegado) es lo que devuelve un UAC rechazado.
+        return int(rc or 0) > 32
     except Exception:
         return False
