@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import date
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Callable
@@ -18,12 +19,27 @@ import psutil
 
 from .console import C, section, spinner_done, spinner_step
 from .const import IS_WINDOWS
+from .gpu_bench import GPUNoDisponible, medir_gpu
 from .rawio import DiskIO
 from .sensors import (cpu_frequency_mhz, cpu_temperature, gpu_telemetry,
                       temperature_source)
 from .workloads import (_mp_noop, _mp_unit, build_corpus, memcpy_bandwidth,
                         work_compress, work_float, work_hash, work_memcpy, work_sieve)
 
+
+# ------------------------------------------------------------------------------
+# ESCALA DE REFERENCIA
+# ------------------------------------------------------------------------------
+# 100 puntos = el equipo descrito aquí abajo. Lleva fecha a propósito: una escala
+# sin fecha no envejece, se pudre. «Gama media reciente» significaba una cosa en
+# 2024 y otra en 2028, y la nota iría cambiando de significado sin que nadie
+# tocara una línea de código. Con la fecha, Quilate puede avisar de que su propia
+# vara de medir se ha quedado vieja en vez de seguir dando notas infladas.
+REFERENCE_DATE = "2026-07"
+REFERENCE_MACHINE = ("Ryzen 5 5600 / i5-12400 · DDR4-3200 dual channel · "
+                    "NVMe PCIe 3.0 · GeForce RTX 3060 / Radeon RX 6600")
+# Meses tras los cuales la escala deja de representar a la gama media.
+REFERENCE_STALE_MONTHS = 30
 
 REFERENCE = {
     "sieve_s": 0.50,          # segundos · criba con límite 4.000.000
@@ -35,7 +51,28 @@ REFERENCE = {
     "disk_write_mbs": 850.0,
     "disk_read_mbs": 1700.0,
     "disk_iops_4k": 22000.0,
+    "gpu_gflops": 9000.0,     # FP32 encadenado · clase RTX 3060 / RX 6600
+    "gpu_vram_gbs": 300.0,    # copia en VRAM (GDDR6 192 bits)
+    "gpu_pcie_gbs": 11.0,     # ida y vuelta por PCIe con memoria paginable
 }
+
+# De dónde sale cada cifra, para que se pueda discutir y revisar.
+REFERENCE_ORIGIN = {
+    "gpu_gflops": "medido en una RTX 3060 (9.500-9.900 GFLOPS); se redondea a la baja",
+    "gpu_vram_gbs": "medido en una RTX 3060 (318-325 GB/s), 86% de los 360 de catálogo",
+    "gpu_pcie_gbs": "medido en PCIe 4.0 x16 con memoria paginable (11,5-12,2 GB/s)",
+}
+
+
+def reference_age_months(hoy: date | None = None) -> int:
+    """Meses desde que se fijó la escala."""
+    hoy = hoy or date.today()
+    año, mes = (int(x) for x in REFERENCE_DATE.split("-"))
+    return (hoy.year - año) * 12 + (hoy.month - mes)
+
+
+def reference_is_stale(hoy: date | None = None) -> bool:
+    return reference_age_months(hoy) >= REFERENCE_STALE_MONTHS
 
 # El intérprete influye mucho: Python 3.11+ es un 25-40% más rápido que 3.10 en
 # código puro. Sin este ajuste, un equipo potente con Python 3.9 puntuaría bajo
@@ -72,8 +109,11 @@ def cache_served(latency_us: float, direct: bool) -> bool:
     """
     return not direct and latency_us < CACHE_LATENCY_US
 
-# Pesos para la nota global
-WEIGHTS = {"cpu_single": 0.26, "cpu_multi": 0.24, "memory": 0.16, "disk": 0.34}
+# Pesos para la nota global. `overall()` renormaliza con los componentes que haya,
+# así que un equipo sin GPU medible no sale penalizado: se reparte su peso entre
+# el resto. Lo que no puede pasar es que la pieza más cara del PC valga cero
+# porque nadie la probó.
+WEIGHTS = {"cpu_single": 0.20, "cpu_multi": 0.19, "memory": 0.12, "disk": 0.26, "gpu": 0.23}
 
 
 @dataclass
@@ -87,10 +127,15 @@ class BenchResult:
 
 class Benchmark:
     def __init__(self, quick: bool = False, disk_size_mb: int = 512, skip_disk: bool = False,
-                 target_dir: str | None = None):
+                 target_dir: str | None = None, skip_gpu: bool = False):
         self.quick = quick
         self.disk_size_mb = 192 if quick else disk_size_mb
         self.skip_disk = skip_disk
+        self.skip_gpu = skip_gpu
+        # Por qué no hay nota de GPU, si no la hay. «Sin GPU» y «no se ha
+        # podido medir» no son lo mismo y el informe tiene que decir cuál es.
+        self.gpu_unavailable: str = ""
+        self.gpu_info: dict = {}
         self.target_dir = target_dir or tempfile.gettempdir()
         self.results: dict[str, BenchResult] = {}
         self.thermal_samples: list[float] = []
@@ -420,6 +465,49 @@ class Benchmark:
         self._register("memory", "Memoria", "GB/s", gbs, score, f"copias de {mb} MiB")
         spinner_done(f"{gbs:.2f} GB/s → {score:.0f} pts")
 
+    def run_gpu(self) -> None:
+        """Computo, VRAM y PCIe de la grafica que de verdad calcula."""
+        if self.skip_gpu:
+            return
+        spinner_step("GPU · cómputo, VRAM y PCIe".ljust(38))
+        try:
+            datos = medir_gpu(rapido=self.quick)
+        except GPUNoDisponible as exc:
+            # No hay GPU medible y se dice por qué. Antes ni siquiera se
+            # intentaba, así que la ausencia de nota no distinguía entre «no
+            # tiene» y «no se ha mirado».
+            self.gpu_unavailable = str(exc)
+            spinner_done(f"no medible: {exc}", ok=False)
+            return
+        except Exception as exc:      # driver roto, OpenCL a medias, GPU ocupada
+            self.gpu_unavailable = f"{type(exc).__name__}: {exc}"
+            spinner_done(f"no medible ({type(exc).__name__})", ok=False)
+            return
+
+        self.gpu_info = datos
+        dev = datos["device"]
+        self._spread("gpu_compute", "Cómputo FP32 de GPU", datos["gflops_samples"])
+        self._spread("gpu_vram", "Ancho de banda de VRAM", datos["vram_samples"])
+        self._spread("gpu_pcie", "Transferencia PCIe", datos["pcie_samples"])
+
+        etiqueta = dev["name"] or "GPU"
+        self._register("gpu_compute", "GPU · cómputo FP32", "GFLOPS", datos["gflops"],
+                       datos["gflops"] / REFERENCE["gpu_gflops"] * 100,
+                       f"{etiqueta} · {dev['compute_units']} unidades de cómputo")
+        self._register("gpu_vram", "GPU · ancho de banda VRAM", "GB/s", datos["vram_gbs"],
+                       datos["vram_gbs"] / REFERENCE["gpu_vram_gbs"] * 100)
+        self._register("gpu_pcie", "GPU · transferencia PCIe", "GB/s", datos["pcie_gbs"],
+                       datos["pcie_gbs"] / REFERENCE["gpu_pcie_gbs"] * 100,
+                       "ida y vuelta entre RAM y VRAM")
+        self._metric("gpu_device", "GPU medida", etiqueta, "",
+                     f"{dev['platform']} · OpenCL {dev['opencl']} · driver {dev['driver']}")
+        if len(datos["devices"]) > 1:
+            otras = ", ".join(d["name"] for d in datos["devices"] if d["name"] != etiqueta)
+            self._metric("gpu_otras", "Otras GPU detectadas", otras, "",
+                         "se mide la de mayor capacidad de cálculo, que es la que trabaja")
+        spinner_done(f"{datos['gflops']:,.0f} GFLOPS · VRAM {datos['vram_gbs']:.0f} GB/s "
+                     f"· PCIe {datos['pcie_gbs']:.1f} GB/s")
+
     def run_disk(self) -> None:
         if self.skip_disk:
             return
@@ -610,6 +698,7 @@ class Benchmark:
         self.run_cpu_multi()
         self.run_memory()
         self.run_memory_hierarchy()
+        self.run_gpu()
         self.run_disk()
         self._measure_ambient_load("después")
         self._finish()
@@ -662,6 +751,14 @@ class Benchmark:
         disk_parts = [self.results[k].score for k in ("disk_write", "disk_read", "disk_iops")
                       if k in self.results]
         comp = {}
+        # El cómputo manda: es lo que limita en juegos y en cargas de cálculo.
+        # El PCIe pesa poco a propósito, porque salvo al cargar texturas rara vez
+        # es el cuello de botella, y en una integrada ni siquiera existe como tal.
+        gpu_pesos = {"gpu_compute": 0.55, "gpu_vram": 0.32, "gpu_pcie": 0.13}
+        gpu_presentes = {k: w for k, w in gpu_pesos.items() if k in self.results}
+        if gpu_presentes:
+            comp["gpu"] = (sum(self.results[k].score * w for k, w in gpu_presentes.items())
+                           / sum(gpu_presentes.values()))
         if "cpu_single" in self.results:
             comp["cpu_single"] = self.results["cpu_single"].score
         if "cpu_multi" in self.results:

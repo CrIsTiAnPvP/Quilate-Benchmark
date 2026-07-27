@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from ..audit import Auditor, SEVERITY_ORDER
-from ..benchmark import BUSY_CPU_PCT, Benchmark, REFERENCE
+from ..benchmark import (BUSY_CPU_PCT, Benchmark, REFERENCE, REFERENCE_DATE,
+                         REFERENCE_MACHINE, REFERENCE_ORIGIN, reference_age_months,
+                         reference_is_stale)
 from ..sensors import temperature_report, temperature_source
 from ..components import (ComponentCard, _no_score_text, build_component_cards,
                           finding_group)
@@ -26,7 +28,8 @@ from ..storage_scan import (RECLAIMABLE, REVIEWABLE, ScanResult, candidate_bytes
 from ..sysinfo import KIND_LABELS, SystemInfo, gpu_label, primary_gpu
 
 COMPONENT_LABELS = {"cpu_single": "CPU monohilo", "cpu_multi": "CPU multihilo",
-                    "memory": "Memoria", "disk": "Almacenamiento"}
+                    "memory": "Memoria", "disk": "Almacenamiento",
+                    "gpu": "GPU"}
 
 SEVERITY_LABELS = {"critical": "críticos", "high": "altos", "medium": "medios",
                    "low": "bajos", "info": "info"}
@@ -83,6 +86,9 @@ ICONS = {
     "i-download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
                   '<polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
     "i-shield": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+    # Ondas de wifi: la red se representa por el enlace, que es lo que se mide.
+    "i-net": '<path d="M2 8.5a16 16 0 0 1 20 0"/><path d="M5.5 12a11 11 0 0 1 13 0"/>'
+             '<path d="M9 15.5a6 6 0 0 1 6 0"/><circle cx="12" cy="19.5" r="1"/>',
 }
 
 COMPONENT_ICONS = {"cpu": "i-cpu", "memory": "i-ram", "disk": "i-disk",
@@ -983,14 +989,82 @@ def _system_state_block(auditor: Auditor, bench: Benchmark | None) -> str:
                    + filas + "</table></div></div>")
 
     if bench:
-        filas = "".join(f"<tr><td>{_e(k)}</td><td>{v}</td></tr>"
-                        for k, v in REFERENCE.items())
+        filas = ""
+        for k, v in REFERENCE.items():
+            origen = REFERENCE_ORIGIN.get(k, "")
+            filas += (f"<tr><td>{_e(k)}</td><td>{v}</td>"
+                      f'<td class="tags">{_e(origen)}</td></tr>')
+        caducada = ""
+        if reference_is_stale():
+            caducada = ('<p class="scan-note" style="color:var(--warn)">La escala se fijó hace '
+                        f"{reference_age_months() / 12:.1f} años. Sigue midiendo bien, pero "
+                        "«100 puntos = gama media» ya no describe lo que se vende hoy: "
+                        "la nota está inflada respecto a un equipo actual.</p>")
         out.append('<div class="card"><div class="sub-h">Escala de referencia</div>'
-                   '<p class="scan-note">100 puntos equivalen a estos valores. Los tiempos van '
-                   "en segundos; el resto, en su unidad.</p><div class=\"tw\">"
-                   "<table><tr><th>Prueba</th><th>Referencia</th></tr>" + filas
-                   + "</table></div></div>")
+                   f'<p class="scan-note">100 puntos equivalen a estos valores, fijados en '
+                   f"<b>{_e(REFERENCE_DATE)}</b> sobre un equipo tipo {_e(REFERENCE_MACHINE)}. "
+                   "Los tiempos van en segundos; el resto, en su unidad.</p>"
+                   + caducada + '<div class="tw">'
+                   "<table><tr><th>Prueba</th><th>Referencia</th><th>De dónde sale</th></tr>"
+                   + filas + "</table></div></div>")
     return "".join(out)
+
+
+def _network_block(red: dict[str, Any]) -> str:
+    """Enlace de red. Sin SSID, sin BSSID y sin MAC: identifican la red y el
+    equipo, no dicen nada del rendimiento, y esto se comparte."""
+    if not red.get("adapters"):
+        return ""
+    filas = ""
+    for a in red["adapters"]:
+        velocidad = f"{a['link_mbps']:,.0f} Mbps" if a.get("link_mbps") else "—"
+        conectado = a["status"].lower() in ("up", "conectado")
+        estado = (f'<span class="badge b-{"low" if conectado else "info"}">'
+                  f'{_e(a["status"])}</span>')
+        filas += (f"<tr><td>{_e(a['name'])}</td><td>{_e(a['description'])}</td>"
+                  f"<td>{velocidad}</td><td>{estado}</td></tr>")
+    out = ('<div class="card"><div class="sub-h">Adaptadores</div><div class="tw">'
+           "<table><tr><th>Interfaz</th><th>Adaptador</th><th>Enlace</th><th>Estado</th></tr>"
+           + filas + "</table></div></div>")
+
+    wifi = red.get("wifi") or {}
+    if wifi:
+        kv = [("Generación del enlace", wifi.get("radio", "—")),
+              ("Velocidad negociada", f"{wifi['rate_mbps']:,.0f} Mbps"
+               if wifi.get("rate_mbps") else "—"),
+              ("Banda", f"{wifi['band_ghz']} GHz" if wifi.get("band_ghz") else "—"),
+              ("Canal", str(wifi.get("channel") or "—")),
+              ("Señal", f"{wifi.get('rssi_dbm', '—')} dBm"
+                        + (f" ({wifi['signal_pct']}%)" if wifi.get("signal_pct") else ""))]
+        out += ('<div class="card"><div class="sub-h">Enlace wifi</div>'
+                '<p class="scan-note">No se recogen el nombre de la red, el punto de '
+                "acceso ni la dirección física: identifican tu red y no aportan nada "
+                'sobre el rendimiento.</p><div class="kvs">'
+                + "".join(f'<div class="k">{_e(k)}</div><div>{_e(v)}</div>' for k, v in kv)
+                + "</div></div>")
+
+    latencia = red.get("latency") or {}
+    if latencia.get("targets"):
+        filas = ""
+        for t in latencia["targets"]:
+            medida = f"{t['median_ms']:.1f} ms" if t["median_ms"] else "sin respuesta"
+            jitter = f"{t['jitter_ms']:.1f} ms" if t.get("jitter_ms") else "—"
+            filas += (f"<tr><td>{_e(t['name'])}</td><td>{_e(t['host'])}</td>"
+                      f"<td>{medida}</td><td>{jitter}</td><td>{t['loss_pct']}%</td></tr>")
+        dns = red.get("dns") or {}
+        nota = (f'<p class="scan-note">Resolución DNS: <b>{dns["median_ms"]:.1f} ms</b> '
+                f'de mediana.</p>' if dns.get("median_ms") else "")
+        out += ('<div class="card"><div class="sub-h">Latencia</div>'
+                '<p class="scan-note">Tiempo del saludo TCP contra resolutores DNS '
+                "públicos. Mide el camino hasta internet, no la velocidad de bajada.</p>"
+                + nota + '<div class="tw"><table><tr><th>Destino</th><th>Dirección</th>'
+                "<th>Latencia</th><th>Variación</th><th>Pérdida</th></tr>"
+                + filas + "</table></div></div>")
+    elif not red.get("active"):
+        out += ('<div class="card"><p class="scan-note">La latencia y el DNS no se han '
+                "medido: hacerlo requiere abrir conexiones a servidores de terceros. "
+                "Ejecuta con <code>--net</code> si quieres incluirlos.</p></div>")
+    return out
 
 
 def _storage_scan_block(scan: ScanResult) -> str:
@@ -1124,6 +1198,11 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         arranque = getattr(auditor, "boot_seconds", None)
         secs.append(("estado", "Estado del sistema", "i-clock", estado,
                      f"arranque {arranque:.0f} s" if arranque else ""))
+
+    red = _network_block(getattr(auditor, "network", {}) or {})
+    if red:
+        wifi = (getattr(auditor, "network", {}) or {}).get("wifi") or {}
+        secs.append(("red", "Red", "i-net", red, wifi.get("radio", "")))
 
     scan = getattr(auditor, "scan", None)
     if scan is not None and scan.available and (scan.files or scan.special):

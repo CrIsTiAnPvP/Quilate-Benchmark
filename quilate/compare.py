@@ -19,7 +19,8 @@ from typing import Any
 
 # Etiquetas legibles de los componentes, iguales que en el resto del informe.
 COMPONENT_LABELS = {"cpu_single": "CPU monohilo", "cpu_multi": "CPU multihilo",
-                    "memory": "Memoria", "disk": "Almacenamiento"}
+                    "memory": "Memoria", "disk": "Almacenamiento",
+                    "gpu": "GPU"}
 
 # Margen que se supone cuando el JSON no trae dispersión (ejecuciones anteriores
 # a la v2.2). Es deliberadamente amplio: sin dato de margen, afirmar que una

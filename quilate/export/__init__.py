@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .html_export import export_html
-from .json_export import export_json
+from .json_export import build_payload, export_json
 from .plan_export import export_plan
 
-__all__ = ["export_html", "export_json", "export_plan"]
+__all__ = ["build_payload", "export_html", "export_json", "export_plan"]

@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from ..audit import Auditor
-from ..benchmark import Benchmark, REFERENCE
+from ..benchmark import (Benchmark, REFERENCE, REFERENCE_DATE, REFERENCE_MACHINE,
+                         REFERENCE_ORIGIN, reference_age_months, reference_is_stale)
 from ..components import build_component_cards
 from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
 from ..sensors import cpu_temperature, gpu_telemetry, temperature_report, temperature_source
@@ -27,15 +28,34 @@ def _scan_payload(scan: ScanResult | None) -> dict | None:
     return data
 
 
-def export_json(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
-                projection: dict[str, Any]) -> None:
+def build_payload(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
+                  projection: dict[str, Any]) -> dict[str, Any]:
+    """Los datos crudos de una ejecución.
+
+    Está separado del volcado a fichero porque el histórico guarda un resumen
+    de esto mismo, y duplicar la construcción garantizaría que las dos versiones
+    se separaran a la primera de cambio.
+    """
     payload = {
         "meta": {
             "tool": APP_NAME, "version": APP_VERSION, "author": AUTHOR, "website": WEBSITE_URL,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "quick": bool(bench and bench.quick),
         },
         "system": asdict(si),
         "reference_baseline": REFERENCE,
+        # La escala con la que se han dado las notas, fechada: sin esto, un JSON
+        # de hace tres años parece comparable con uno de hoy y no lo es.
+        "reference_meta": {
+            "date": REFERENCE_DATE,
+            "machine": REFERENCE_MACHINE,
+            "age_months": reference_age_months(),
+            "stale": reference_is_stale(),
+            "origin": REFERENCE_ORIGIN,
+        },
+        "network": getattr(auditor, "network", {}),
+        "gpu": (bench.gpu_info if bench else {}) or
+               {"unavailable": (bench.gpu_unavailable if bench else "")},
         "benchmark": {k: asdict(v) for k, v in (bench.results.items() if bench else [])},
         "metrics": bench.metrics if bench else {},
         "memory_hierarchy": bench.memory_hierarchy if bench else [],
@@ -78,4 +98,10 @@ def export_json(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
             "report": getattr(auditor, "boot_report", {}),
         },
     }
+    return payload
+
+
+def export_json(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
+                projection: dict[str, Any]) -> None:
+    payload = build_payload(si, bench, auditor, projection)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")

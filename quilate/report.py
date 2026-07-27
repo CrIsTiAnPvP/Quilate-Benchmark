@@ -8,7 +8,8 @@ from datetime import datetime
 from typing import Any
 
 from .audit import Auditor, SEVERITY_ORDER, sev_label
-from .benchmark import Benchmark, PY_ADJUST
+from .benchmark import (Benchmark, PY_ADJUST, REFERENCE_DATE, REFERENCE_MACHINE,
+                        reference_age_months, reference_is_stale)
 from .components import ComponentCard, _no_score_text, build_component_cards
 from .console import (BOX_W, C, _wrap, bar, grade, human_bytes, kv, section)
 from .const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
@@ -142,8 +143,10 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
     # --- Resultados del benchmark ---
     if bench and bench.results:
         section("Resultados del benchmark")
-        print(f"  {C.DIM}Escala: 100 pts = equipo de gama media de referencia "
-              f"(Ryzen 5 5600 / i5-12400, DDR4-3200 dual channel, NVMe PCIe 3.0){C.RESET}")
+        # La descripción sale de la constante para que no pueda quedarse
+        # describiendo un equipo distinto del que fija la escala.
+        print(f"  {C.DIM}Escala: 100 pts = {REFERENCE_MACHINE}{C.RESET}")
+        print(f"  {C.DIM}Fijada en {REFERENCE_DATE}{C.RESET}")
         note = f"Python {platform.python_version()}"
         if PY_ADJUST != 1.0:
             note += f" · factor de compensación de intérprete ×{PY_ADJUST}"
@@ -164,6 +167,13 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                   f"RAM, no disco) y se ha excluido de la nota.{C.RESET}")
             print(f"  {C.DIM}Prueba con --disk-size mayor que la RAM libre, o --disk-path en "
                   f"otra unidad.{C.RESET}\n")
+        if reference_is_stale():
+            años = reference_age_months() / 12
+            print(f"  {C.YELLOW}⚠ La escala de referencia se fijó en {REFERENCE_DATE} "
+                  f"(hace {años:.1f} años).{C.RESET}")
+            print(f"  {C.DIM}Sigue midiendo bien, pero «100 puntos = gama media» ya no "
+                  f"describe lo que se vende hoy:\n  la nota está inflada respecto a un "
+                  f"equipo actual.{C.RESET}\n")
         dispersion = getattr(bench, "dispersion", {})
         # Los cuatro subtests monohilo se agregan en una sola fila: su margen es
         # el del subtest que más bailó.
@@ -263,7 +273,8 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
               f"  {bar(exp, 22)}   {C.GREEN}+{projection['experiential_pct']:.0f}%{C.RESET}")
         print()
         labels = {"cpu_single": "CPU monohilo", "cpu_multi": "CPU multihilo",
-                  "memory": "Memoria", "disk": "Almacenamiento"}
+                  "memory": "Memoria", "disk": "Almacenamiento",
+                    "gpu": "GPU"}
         for key, score in projection.get("current_components", {}).items():
             gain = projection["component_gain"].get(key, 0.0)
             if gain > 0.005:
@@ -296,6 +307,34 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                   f"esfuerzo {tag}{f.effort}{C.RESET}  ·  riesgo {f.risk}  ·  {f.category}")
         print(f"\n  {C.DIM}Recuerda: mide siempre antes y después. Aplicar diez cambios a la vez "
               f"impide saber cuál funcionó.{C.RESET}")
+
+    # --- Red ---
+    red = getattr(auditor, "network", {}) or {}
+    if red.get("connected"):
+        section("Red")
+        for a in red["connected"]:
+            velocidad = f"{a['link_mbps']:,.0f} Mbps" if a.get("link_mbps") else "sin negociar"
+            kv(a["name"], f"{velocidad}  ·  {a['description']}")
+        wifi = red.get("wifi") or {}
+        if wifi:
+            detalle = [wifi.get("radio", "wifi")]
+            if wifi.get("band_ghz"):
+                detalle.append(f"{wifi['band_ghz']} GHz")
+            if wifi.get("channel"):
+                detalle.append(f"canal {wifi['channel']}")
+            if wifi.get("rssi_dbm") is not None:
+                detalle.append(f"{wifi['rssi_dbm']} dBm ({wifi.get('signal_pct', '?')}%)")
+            kv("Enlace wifi", "  ·  ".join(detalle))
+        for destino in (red.get("latency") or {}).get("targets", []):
+            marca = f"{destino['median_ms']:.1f} ms" if destino["median_ms"] else "sin respuesta"
+            extra = f"  ·  {destino['loss_pct']}% de pérdida" if destino["loss_pct"] else ""
+            kv(f"Latencia · {destino['name']}", marca + extra)
+        dns = red.get("dns") or {}
+        if dns.get("median_ms"):
+            kv("Resolución DNS", f"{dns['median_ms']:.1f} ms")
+        if not red.get("active"):
+            print(f"  {C.DIM}Latencia y DNS no se han medido: requieren contactar con "
+                  f"servidores externos (--net).{C.RESET}")
 
     # --- Lo que no se ha podido comprobar ---
     # Va antes del veredicto a propósito: es la advertencia de hasta dónde llega

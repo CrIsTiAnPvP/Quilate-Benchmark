@@ -17,6 +17,7 @@ from .console import C, human_bytes, section, spinner_done, spinner_step
 from .const import IS_LINUX, IS_WINDOWS
 from .platform_utils import (boot_performance, pending_driver_updates, ps_json,
                              reg_key_readable, reg_list_values, reg_read, run_cmd, winreg)
+from .network import WIFI_TECHO, wifi_capability
 from .sysinfo import KIND_LABELS, SystemInfo, local_volumes, primary_gpu
 
 
@@ -70,8 +71,10 @@ class Finding:
 
 class Auditor:
     def __init__(self, si: SystemInfo, bench: Benchmark | None,
-                 scan: ScanResult | None = None, check_drivers: bool = False):
+                 scan: ScanResult | None = None, check_drivers: bool = False,
+                 network: dict | None = None):
         self.si = si
+        self.network = network or {}
         self.bench = bench
         self.scan = scan
         self.check_drivers = check_drivers
@@ -107,6 +110,8 @@ class Auditor:
             ("Tiempo sin reiniciar", self.check_uptime),
             ("Antigüedad de la instalación", self.check_os_age),
             ("Drivers gráficos", self.check_gpu_drivers),
+            ("Enlace de red", self.check_network_link),
+            ("Latencia y DNS", self.check_network_latency),
         ]
         if IS_WINDOWS:
             checks += [
@@ -736,6 +741,159 @@ class Auditor:
                                           "gráfic", "graphics")):
                 return title
         return None
+
+    def check_network_link(self) -> str:
+        """Lo que el enlace está haciendo frente a lo que la tarjeta sabe hacer.
+
+        Es el mismo patrón que la RAM a velocidad JEDEC o el driver de la GPU
+        parada: el hardware es capaz de más y nadie lo mira nunca.
+        """
+        datos = self.network or {}
+        conectados = datos.get("connected") or []
+        if not conectados:
+            raise SinDato("no hay ningún adaptador de red conectado, o no se han "
+                          "podido enumerar")
+
+        wifi = datos.get("wifi") or {}
+        partes = []
+        for adaptador in conectados:
+            mbps = adaptador.get("link_mbps") or 0
+            nombre = adaptador["name"]
+            descripcion = adaptador["description"]
+
+            if adaptador.get("wireless"):
+                capaz = wifi_capability(descripcion)
+                radio = wifi.get("radio")
+                partes.append(f"{nombre} {radio or 'wifi'} a {mbps:.0f} Mbps"
+                              if mbps else f"{nombre} {radio or 'wifi'}")
+                if capaz and radio and WIFI_TECHO.get(capaz, 0) > WIFI_TECHO.get(radio, 0):
+                    techo = WIFI_TECHO[capaz]
+                    self.add(
+                        id="wifi_downgrade",
+                        title=f"Tarjeta {capaz} conectada en {radio}",
+                        severity="medium", category="fluidez", component="system",
+                        detail=f"«{descripcion}» soporta {capaz} (hasta ~{techo} Mbps) pero "
+                               f"el enlace actual es {radio}"
+                               + (f", a {mbps:.0f} Mbps." if mbps else ".")
+                               + " Casi siempre es el router: o no tiene esa generación, o "
+                                 "la tiene desactivada, o la banda a la que te has conectado "
+                                 "no la ofrece. Se nota sobre todo al copiar archivos por red "
+                                 "y en la latencia de los juegos.",
+                        gain=0.10, gain_note="velocidad y latencia de red",
+                        effort="bajo", risk="nulo",
+                        steps=["Comprueba en el router que la generación esté activada "
+                               "(Wi-Fi 6 / 802.11ax, o Wi-Fi 7 / be)",
+                               "Conéctate a la banda de 5 o 6 GHz, no a la de 2,4",
+                               "Wi-Fi 6E y 7 necesitan WPA3: con WPA2 se cae a la generación anterior",
+                               "Actualiza el driver de la tarjeta desde la web del fabricante"])
+                if wifi.get("rssi_dbm") is not None and wifi["rssi_dbm"] <= -70:
+                    self.add(
+                        id="wifi_signal",
+                        title=f"Señal wifi débil ({wifi['rssi_dbm']} dBm)",
+                        severity="medium", category="fluidez", component="system",
+                        detail="Por debajo de -70 dBm el enlace baja de velocidad y empieza a "
+                               "reintentar paquetes, lo que se percibe como tirones y no como "
+                               "lentitud. Es un problema de distancia, obstáculos o canal, no "
+                               "de la tarjeta.",
+                        gain=0.08, gain_note="estabilidad de la conexión",
+                        effort="bajo", risk="nulo",
+                        steps=["Acerca el equipo al router o cambia su orientación",
+                               "Prueba la banda de 5 GHz si estás en 2,4 (o al revés si "
+                               "hay paredes de por medio)",
+                               "Cambia el canal del router si hay muchas redes vecinas",
+                               "Un repetidor o un punto de acceso por cable resuelve el caso difícil"])
+                if wifi.get("band_ghz") == "2.4" and capaz in ("802.11ac", "802.11ax", "802.11be"):
+                    self.add(
+                        id="wifi_banda", title="Conectado a la banda de 2,4 GHz",
+                        severity="low", category="fluidez", component="system",
+                        detail="La banda de 2,4 GHz va más lejos pero es mucho más lenta y la "
+                               "comparten microondas, mandos y las redes de los vecinos. La "
+                               "tarjeta soporta 5 GHz.",
+                        gain=0.06, gain_note="velocidad de red",
+                        effort="bajo", risk="nulo",
+                        steps=["Conéctate a la red de 5 GHz (suele tener el mismo nombre con «_5G»)",
+                               "Si el router usa un único nombre para las dos, mira su opción "
+                               "de «banda preferida»"])
+                continue
+
+            # Cable: un adaptador gigabit a 100 Mbps casi siempre es el cable.
+            gigabit = re.search(r"gigabit|gbe|2\.5g|\b1000\b", descripcion, re.I)
+            partes.append(f"{nombre} a {mbps:.0f} Mbps" if mbps else nombre)
+            if gigabit and 0 < mbps <= 100:
+                self.add(
+                    id="ethernet_lento",
+                    title=f"Adaptador gigabit negociando a {mbps:.0f} Mbps",
+                    severity="high", category="fluidez", component="system",
+                    detail=f"«{descripcion}» admite 1000 Mbps y ha negociado {mbps:.0f}. La causa "
+                           "casi siempre es física: un cable de categoría 5 sin más, un cable "
+                           "dañado o con un par suelto, o un switch antiguo por el camino. No "
+                           "es un ajuste de Windows.",
+                    gain=0.15, gain_note="velocidad de red local",
+                    effort="bajo", risk="nulo",
+                    steps=["Cambia el cable por uno Cat 5e o Cat 6 y prueba de nuevo",
+                           "Prueba otro puerto del router o del switch",
+                           "Comprueba que ningún equipo intermedio sea de 100 Mbps",
+                           "Revisa que la velocidad del adaptador esté en «Negociación automática»"])
+        return " · ".join(partes) if partes else "conectado"
+
+    def check_network_latency(self) -> str:
+        """Latencia y resolución DNS. Solo si se han pedido las sondas."""
+        datos = self.network or {}
+        if not datos.get("active"):
+            raise NoAplica("las sondas de red no se han pedido (--net)")
+        latencia = datos.get("latency") or {}
+        dns = datos.get("dns") or {}
+        if not latencia.get("reachable"):
+            raise SinDato("ningún destino ha respondido: sin conexión a internet, "
+                          "o un cortafuegos bloquea las sondas")
+
+        mejor = latencia["best_ms"]
+        perdida = max((t["loss_pct"] for t in latencia["targets"]), default=0)
+        partes = [f"{mejor:.0f} ms al mejor destino"]
+
+        if dns.get("median_ms"):
+            partes.append(f"DNS {dns['median_ms']:.0f} ms")
+            if dns["median_ms"] >= 120:
+                self.add(
+                    id="dns_lento", title=f"Resolución DNS lenta ({dns['median_ms']:.0f} ms)",
+                    severity="medium", category="fluidez", component="system",
+                    detail="Cada dominio nuevo de cada página espera esto antes de que empiece "
+                           "a descargarse nada. Se percibe como «internet va lento» aunque el "
+                           "ancho de banda esté perfecto. El resolutor del operador suele ser "
+                           "el culpable.",
+                    gain=0.07, gain_note="tiempo hasta que una página empieza a cargar",
+                    effort="bajo", risk="bajo",
+                    steps=["Prueba un resolutor público: 1.1.1.1 (Cloudflare) o 8.8.8.8 (Google)",
+                           "Configúralo en el router para que valga en toda la casa",
+                           "Vacía la caché con `ipconfig /flushdns` tras cambiarlo"])
+
+        if perdida >= 25:
+            partes.append(f"{perdida}% de pérdida")
+            self.add(
+                id="red_perdida", title=f"Pérdida de paquetes del {perdida}%",
+                severity="high", category="fluidez", component="system",
+                detail="Los intentos de conexión se están quedando sin respuesta. En una "
+                       "conexión sana esto es cero. Con wifi suele ser cobertura o "
+                       "interferencia; con cable, el cable o el router.",
+                gain=0.12, gain_note="estabilidad de la conexión",
+                effort="medio", risk="nulo",
+                steps=["Repite la prueba con cable para descartar el wifi",
+                       "Reinicia el router y comprueba si mejora",
+                       "Si persiste con cable, es cosa de la línea: avisa al operador"])
+        elif mejor >= 80:
+            partes.append("latencia alta")
+            self.add(
+                id="latencia_alta", title=f"Latencia alta hasta internet ({mejor:.0f} ms)",
+                severity="medium", category="fluidez", component="system",
+                detail="Es el tiempo mínimo de ida y vuelta hasta un servidor cercano. Por "
+                       "encima de 80 ms se nota en juegos y videollamadas. Puede ser el wifi, "
+                       "el router saturado o la propia línea.",
+                gain=0.08, gain_note="respuesta en juegos y videollamadas",
+                effort="medio", risk="nulo",
+                steps=["Compara con cable: si baja mucho, el problema es el wifi",
+                       "Mira si hay descargas o copias de seguridad en marcha",
+                       "Activa la gestión de cola (SQM/QoS) en el router si la tiene"])
+        return " · ".join(partes)
 
     # ------------------------------------------------------- solo Windows ----
     def check_power_plan(self) -> str:

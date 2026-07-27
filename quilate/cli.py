@@ -15,11 +15,14 @@ from .compare_report import print_comparison
 from .console import (C, banner, clear_screen, configure_output, enable_ansi,
                       read_key, section, spinner_done, spinner_step)
 from .const import APP_NAME, AUTHOR, IS_WINDOWS, WEBSITE_URL
-from .export import export_html, export_json, export_plan
+from .export import build_payload, export_html, export_json, export_plan
 from .platform_utils import is_admin, owns_console, relaunch_as_admin
 from .projection import project_improvement
 from .report import print_report
 from .storage_scan import ScanResult, default_roots, scan_large_files
+from .history import append as history_append, report as history_report
+from .history_report import print_history
+from .network import DESTINOS as NET_TARGETS, collect as collect_network
 from .sysinfo import collect_system_info
 
 
@@ -38,13 +41,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--compare", nargs=2, metavar=("ANTES", "DESPUÉS"),
                    help="comparar dos JSON de ejecuciones anteriores y salir "
                         "(no mide nada: contrasta lo ya medido)")
+    p.add_argument("--history", action="store_true",
+                   help="mostrar el histórico local de ejecuciones y su deriva, y salir")
+    p.add_argument("--no-history", action="store_true",
+                   help="no guardar esta ejecución en el histórico local")
     p.add_argument("--quick", action="store_true", help="benchmark rápido (menor precisión)")
     p.add_argument("--no-bench", action="store_true", help="solo auditoría, sin benchmark")
     p.add_argument("--no-disk", action="store_true", help="omitir las pruebas de disco")
+    p.add_argument("--no-gpu", action="store_true",
+                   help="omitir las pruebas de GPU (cómputo, VRAM y PCIe por OpenCL)")
     p.add_argument("--disk-size", type=int, default=512, metavar="MB",
                    help="tamaño del fichero de prueba de disco (por defecto 512)")
     p.add_argument("--disk-path", metavar="RUTA", default=None,
                    help="carpeta donde hacer el test de disco (por defecto: temporal del sistema)")
+    p.add_argument("--no-net", action="store_true",
+                   help="no medir latencia ni DNS (evita contactar con resolutores "
+                        "públicos: 1.1.1.1, 8.8.8.8, 9.9.9.9)")
     p.add_argument("--check-drivers", action="store_true",
                    help="consultar en línea (Windows Update) si hay drivers más nuevos; "
                         "tarda 10-30 s")
@@ -167,6 +179,10 @@ def main() -> int:
     if args.no_color:
         C.disable()
 
+    if args.history:
+        print_history(history_report())
+        return 0
+
     if args.compare:
         # Comparar no mide nada, así que ni inventario, ni benchmark, ni
         # permisos: se contrasta lo que ya está guardado y se sale.
@@ -190,7 +206,8 @@ def main() -> int:
     bench: Benchmark | None = None
     if not args.no_bench:
         bench = Benchmark(quick=args.quick, disk_size_mb=args.disk_size,
-                          skip_disk=args.no_disk, target_dir=args.disk_path)
+                          skip_disk=args.no_disk, target_dir=args.disk_path,
+                          skip_gpu=args.no_gpu)
         try:
             bench.run_all()
         except KeyboardInterrupt:
@@ -212,7 +229,25 @@ def main() -> int:
         except Exception as exc:
             spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
 
-    auditor = Auditor(si, bench, scan, check_drivers=args.check_drivers)
+    section("Red")
+    spinner_step("Enlace y adaptadores".ljust(38))
+    try:
+        red = collect_network(active=not args.no_net)
+        enlace = next((a for a in red.get("connected", [])), None)
+        spinner_done(f"{enlace['name']} · {enlace['link_mbps']:.0f} Mbps" if enlace
+                     and enlace.get("link_mbps") else "sin enlace detectado",
+                     ok=bool(enlace))
+    except Exception as exc:
+        red = {}
+        spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
+    if args.no_net:
+        print(f"  {C.DIM}Latencia y DNS omitidas por --no-net.{C.RESET}")
+    else:
+        print(f"  {C.DIM}Latencia y DNS medidas contra resolutores públicos "
+              f"({', '.join(h for h, _, _ in NET_TARGETS)}). Se cronometra el saludo "
+              f"TCP; no se envía ningún dato. Omítelas con --no-net.{C.RESET}")
+
+    auditor = Auditor(si, bench, scan, check_drivers=args.check_drivers, network=red)
     try:
         auditor.run()
     except KeyboardInterrupt:
@@ -220,6 +255,14 @@ def main() -> int:
 
     projection = project_improvement(bench, auditor.findings)
     print_report(si, bench, auditor, projection)
+
+    # El histórico se guarda solo si hubo benchmark: una entrada sin puntuación
+    # no aporta nada a una serie y ensuciaría las tendencias.
+    if bench and bench.results and not args.no_history:
+        destino = history_append(build_payload(si, bench, auditor, projection))
+        if destino:
+            print(f"  {C.DIM}Guardado en el histórico local ({destino}). "
+                  f"Míralo con --history.{C.RESET}\n")
 
     # --- Exportaciones ---
     outputs: list[str] = []

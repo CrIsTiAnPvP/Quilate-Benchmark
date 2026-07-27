@@ -104,6 +104,21 @@ def _ps_raw(command: str, timeout: int = 30) -> tuple[Any, str | None]:
         return out, None
 
 
+def run_cmd_bytes(args: list[str], timeout: int = 25) -> bytes | None:
+    """Igual que `run_cmd` pero sin decodificar.
+
+    No todos los programas de consola de Windows usan la misma codificación:
+    `fsutil` responde en la página OEM y `netsh wlan` en UTF-8. Cuando hay que
+    probar varias, decodificar aquí obligaría a ejecutar el comando dos veces.
+    """
+    try:
+        res = subprocess.run(args, capture_output=True, timeout=timeout,
+                             creationflags=CREATE_NO_WINDOW)
+        return res.stdout if res.returncode == 0 else None
+    except Exception:
+        return None
+
+
 def ps(command: str, timeout: int = 30) -> Any:
     """Ejecuta PowerShell devolviendo JSON parseado (o None)."""
     return _ps_raw(command, timeout)[0]
