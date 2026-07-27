@@ -28,6 +28,18 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { Write-Host "No se pudo instalar PyInstaller." -ForegroundColor Red; exit 1 }
 }
 
+# El .ico va versionado en el repositorio, asi que solo se regenera cuando el
+# PNG de origen es mas reciente. Asi se puede compilar sin tener Pillow.
+if ((Test-Path "quilate.png") -and
+    (-not (Test-Path "quilate.ico") -or
+     (Get-Item "quilate.png").LastWriteTime -gt (Get-Item "quilate.ico").LastWriteTime)) {
+    Write-Host "Regenerando quilate.ico desde quilate.png..." -ForegroundColor Cyan
+    & $py -c "import PIL" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { & $py -m pip install --quiet pillow }
+    & $py tools\make_icon.py
+    if ($LASTEXITCODE -ne 0) { Write-Host "No se pudo generar el icono." -ForegroundColor Red; exit 1 }
+}
+
 Write-Host "Limpiando compilaciones anteriores..." -ForegroundColor Cyan
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 
@@ -39,6 +51,7 @@ Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
     --onefile `
     --console `
     --name quilate `
+    --icon quilate.ico `
     --collect-all psutil `
     --hidden-import quilate `
     --exclude-module tkinter `

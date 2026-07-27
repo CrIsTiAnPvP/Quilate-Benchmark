@@ -84,7 +84,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
 Genera `dist\quilate.exe`: un único archivo de ~6 MB, autocontenido, que se
-puede copiar a un pendrive y ejecutar en cualquier Windows de 64 bits. Acepta
+puede copiar a un pendrive y ejecutar en cualquier Windows de 64 bits. Lleva el
+icono del proyecto, que se regenera desde `quilate.png` con
+`python tools/make_icon.py` cuando cambia el logo. Acepta
 las mismas opciones que el script. Al ejecutarlo con doble clic espera a que
 pulses Enter antes de cerrarse, para que dé tiempo a leer el informe.
 
