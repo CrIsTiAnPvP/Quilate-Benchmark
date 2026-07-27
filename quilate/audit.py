@@ -14,8 +14,8 @@ from .sensors import cpu_temperature, gpu_temperature, temperature_report, tempe
 from .storage_scan import ScanResult, candidate_bytes
 from .console import C, human_bytes, section, spinner_done, spinner_step
 from .const import IS_LINUX, IS_WINDOWS
-from .platform_utils import (ps_json, reg_list_values, reg_read, run_cmd,
-                             winreg)
+from .platform_utils import (pending_driver_updates, ps_json, reg_list_values,
+                             reg_read, run_cmd, winreg)
 from .sysinfo import KIND_LABELS, SystemInfo, local_volumes
 
 
@@ -50,10 +50,11 @@ class Finding:
 
 class Auditor:
     def __init__(self, si: SystemInfo, bench: Benchmark | None,
-                 scan: ScanResult | None = None):
+                 scan: ScanResult | None = None, check_drivers: bool = False):
         self.si = si
         self.bench = bench
         self.scan = scan
+        self.check_drivers = check_drivers
         self.findings: list[Finding] = []
         self.checks_run = 0
         self.notes: list[str] = []
@@ -74,6 +75,7 @@ class Auditor:
             ("Frecuencia sostenida de CPU", self.check_cpu_frequency),
             ("Programas de inicio", self.check_startup),
             ("Procesos en segundo plano", self.check_background_load),
+            ("Tiempo sin reiniciar", self.check_uptime),
             ("Antigüedad de la instalación", self.check_os_age),
             ("Drivers gráficos", self.check_gpu_drivers),
         ]
@@ -486,25 +488,102 @@ class Auditor:
             return f"{years:.1f} años (recomendable reinstalar)"
         return f"{years:.1f} años"
 
+    def check_uptime(self) -> str:
+        """Tiempo sin reiniciar.
+
+        En Windows la trampa es que «Apagar» no reinicia el kernel: con el inicio
+        rápido activado guarda la sesión hibernada y el contador sigue subiendo.
+        Por eso mucha gente cree que apaga a diario y lleva semanas sin reiniciar
+        de verdad, acumulando fugas de memoria y actualizaciones a medio aplicar.
+        """
+        hours = self.si.uptime_hours
+        days = hours / 24
+        if days >= 14:
+            severity, gain = ("high", 0.14) if days >= 30 else ("medium", 0.10)
+            self.add(
+                id="uptime_long", title=f"{days:.0f} días sin reiniciar el equipo",
+                severity=severity, category="fluidez", component="system",
+                detail=f"El sistema lleva {days:.0f} días encendido ({hours:.0f} h). Con el tiempo "
+                       "se acumulan fugas de memoria de aplicaciones de larga vida, controladores "
+                       "que no liberan recursos, actualizaciones pendientes de aplicar y "
+                       "fragmentación del espacio de trabajo. Reiniciar es la optimización más "
+                       "barata que existe. Ojo: con el inicio rápido activado, «Apagar» no "
+                       "reinicia el kernel y este contador no se pone a cero; hay que usar "
+                       "«Reiniciar».",
+                gain=gain, gain_note="fluidez y memoria disponible",
+                effort="bajo", risk="nulo",
+                steps=["Usa Inicio → Reiniciar (no «Apagar»: con inicio rápido no es lo mismo)",
+                       "Aprovecha para instalar las actualizaciones pendientes",
+                       "Si lo dejas encendido por descargas, programa un reinicio semanal"])
+            return f"{days:.0f} días encendido"
+        if days >= 7:
+            return f"{days:.0f} días encendido (empieza a ser mucho)"
+        return f"{hours:.0f} h encendido"
+
     def check_gpu_drivers(self) -> str:
         if not self.si.gpus:
             return "sin datos"
-        stale = [g for g in self.si.gpus if (g.get("driver_age_days") or 0) > 400]
-        if stale:
-            g = stale[0]
+
+        newer = self._newer_gpu_driver()
+        if newer:
             self.add(
-                id="gpu_driver", title=f"Driver gráfico con {g['driver_age_days']} días de antigüedad",
+                id="gpu_driver_new", title="Hay un driver gráfico más nuevo disponible",
                 severity="medium", category="fluidez", component="system",
-                detail=f"{g['name']} usa un driver de {g.get('driver_date')}. Los drivers de GPU "
-                       "incluyen optimizaciones específicas por juego y correcciones de rendimiento; "
-                       "es una de las actualizaciones con mejor relación beneficio/esfuerzo.",
+                detail="Windows Update ofrece una actualización de controlador de vídeo "
+                       f"pendiente de instalar: {newer}. Los drivers de GPU traen optimizaciones "
+                       "por juego y correcciones de rendimiento. Nota: la web del fabricante "
+                       "suele ir por delante de Windows Update, así que compara antes de decidir "
+                       "de dónde instalarlo.",
                 gain=0.10, gain_note="rendimiento gráfico (variable por título)",
                 effort="bajo", risk="bajo",
-                steps=["Descarga el driver desde nvidia.com / amd.com / intel.com, no desde Windows Update",
+                steps=["Descárgalo de nvidia.com / amd.com / intel.com: suele ser más reciente",
                        "En NVIDIA elige instalación personalizada → limpia",
-                       "Si vienes de otra marca de GPU, limpia primero con DDU en modo seguro"])
-            return f"driver de {g.get('driver_date')} (desactualizado)"
-        return "actualizados"
+                       "O instálalo desde Configuración → Windows Update → Opciones avanzadas → "
+                       "Actualizaciones opcionales"])
+            return f"hay uno más nuevo: {newer[:40]}"
+
+        oldest = max(self.si.gpus, key=lambda g: g.get("driver_age_days") or 0)
+        age = oldest.get("driver_age_days")
+        if age is None:
+            return "sin fecha de driver"
+        # Los fabricantes publican drivers cada 4-6 semanas, así que la
+        # antigüedad es un indicador razonable cuando no se puede consultar.
+        if age > 365:
+            severity, gain = "medium", 0.10
+        elif age > 180:
+            severity, gain = "low", 0.06
+        else:
+            return f"al día ({age} días)"
+        self.add(
+            id="gpu_driver", title=f"Driver gráfico con {age} días de antigüedad",
+            severity=severity, category="fluidez", component="system",
+            detail=f"{oldest['name']} usa un driver de {oldest.get('driver_date')}. Los "
+                   "fabricantes publican versiones cada 4-6 semanas con optimizaciones "
+                   "específicas por juego y correcciones de rendimiento; es una de las "
+                   "actualizaciones con mejor relación beneficio/esfuerzo. No se ha podido "
+                   "comprobar en línea si hay uno más nuevo: ejecuta con --check-drivers "
+                   "para consultarlo.",
+            gain=gain, gain_note="rendimiento gráfico (variable por título)",
+            effort="bajo", risk="bajo",
+            steps=["Descarga el driver desde nvidia.com / amd.com / intel.com, no desde Windows Update",
+                   "En NVIDIA elige instalación personalizada → limpia",
+                   "Si vienes de otra marca de GPU, limpia primero con DDU en modo seguro"])
+        return f"driver de {oldest.get('driver_date')} ({age} días)"
+
+    def _newer_gpu_driver(self) -> str | None:
+        """Título de la actualización de driver gráfico pendiente, si se pidió
+        comprobarlo. La consulta a Windows Update tarda 10-30 s, así que solo se
+        hace con --check-drivers."""
+        if not self.check_drivers or not IS_WINDOWS:
+            return None
+        pending = pending_driver_updates()
+        for title in pending:
+            lowered = title.lower()
+            if any(k in lowered for k in ("nvidia", "geforce", "radeon", "amd ", "intel(r) "
+                                          "graphics", "intel corporation - display", "display",
+                                          "gráfic", "graphics")):
+                return title
+        return None
 
     # ------------------------------------------------------- solo Windows ----
     def check_power_plan(self) -> str:

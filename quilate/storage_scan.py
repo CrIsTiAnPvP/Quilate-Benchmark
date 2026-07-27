@@ -64,6 +64,14 @@ SPECIAL_FILES = {
     "hiberfil.sys": "Hibernación e inicio rápido",
 }
 
+# Estos nunca entran en la lista de archivos grandes: son enormes (el de
+# paginacion puede pasar de 18 GB) y encabezarian el ranking, pero no se pueden
+# borrar ni tiene sentido plantearselo. Se informan aparte, con su explicacion.
+SKIP_FILES = set(SPECIAL_FILES) | {"dumpstack.log", "dumpstack.log.tmp"}
+
+# Cuantos ficheros se guardan de cada categoria para poder desglosarla.
+PER_CATEGORY_TOP = 15
+
 
 @dataclass
 class ScanResult:
@@ -150,7 +158,7 @@ def scan_large_files(roots: list[str], min_size: int = 128 * 1024**2,
                     continue
 
                 result.scanned_files += 1
-                if stat.st_size < min_size:
+                if stat.st_size < min_size or entry.name.lower() in SKIP_FILES:
                     continue
                 category = _categorize(entry.path, entry.name)
                 age_days = max(0, (now - datetime.fromtimestamp(stat.st_mtime)).days)
@@ -164,15 +172,20 @@ def scan_large_files(roots: list[str], min_size: int = 128 * 1024**2,
         if result.truncated:
             break
 
+    found.sort(key=lambda f: -f["size"])
     for f in found:
-        bucket = result.by_category.setdefault(f["category"], {"count": 0, "size": 0})
+        bucket = result.by_category.setdefault(f["category"],
+                                               {"count": 0, "size": 0, "files": []})
         bucket["count"] += 1
         bucket["size"] += f["size"]
+        # Cada categoría guarda sus mayores para poder desplegarla y ver qué hay
+        # dentro sin tener que buscar en la lista general.
+        if len(bucket["files"]) < PER_CATEGORY_TOP:
+            bucket["files"].append(f)
         result.total_large += f["size"]
         if f["category"] in RECLAIMABLE:
             result.reclaimable += f["size"]
 
-    found.sort(key=lambda f: -f["size"])
     result.files = found[:top]
     result.by_category = dict(sorted(result.by_category.items(), key=lambda x: -x[1]["size"]))
     result.special = _special_files(roots)

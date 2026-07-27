@@ -38,6 +38,9 @@ def parse_args() -> argparse.Namespace:
                    help="tamaño del fichero de prueba de disco (por defecto 512)")
     p.add_argument("--disk-path", metavar="RUTA", default=None,
                    help="carpeta donde hacer el test de disco (por defecto: temporal del sistema)")
+    p.add_argument("--check-drivers", action="store_true",
+                   help="consultar en línea (Windows Update) si hay drivers más nuevos; "
+                        "tarda 10-30 s")
     p.add_argument("--no-files", action="store_true",
                    help="omitir el rastreo de archivos grandes")
     p.add_argument("--scan-path", metavar="RUTA", action="append", default=None,
@@ -101,7 +104,7 @@ def main() -> int:
         except Exception as exc:
             spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
 
-    auditor = Auditor(si, bench, scan)
+    auditor = Auditor(si, bench, scan, check_drivers=args.check_drivers)
     try:
         auditor.run()
     except KeyboardInterrupt:

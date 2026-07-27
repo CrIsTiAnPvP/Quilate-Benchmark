@@ -6,6 +6,8 @@ pueda enviar por correo o abrir sin conexion y siga funcionando igual.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -13,8 +15,8 @@ from typing import Any
 
 from ..audit import Auditor, SEVERITY_ORDER
 from ..benchmark import Benchmark
-from ..components import (ComponentCard, _no_score_text,
-                          build_component_cards)
+from ..components import (ComponentCard, _no_score_text, build_component_cards,
+                          finding_group)
 from ..console import grade
 from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE, WEBSITE_URL
 from ..projection import priority_rank
@@ -77,6 +79,8 @@ ICONS = {
                 '2 2z"/>',
     "i-gauge": '<path d="M12 21a9 9 0 1 1 9-9"/><line x1="12" y1="12" x2="17" y2="8"/>'
                '<circle cx="12" cy="12" r="1.6"/>',
+    "i-download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+                  '<polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
     "i-shield": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
 }
 
@@ -90,7 +94,8 @@ NAV_LABELS = {"componentes": "Componentes", "proyeccion": "Proyección",
 
 HTML_CSS = """
 :root{--bg:#0d1117;--card:#161b22;--card2:#1b2028;--line:#262d38;--txt:#e6edf3;
---dim:#8b949e;--acc:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--brand:#bc8cff;
+--dim:#8b949e;--acc:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--brand:#e8b33e;
+--brand-dark:#8a6a1e;
 --nav:56px}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
@@ -204,6 +209,10 @@ border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:14px}
 .finding ul{margin:0;padding-left:20px;color:#c9d1d9;font-size:14px}
 .finding li{margin-bottom:5px}
 .finding:target{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.steps-link{margin:0}
+.steps-link a{display:inline-flex;align-items:center;gap:7px;font-size:13px;
+text-decoration:none;color:var(--acc)}
+.steps-link a:hover{text-decoration:underline}
 details.howto{margin-top:14px;border:1px solid var(--line);border-radius:9px;
 background:rgba(88,166,255,.04)}
 details.howto>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:9px;
@@ -221,6 +230,42 @@ details.howto[open]>summary .chev{transform:rotate(90deg)}
 .howto-item ol{margin:9px 0 0;padding-left:20px;font-size:14px;color:#c9d1d9}
 .howto-item li{margin-bottom:6px}
 .scan-note{color:var(--dim);font-size:13px;margin:0 0 12px}
+
+/* selección y exportación por secciones */
+.pick{display:flex;align-items:center;margin-right:2px}
+.pick input{width:15px;height:15px;accent-color:var(--acc);cursor:pointer;margin:0}
+.exp{background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:7px;
+padding:3px 8px;font:inherit;font-size:11px;cursor:pointer;display:inline-flex;align-items:center;
+gap:5px;margin-left:10px;text-transform:none;letter-spacing:0}
+.exp:hover{color:var(--acc);border-color:var(--acc)}
+details.sec.picked{border-color:var(--acc);box-shadow:0 0 0 1px rgba(88,166,255,.35)}
+.btn[disabled]{opacity:.45;cursor:default}
+.btn[disabled]:hover{color:var(--dim);border-color:var(--line)}
+.exp-wrap{max-width:1040px;margin:0 auto;padding:28px 20px 60px}
+.exp-sec{margin-bottom:34px}
+.exp-h2{font-size:13px;text-transform:uppercase;letter-spacing:1.4px;color:var(--acc);
+margin:0 0 14px;font-weight:700;display:flex;align-items:center;gap:9px}
+.exp-src{color:var(--dim);font-size:12px;border-left:2px solid var(--line);padding-left:10px;
+margin:0 0 26px}
+
+/* categorías desplegables del rastreo de archivos */
+details.cat{border-bottom:1px solid var(--line)}
+details.cat:last-of-type{border-bottom:none}
+details.cat>summary{list-style:none;cursor:pointer;display:grid;
+grid-template-columns:minmax(120px,1.4fr) 90px 90px 130px minmax(80px,1fr) 18px;
+align-items:center;gap:10px;padding:10px 4px;font-size:14px}
+details.cat>summary::-webkit-details-marker{display:none}
+details.cat>summary:hover{background:rgba(88,166,255,.05)}
+details.cat[open]>summary .chev{transform:rotate(90deg)}
+details.cat .chev{color:var(--dim);transition:transform .18s}
+details.cat .cat-count{color:var(--dim);font-size:12px}
+details.cat .cat-bar{display:block;height:7px}
+details.cat .cat-bar .fill{display:block}
+.cat-body{padding:4px 4px 16px}
+@media (max-width:720px){
+details.cat>summary{grid-template-columns:1fr auto 18px}
+details.cat .cat-count,details.cat .cat-bar{display:none}
+}
 .pathcell{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;
 word-break:break-all}
 code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:13px;
@@ -241,11 +286,13 @@ transition:.2s;border-radius:50%;width:42px;height:42px;justify-content:center;p
 .tb .logo{display:none}
 }
 @media print{
-.topbar,.side,#top{display:none}
+.topbar,.side,#top,.exp,.pick{display:none}
 body{background:#fff;color:#000}
 .layout{display:block;padding:0}
 details.sec,.card,.panel,.hero .box{border-color:#ccc;background:#fff;break-inside:avoid}
 details.sec>summary{color:#000}
+/* el dorado sobre papel blanco no se lee: se oscurece solo al imprimir */
+footer a,.hero .n[style*="--brand"]{color:var(--brand-dark)}
 }
 """
 
@@ -287,6 +334,82 @@ HTML_JS = """
   window.addEventListener('scroll', spy, {passive:true});
   window.addEventListener('resize', spy);
   spy();
+
+  // ---- Exportacion de secciones -------------------------------------------
+  // El fichero resultante se construye con el mismo <style> y el mismo sprite de
+  // iconos que este informe, asi que sale igual de autocontenido: se puede
+  // enviar por correo y abrir sin conexion.
+  var exportBtn = document.getElementById('export-sel');
+  var exportLabel = exportBtn.querySelector('span');
+  var host = (document.body.dataset.host || 'equipo');
+  var stamp = (document.body.dataset.stamp || '');
+
+  function picked(){
+    return secs.filter(function(s){
+      var box = s.querySelector('input[data-pick]');
+      return box && box.checked;
+    });
+  }
+
+  function refresh(){
+    var n = picked().length;
+    exportLabel.textContent = 'Exportar (' + n + ')';
+    exportBtn.disabled = n === 0;
+    secs.forEach(function(s){
+      var box = s.querySelector('input[data-pick]');
+      s.classList.toggle('picked', !!box && box.checked);
+    });
+  }
+
+  function buildDocument(sections){
+    var style = document.querySelector('style').outerHTML;
+    var sprite = document.getElementById('sprite').outerHTML;
+    var head = document.querySelector('header.page').innerHTML;
+    var foot = document.querySelector('footer').outerHTML;
+    var titles = sections.map(function(s){ return s.dataset.title; });
+    var origen = 'Extracto del informe completo' +
+                 (stamp ? ' generado el ' + stamp : '') +
+                 '. Secciones incluidas: ' + titles.join(' · ') + '.';
+    var cuerpo = sections.map(function(s){
+      var ico = '<svg class="ic lg" viewBox="0 0 24 24" aria-hidden="true"><use href="#' +
+                s.dataset.icon + '"/></svg>';
+      return '<section class="exp-sec"><h2 class="exp-h2">' + ico + s.dataset.title +
+             '</h2>' + s.querySelector('.body').innerHTML + '</section>';
+    }).join('');
+    return '<!DOCTYPE html>\\n<html lang="es"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>' + titles.join(' + ') + ' \\u00b7 ' + host + '</title>' + style +
+      '</head><body>' + sprite + '<div class="exp-wrap"><header class="page">' + head +
+      '</header><p class="exp-src">' + origen + '</p>' + cuerpo + foot +
+      '</div></body></html>';
+  }
+
+  function descargar(sections){
+    if (!sections.length) return;
+    var nombre = 'quilate-' + host + '-' +
+      (sections.length === 1 ? sections[0].dataset.slug : 'seleccion') + '.html';
+    var blob = new Blob([buildDocument(sections)], {type:'text/html;charset=utf-8'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = nombre;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 10000);
+  }
+
+  secs.forEach(function(s){
+    var box = s.querySelector('input[data-pick]');
+    var btn = s.querySelector('button[data-export]');
+    // Sin esto, cualquier clic dentro del <summary> pliega la seccion.
+    if (box) box.addEventListener('click', function(ev){ ev.stopPropagation(); refresh(); });
+    if (btn) btn.addEventListener('click', function(ev){
+      ev.preventDefault(); ev.stopPropagation(); descargar([s]);
+    });
+  });
+  exportBtn.addEventListener('click', function(){ descargar(picked()); });
+  refresh();
 })();
 """
 
@@ -304,7 +427,13 @@ def _icon(name: str, cls: str = "ic") -> str:
 def _sprite() -> str:
     symbols = "".join(f'<symbol id="{k}" viewBox="0 0 24 24">{v}</symbol>'
                       for k, v in ICONS.items())
-    return f'<svg style="display:none" aria-hidden="true">{symbols}</svg>'
+    return f'<svg id="sprite" style="display:none" aria-hidden="true">{symbols}</svg>'
+
+
+def _slug(text: str) -> str:
+    """Nombre de fichero seguro a partir del título de la sección."""
+    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-") or "seccion"
 
 
 def _score_color(pct: float) -> str:
@@ -327,8 +456,16 @@ def _html_bar(pct: float) -> str:
 
 def _section(sid: str, label: str, icon: str, inner: str, count: str = "") -> str:
     cnt = f'<span class="cnt">{_e(count)}</span>' if count else ""
-    return (f'<details class="sec" id="{sid}" open>'
-            f'<summary>{_icon(icon)} {_e(label)}{cnt}{_icon("i-chev", "ic chev")}</summary>'
+    # La casilla y el botón viven dentro del <summary>: el JS corta ahí la
+    # propagación del clic para que marcar o exportar no pliegue la sección.
+    pick = (f'<span class="pick"><input type="checkbox" data-pick="{sid}" '
+            f'title="Marcar para exportar varias secciones juntas"></span>')
+    export = (f'<button class="exp" data-export="{sid}" '
+              f'title="Exportar solo esta sección">{_icon("i-download")}Exportar</button>')
+    return (f'<details class="sec" id="{sid}" data-title="{_e(label)}" '
+            f'data-slug="{_slug(label)}" data-icon="{icon}" open>'
+            f"<summary>{pick}{_icon(icon)} {_e(label)}{cnt}{export}"
+            f'{_icon("i-chev", "ic chev")}</summary>'
             f'<div class="body">{inner}</div></details>')
 
 
@@ -544,8 +681,8 @@ def _html_component_cards(cards: list[ComponentCard]) -> str:
             note = f'<span class="note" style="color:var(--dim)">{_no_score_text(card)}</span>'
 
         icon = _icon(COMPONENT_ICONS.get(card.key, "i-sys"), "ic lg")
-        block = [f'<div class="card"><div class="chead"><h3>{icon}{_e(card.label)}</h3>'
-                 f"{note}</div>"]
+        block = [f'<div class="card" id="c-{_e(card.key)}"><div class="chead">'
+                 f"<h3>{icon}{_e(card.label)}</h3>{note}</div>"]
 
         if card.specs:
             specs = "".join(f'<div class="k">{_e(k)}</div><div>{_e(v)}</div>'
@@ -631,7 +768,7 @@ def _storage_scan_block(scan: ScanResult) -> str:
 
     out = f'<div class="card">{head}'
     if scan.by_category:
-        trs = ""
+        rows = ""
         biggest = max(v["size"] for v in scan.by_category.values()) or 1
         for cat, data in scan.by_category.items():
             if cat in RECLAIMABLE:
@@ -643,18 +780,36 @@ def _storage_scan_block(scan: ScanResult) -> str:
             else:
                 tag = ""
                 color = "var(--dim)"
-            trs += (f"<tr><td>{_e(cat.capitalize())}</td><td>{_human(data['size'])}</td>"
-                    f"<td>{data['count']}</td><td>{tag}</td>"
-                    f'<td><div class="track"><div class="fill" '
-                    f'style="width:{data["size"] / biggest * 100:.0f}%;background:{color}">'
-                    f"</div></div></td></tr>")
-        out += ('<div class="sub-h">Por tipo</div><div class="tw"><table>'
-                "<tr><th>Categoría</th><th>Tamaño</th><th>Ficheros</th><th></th><th></th></tr>"
-                + trs + "</table></div>"
-                f'<p class="scan-note">Total {_human(scan.total_large)}: '
-                f'<span class="gain">{_human(safe)}</span> es basura y '
-                f'<span style="color:var(--warn)">{_human(review)}</span> son candidatos '
-                f"a revisar antes de borrar.</p>")
+            files = data.get("files") or []
+            listado = ""
+            for f in files:
+                listado += (f"<tr><td>{_human(f['size'])}</td><td>{f['age_days']} días</td>"
+                            f'<td class="pathcell">{_e(f["path"])}</td></tr>')
+            restantes = data["count"] - len(files)
+            pie = (f'<p class="scan-note">…y {restantes} más de esta categoría.</p>'
+                   if restantes > 0 else "")
+            # Cada categoría se despliega para ver exactamente qué hay dentro:
+            # decidir si sobra un grupo entero solo se puede con los nombres.
+            rows += (
+                f'<details class="cat"><summary>'
+                f'<span class="cat-name">{_e(cat.capitalize())}</span>'
+                f'<span class="cat-size">{_human(data["size"])}</span>'
+                f'<span class="cat-count">{data["count"]} ficheros</span>'
+                f"<span class=\"cat-tag\">{tag}</span>"
+                f'<span class="track cat-bar"><span class="fill" '
+                f'style="width:{data["size"] / biggest * 100:.0f}%;background:{color}"></span>'
+                f"</span>"
+                f'{_icon("i-chev", "ic chev")}</summary>'
+                f'<div class="cat-body"><div class="tw"><table>'
+                f"<tr><th>Tamaño</th><th>Sin tocar</th><th>Ruta</th></tr>{listado}</table></div>"
+                f"{pie}</div></details>")
+        out += ('<div class="sub-h">Por tipo</div>'
+                '<p class="scan-note">Despliega una categoría para ver qué ficheros la '
+                "componen.</p>" + rows
+                + f'<p class="scan-note" style="margin-top:14px">Total '
+                  f'{_human(scan.total_large)}: <span class="gain">{_human(safe)}</span> es '
+                  f'basura y <span style="color:var(--warn)">{_human(review)}</span> son '
+                  f"candidatos a revisar antes de borrar.</p>")
     out += "</div>"
 
     if scan.files:
@@ -752,16 +907,24 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
                      f"{len(actionable)} acciones"))
 
     if findings:
+        # Aquí va el diagnóstico, no el procedimiento: los pasos viven en la
+        # ficha del componente, dentro de «Cómo aplicar estas mejoras». Repetirlos
+        # obligaría a mantener dos copias y alargaría esta sección sin aportar.
+        labels = {c.key: c.label for c in cards}
         detail = ""
         for f in findings:
-            steps = "".join(f"<li>{_e(s)}</li>" for s in f.steps)
             gain = (f'<span class="gain">Mejora estimada +{f.gain * 100:.0f}%</span> '
                     f'<span style="color:var(--dim)">({_e(f.gain_note)})</span>') if f.gain else ""
+            group = finding_group(f)
+            enlace = ""
+            if f.steps and group in labels:
+                enlace = (f'<p class="steps-link"><a href="#c-{_e(group)}">{_icon("i-wrench")}'
+                          f"Los {len(f.steps)} pasos para solucionarlo están en la ficha de "
+                          f"{_e(labels[group])}</a></p>")
             detail += (f'<div class="card finding" id="h-{_e(f.id)}"><h3>{_e(f.title)}</h3>'
                        f'<div class="tags"><span class="badge b-{f.severity}">{f.severity}</span>'
                        f" &nbsp; {_e(f.category)} · esfuerzo {_e(f.effort)} · riesgo "
-                       f"{_e(f.risk)} &nbsp; {gain}</div><p>{_e(f.detail)}</p>"
-                       f"{'<ul>' + steps + '</ul>' if steps else ''}</div>")
+                       f"{_e(f.risk)} &nbsp; {gain}</div><p>{_e(f.detail)}</p>{enlace}</div>")
         secs.append(("hallazgos", "Hallazgos en detalle", "i-alert", detail,
                      f"{len(findings)} hallazgos"))
 
@@ -783,10 +946,14 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         '<!DOCTYPE html>\n<html lang="es"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"<title>Informe de rendimiento · {_e(si.hostname)}</title>"
-        f"<style>{HTML_CSS}</style></head><body>"
+        f"<style>{HTML_CSS}</style></head>"
+        f'<body data-host="{_e(_slug(si.hostname))}" data-stamp="{date}">'
         f"{_sprite()}"
         '<div class="topbar"><div class="tb">'
         f'<div class="logo">Quilate <b>Suite</b></div><nav>{nav}</nav>'
+        '<button class="btn" id="export-sel" disabled title="Marca secciones con su casilla '
+        'para exportarlas juntas en un solo fichero">'
+        f'{_icon("i-download")}<span>Exportar (0)</span></button>'
         '<button class="btn" id="toggle-all" data-open="1">'
         f'{_icon("i-list")}<span>Colapsar todo</span></button>'
         "</div></div>"

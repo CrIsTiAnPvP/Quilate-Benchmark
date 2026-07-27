@@ -70,6 +70,7 @@ En los ejemplos siguientes, `python` asume el entorno ya activado.
 | `--scan-time 60` | Segundos de presupuesto para el rastreo (por defecto 30) |
 | `--scan-path D:\Juegos` | Carpeta extra a rastrear (repetible) |
 | `--min-file-size 512` | Umbral de "archivo grande" en MB (por defecto 128) |
+| `--check-drivers` | Consulta en línea si hay drivers más nuevos (tarda 10-30 s) |
 | `--html informe.html` | Informe HTML con branding |
 | `--json datos.json` | Datos crudos para comparar ejecuciones |
 | `--export-plan` | Genera `plan_optimizacion.ps1` (solo Windows) |
@@ -126,7 +127,11 @@ python quilate.py --disk-size 2048 --json despues.json --html despues.html
 - **Archivos grandes**: rastrea el disco de sistema con un presupuesto de tiempo
   fijo, clasifica lo que encuentra (temporales, cachés, volcados, instaladores,
   copias, vídeo…) y separa lo que es basura de lo que hay que revisar antes de
-  borrar. Solo lee metadatos: nunca abre, mueve ni borra nada.
+  borrar. En el HTML cada categoría se despliega para ver exactamente qué
+  ficheros la componen. Solo lee metadatos: nunca abre, mueve ni borra nada.
+  El archivo de paginación, el de hibernación y el de intercambio quedan fuera
+  del ranking —son enormes y lo encabezarían siempre— y se informan aparte con
+  su explicación, porque no se borran a mano.
 - **Ficha por componente**: procesador, memoria, almacenamiento, gráfica y
   sistema, cada uno con su inventario, la nota que ha sacado en las pruebas y
   las mejoras que le corresponden agrupadas, con la ganancia combinada y la
@@ -143,13 +148,18 @@ que se puede enviar por correo tal cual:
 - Barra de navegación fija con salto a cada sección y resaltado de la sección
   activa al desplazarte.
 - Secciones plegables, con botón de *colapsar / expandir todo*.
+- **Exportación por secciones**: cada sección tiene su botón para guardarla como
+  fichero HTML suelto, y una casilla para marcar varias y bajarlas juntas en un
+  único documento. Lo exportado se lleva los estilos y los iconos incrustados,
+  así que sigue siendo autocontenido.
 - Barra lateral fija con la puntuación global, la ficha resumida del equipo,
   el recuento de hallazgos por severidad y el cuello de botella detectado.
 - Inventario completo: discos físicos con su salud y todos los volúmenes con
   su ocupación, no solo la unidad de sistema.
-- Las mejoras de cada componente enlazan con el hallazgo detallado, y cada
-  componente lleva una subtarjeta plegada con el procedimiento paso a paso de
-  cada mejora que le toca.
+- Cada componente lleva una subtarjeta plegada con el procedimiento paso a paso
+  de las mejoras que le tocan. Los pasos viven solo ahí: la sección *Hallazgos
+  en detalle* se queda con el diagnóstico y enlaza a la ficha del componente,
+  para no mantener dos copias del mismo procedimiento.
 - Iconos SVG embebidos, diseño adaptable a móvil y hoja de estilo de impresión.
 
 ## Detección de hardware
