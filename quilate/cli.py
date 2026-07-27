@@ -106,11 +106,15 @@ def _try_elevate(args: argparse.Namespace) -> int | None:
 
     - Doble clic: somos los únicos de la consola, así que se va directo al aviso
       de UAC. Aceptar sustituye esta ventana por la elevada.
-    - Terminal: se pregunta primero, porque relanzarse abre otra ventana. Si se
-      acepta, esta espera al hijo y hereda su código de salida, para no dejar en
-      el aire a quien nos invocó desde un script.
+    - Terminal: se pregunta primero, porque relanzarse abre otra ventana.
     - Salida redirigida a un fichero o a una tubería: no se pide nada. Ahí no hay
       quien conteste, y la ventana nueva dejaría el destino vacío.
+
+    Solo se espera al proceso elevado cuando no hay nadie delante, es decir con
+    `--elevate` desde un script: allí el código de salida es lo único que le
+    queda a quien nos invocó. Con un usuario delante, esperar dejaría dos
+    ventanas abiertas —una trabajando y otra mirando— durante todo el análisis,
+    que además termina en un menú interactivo. Mejor ceder el turno y salir.
     """
     global _relaunched
     if args.no_elevate or not IS_WINDOWS or not getattr(sys, "frozen", False):
@@ -122,13 +126,17 @@ def _try_elevate(args: argparse.Namespace) -> int | None:
 
     print(f"  {C.CYAN}▸{C.RESET} Pidiendo permisos a Windows... "
           f"{C.DIM}acepta el aviso para el análisis completo.{C.RESET}")
-    code = relaunch_as_admin(["--no-elevate"], wait=not double_click)
+    wait = not double_click and not _interactive()
+    code = relaunch_as_admin(["--no-elevate"], wait=wait)
     if code is None:
         print(f"  {C.DIM}Permisos denegados; se continúa sin ellos.{C.RESET}")
         return None
     _relaunched = True
     if not double_click:
-        print(f"  {C.GREEN}✓{C.RESET} Análisis completado en la ventana con permisos.")
+        print(f"  {C.GREEN}✓{C.RESET} "
+              + ("Análisis completado en la ventana con permisos." if wait else
+                 "El análisis continúa en la ventana con permisos; "
+                 "esta ya puede cerrarse.\n"))
     return code
 
 

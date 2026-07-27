@@ -100,13 +100,14 @@ de cómo se haya abierto:
 - **Doble clic**: va directo al aviso de UAC. Aceptar sustituye esa ventana por
   la elevada.
 - **Desde una terminal**: pregunta antes, porque relanzarse abre una ventana
-  nueva y esta terminal se quedaría mirando. Si se acepta, espera al proceso
-  elevado y hereda su código de salida.
+  nueva. Al aceptar, el proceso original termina en el acto y devuelve el
+  control a la terminal: el análisis sigue solo en la ventana con permisos.
 - **Con la salida redirigida** a un fichero o a una tubería: no pide nada. Ahí no
   hay quien conteste, y la ventana nueva dejaría el destino vacío.
 
 `--elevate` fuerza el intento sin preguntar y `--no-elevate` lo desactiva del
-todo.
+todo. Con `--elevate` desde un script —sin nadie que mire la pantalla— el
+proceso original sí espera al elevado y hereda su código de salida.
 
 Al abrir el `.exe` con doble clic no hay forma de pasarle flags, así que cuando
 termina el análisis —y solo si no se pidió ningún fichero por línea de comandos—
