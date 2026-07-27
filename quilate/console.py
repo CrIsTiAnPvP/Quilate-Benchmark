@@ -86,6 +86,38 @@ def clear_screen() -> None:
         print("\033[2J\033[H", end="")   # respaldo: borrar y volver al origen
 
 
+def read_key() -> str:
+    """Lee una tecla y la devuelve normalizada: "" si es Enter, la letra en
+    minuscula en otro caso, y "\\x1b" para Escape, Ctrl+C o fin de entrada.
+
+    En Windows `msvcrt` lee del handle de consola sin esperar a Enter, que es lo
+    que se espera de un menu de una sola tecla. Fuera de Windows no hay
+    equivalente en la biblioteca estandar sin manosear termios, asi que se cae a
+    `input()`: alli habra que pulsar Enter ademas de la letra.
+    """
+    raw = ""
+    if IS_WINDOWS:
+        try:
+            import msvcrt
+
+            raw = msvcrt.getwch()
+            if raw in ("\x00", "\xe0"):
+                msvcrt.getwch()   # teclas extendidas (flechas, F1...): descartar
+                return "?"
+        except (ImportError, OSError):
+            raw = ""
+    if not raw:
+        try:
+            raw = input().strip()[:1]
+        except (EOFError, OSError):
+            return "\x1b"
+    if raw in ("\r", "\n"):
+        return ""
+    if raw == "\x03":            # Ctrl+C: msvcrt lo entrega como caracter
+        return "\x1b"
+    return raw.lower()
+
+
 BOX_W = 78
 
 

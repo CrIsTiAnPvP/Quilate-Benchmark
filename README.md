@@ -88,8 +88,15 @@ Genera `dist\quilate.exe`: un único archivo de ~6 MB, autocontenido, que se
 puede copiar a un pendrive y ejecutar en cualquier Windows de 64 bits. Lleva el
 icono del proyecto, que se regenera desde `quilate.png` con
 `python tools/make_icon.py` cuando cambia el logo. Acepta
-las mismas opciones que el script. Al ejecutarlo con doble clic espera a que
-pulses Enter antes de cerrarse, para que dé tiempo a leer el informe.
+las mismas opciones que el script.
+
+Al abrir el `.exe` con doble clic no hay forma de pasarle flags, así que cuando
+termina el análisis —y solo si no se pidió ningún fichero por línea de comandos—
+aparece un **menú final**: `H` genera el informe HTML, `J` los datos JSON, `P` el
+plan PowerShell, `T` los tres de golpe y `A` abre el informe en el navegador.
+Reutiliza lo que ya está medido, así que no repite el benchmark; se pueden
+generar varios seguidos y `Enter` cierra. Si la salida está redirigida a un
+fichero o a otro proceso, el menú no aparece.
 
 Una advertencia sobre las medidas: **el `.exe` puntúa algo más bajo en la prueba
 multihilo** (un 10-20%), porque cada proceso hijo tiene que arrancar el

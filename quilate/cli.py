@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import webbrowser
 from pathlib import Path
 
 from .audit import Auditor
 from .benchmark import Benchmark
 from .console import (C, banner, clear_screen, configure_output, enable_ansi,
-                      section, spinner_done, spinner_step)
+                      read_key, section, spinner_done, spinner_step)
 from .const import APP_NAME, AUTHOR, IS_WINDOWS, WEBSITE_URL
 from .export import export_html, export_json, export_plan
 from .platform_utils import is_admin
@@ -138,14 +139,141 @@ def main() -> int:
             print(f"\n  {C.YELLOW}Revisa el script antes de ejecutarlo. Cada bloque pide "
                   f"confirmación y el primero crea un punto de restauración.{C.RESET}")
         print()
+    else:
+        _export_menu(si, bench, auditor, projection)
     return 0
+
+
+# --- Menú final ------------------------------------------------------------
+
+DEFAULT_NAMES = {
+    "html": "quilate_informe.html",
+    "json": "quilate_datos.json",
+    "plan": "plan_optimizacion.ps1",
+}
+
+_menu_shown = False   # lo consulta _wait_before_closing(): ver su docstring
+
+
+def _menu_line(key: str, label: str, target: str, done: Path | None = None) -> None:
+    mark = f"{C.GREEN}✓{C.RESET}" if done else " "
+    # La columna de la tecla se pauta a 7 para que "[Enter]" no desalinee al resto.
+    print(f"  {mark} {C.GOLD}{f'[{key}]'.ljust(7)}{C.RESET} "
+          f"{label.ljust(18)} {C.DIM}{target}{C.RESET}")
+
+
+def _write_export(kind: str, si, bench, auditor, projection) -> tuple[Path, str] | None:
+    """Genera un fichero y devuelve (ruta, detalle), o None si no se pudo.
+
+    Se intenta primero en el directorio actual y, si no hay permiso —tipico si
+    el .exe se ejecuta desde Archivos de programa—, en la carpeta del usuario,
+    en vez de dar el fallo por perdido.
+    """
+    name = DEFAULT_NAMES[kind]
+    error: OSError | None = None
+    seen: list[Path] = []
+    for base in (Path.cwd(), Path.home()):
+        if base in seen:
+            continue
+        seen.append(base)
+        path = base / name
+        try:
+            if kind == "html":
+                export_html(path, si, bench, auditor, projection)
+                return path, ""
+            if kind == "json":
+                export_json(path, si, bench, auditor, projection)
+                return path, ""
+            count = export_plan(path, si, bench, auditor)
+            return path, f"{count} bloque{'s' if count != 1 else ''} automatizable" \
+                         f"{'s' if count != 1 else ''}"
+        except OSError as exc:
+            error = exc
+    print(f"{C.RED}✗{C.RESET}\n    No se pudo escribir {name}: {error}")
+    return None
+
+
+def _export_menu(si, bench, auditor, projection) -> None:
+    """Ofrece generar los informes cuando no se pidió ninguno por línea de comandos.
+
+    Al abrir el .exe con doble clic no hay forma de pasar flags: el análisis se
+    veía en pantalla y se perdía al cerrar la ventana. Aquí se generan los mismos
+    ficheros que `--html`, `--json` y `--export-plan` reutilizando lo que ya está
+    medido en memoria, sin repetir el benchmark.
+    """
+    global _menu_shown
+    try:
+        if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
+            return
+    except (AttributeError, OSError):
+        return
+
+    actions = [("h", "Informe HTML", "html"), ("j", "Datos JSON", "json")]
+    if IS_WINDOWS:
+        actions.append(("p", "Plan PowerShell", "plan"))
+    keys = {key: kind for key, _, kind in actions}
+    done: dict[str, Path] = {}
+    _menu_shown = True
+
+    section("Guardar el análisis")
+    print(f"  {C.DIM}No se pidió ningún fichero por línea de comandos. Puedes generarlos\n"
+          f"  ahora, con las medidas que ya están hechas.{C.RESET}\n")
+    while True:
+        for key, label, kind in actions:
+            _menu_line(key, label, DEFAULT_NAMES[kind], done.get(kind))
+        _menu_line("t", "Generar todo", "los ficheros de arriba")
+        if "html" in done:
+            _menu_line("a", "Abrir el informe", "en el navegador")
+        _menu_line("Enter", "Salir", "cerrar Quilate")
+        print(f"\n  {C.BOLD}Elige una opción:{C.RESET} ", end="", flush=True)
+
+        try:
+            key = read_key()
+        except KeyboardInterrupt:
+            key = "\x1b"
+        print()
+
+        if key in ("", "\x1b", "s", "q"):
+            print()
+            return
+        if key == "a" and "html" in done:
+            try:
+                webbrowser.open(done["html"].as_uri())
+            except Exception as exc:                      # navegador ausente o sin sesión
+                print(f"  {C.YELLOW}No se pudo abrir el navegador: {exc}{C.RESET}")
+            print()
+            continue
+
+        pending = [kind for _, _, kind in actions] if key == "t" else [keys.get(key)]
+        if not any(pending):
+            print(f"  {C.DIM}Opción no reconocida.{C.RESET}\n")
+            continue
+
+        for kind in pending:
+            if kind is None:
+                continue
+            print(f"  {C.CYAN}▸{C.RESET} Generando {DEFAULT_NAMES[kind]} ", end="", flush=True)
+            result = _write_export(kind, si, bench, auditor, projection)
+            if result is None:
+                continue
+            path, detail = result
+            done[kind] = path
+            extra = f"  {C.DIM}({detail}){C.RESET}" if detail else ""
+            print(f"{C.GREEN}✓{C.RESET} {path.resolve()}{extra}")
+            if kind == "plan":
+                print(f"    {C.YELLOW}Revísalo antes de ejecutarlo: cada bloque pide "
+                      f"confirmación y el primero crea un punto de restauración.{C.RESET}")
+        print()
 
 
 def _wait_before_closing() -> None:
     """Al ejecutar el .exe con doble clic, la consola se cierra sola en cuanto
     termina el proceso y no da tiempo a leer nada. Solo aplica al empaquetado y
-    con terminal interactivo: en línea de comandos o redirigido, estorbaría."""
-    if not getattr(sys, "frozen", False):
+    con terminal interactivo: en línea de comandos o redirigido, estorbaría.
+
+    Si el menú final llegó a mostrarse, la pausa ya la puso él y salir de allí es
+    un acto deliberado del usuario: encadenar otro "pulsa Enter" sobraría."""
+    if _menu_shown or not getattr(sys, "frozen", False):
         return
     try:
         if sys.stdin and sys.stdin.isatty() and sys.stdout.isatty():
