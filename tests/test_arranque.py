@@ -44,8 +44,9 @@ class SinPrivilegios(FixtureCase):
                  "boots": [], "delays": []}
         with patched(audit, boot_performance=lambda *a, **k: fallo):
             a = self.auditor(si)
-            resumen = a.check_boot_time()
-        self.assertEqual(resumen, "no medible: requiere administrador")
+            with self.assertRaises(audit.SinDato) as ctx:
+                a.check_boot_time()
+        self.assertIn("administrador", str(ctx.exception))
         self.assertEqual(a.findings, [])
         self.assertEqual(a.boot_seconds, None)
 
@@ -55,8 +56,9 @@ class SinPrivilegios(FixtureCase):
         with patched(audit, boot_performance=lambda *a, **k: {
                 "error": "el log está deshabilitado", "boots": [], "delays": []}):
             a = self.auditor(si)
-            resumen = a.check_boot_time()
-        self.assertIn("el log está deshabilitado", resumen)
+            with self.assertRaises(audit.SinDato) as ctx:
+                a.check_boot_time()
+        self.assertIn("el log está deshabilitado", str(ctx.exception))
         self.assertEqual(a.findings, [])
 
 
@@ -113,8 +115,8 @@ class ReiniciosDeActualizacion(FixtureCase):
         with patched(audit, boot_performance=lambda *a, **k: informe(
                 [arranque(200_000, actualizacion=True)])):
             a = self.auditor(si)
-            resumen = a.check_boot_time()
-        self.assertEqual(resumen, "sin arranques utilizables registrados")
+            with self.assertRaises(audit.SinDato):
+                a.check_boot_time()
         self.assertEqual(a.findings, [])
 
 
@@ -174,8 +176,12 @@ class EsquemaInesperado(FixtureCase):
         self.assertAlmostEqual(a.boot_seconds, 20.0)
 
     def test_evento_sin_campos_utiles(self):
-        a, resumen = self._auditar([{"time": "t", "fields": {"Otra": "cosa"}}])
-        self.assertEqual(resumen, "sin arranques utilizables registrados")
+        si = SystemInfo()
+        si.is_admin = True
+        with patched(audit, boot_performance=lambda *a, **k: informe(
+                [{"time": "t", "fields": {"Otra": "cosa"}}])):
+            with self.assertRaises(audit.SinDato):
+                self.auditor(si).check_boot_time()
 
     def test_retraso_sin_nombre_no_cuenta(self):
         a, _ = self._auditar([arranque(95_000)],

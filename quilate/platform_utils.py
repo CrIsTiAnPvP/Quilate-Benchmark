@@ -50,39 +50,75 @@ def run_cmd(args: list[str], timeout: int = 25, encoding: str | None = None) -> 
         return None
 
 
-def ps(command: str, timeout: int = 30) -> Any:
-    """Ejecuta PowerShell devolviendo JSON parseado (o None)."""
+class PSResult(list):
+    """Filas de una consulta, con memoria de si llegó a ejecutarse.
+
+    Devolver una lista vacía cuando PowerShell falla y otra igual de vacía
+    cuando la consulta se ejecutó y no encontró nada hace que «este equipo no
+    tiene archivo de paginación» y «no he podido preguntarlo» se lean igual.
+    Varias comprobaciones daban por buena la segunda: `ok` las separa sin
+    romper a quien solo itera la lista.
+    """
+
+    __slots__ = ("ok", "error")
+
+    def __init__(self, filas=(), ok: bool = True, error: str | None = None):
+        super().__init__(filas)
+        self.ok = ok
+        self.error = error
+
+
+# PowerShell escribe los errores no terminantes por stderr y sale con código 0,
+# así que sin este envoltorio una consulta rechazada por permisos es
+# indistinguible de una que no devolvió nada.
+_PS_ERROR = "__QUILATE_PS_ERROR__"
+
+
+def _ps_raw(command: str, timeout: int = 30) -> tuple[Any, str | None]:
+    """Devuelve (datos, error). El error es None cuando la consulta se ejecutó,
+    aunque no devolviera nada."""
     if not IS_WINDOWS:
-        return None
+        return None, "no es Windows"
     # PowerShell escribe por la consola, así que su salida sale también en la
     # página OEM y un nombre de volumen con acentos llegaría roto. Se le pide
     # UTF-8 expresamente en vez de adivinar.
     wrapped = ("$ProgressPreference='SilentlyContinue'; "
                "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
-               f"{command}")
+               "try { $ErrorActionPreference='Stop'; "
+               f"{command}"
+               f" }} catch {{ Write-Output ('{_PS_ERROR}' + $_.Exception.Message) }}")
     out = run_cmd(
         ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-Command", wrapped],
         timeout=timeout, encoding="utf-8",
     )
+    if out is None:
+        return None, "powershell no respondió"
+    if out.startswith(_PS_ERROR):
+        return None, out[len(_PS_ERROR):].strip()[:120] or "error sin descripción"
     if not out:
-        return None
+        return None, None          # se ejecutó y no devolvió nada
     try:
-        return json.loads(out)
+        return json.loads(out), None
     except json.JSONDecodeError:
-        return out
+        return out, None
 
 
-def ps_json(select: str, timeout: int = 30) -> list[dict]:
-    """Atajo: devuelve siempre una lista de dicts."""
-    data = ps(f"{select} | ConvertTo-Json -Depth 3 -Compress", timeout=timeout)
-    if data is None:
-        return []
+def ps(command: str, timeout: int = 30) -> Any:
+    """Ejecuta PowerShell devolviendo JSON parseado (o None)."""
+    return _ps_raw(command, timeout)[0]
+
+
+def ps_json(select: str, timeout: int = 30) -> PSResult:
+    """Atajo: devuelve siempre filas, y si la consulta falló lo dice en `.ok`."""
+    data, error = _ps_raw(f"{select} | ConvertTo-Json -Depth 3 -Compress", timeout=timeout)
+    if error is not None:
+        return PSResult((), ok=False, error=error)
     if isinstance(data, dict):
-        return [data]
+        return PSResult([data])
     if isinstance(data, list):
-        return [d for d in data if isinstance(d, dict)]
-    return []
+        return PSResult(d for d in data if isinstance(d, dict))
+    return PSResult()
 
 
 # Windows cronometra cada arranque y anota qué lo retrasó. Es la única fuente que
@@ -158,6 +194,23 @@ def reg_read(hive: int, path: str, name: str) -> Any:
             return value
     except (FileNotFoundError, OSError):
         return None
+
+
+def reg_key_readable(hive: int, path: str) -> bool:
+    """Si la clave se puede abrir.
+
+    `reg_list_values` devuelve {} tanto cuando la clave está vacía como cuando
+    no se ha podido abrir, y hay sitios —el recuento de programas de inicio—
+    donde eso es la diferencia entre «no arranca nada contigo» y «no he podido
+    mirarlo».
+    """
+    if not IS_WINDOWS or winreg is None:
+        return False
+    try:
+        with winreg.OpenKey(hive, path):
+            return True
+    except (FileNotFoundError, OSError):
+        return False
 
 
 def reg_list_values(hive: int, path: str) -> dict[str, Any]:

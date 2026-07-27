@@ -10,6 +10,8 @@ from pathlib import Path
 
 from .audit import Auditor
 from .benchmark import Benchmark
+from .compare import RunLoadError, compare_runs, load_run
+from .compare_report import print_comparison
 from .console import (C, banner, clear_screen, configure_output, enable_ansi,
                       read_key, section, spinner_done, spinner_step)
 from .const import APP_NAME, AUTHOR, IS_WINDOWS, WEBSITE_URL
@@ -30,8 +32,12 @@ def parse_args() -> argparse.Namespace:
         epilog="Ejemplos:\n"
                "  python quilate.py\n"
                "  python quilate.py --quick --no-color\n"
-               "  python quilate.py --disk-size 1024 --html informe.html --export-plan\n",
+               "  python quilate.py --disk-size 1024 --html informe.html --export-plan\n"
+               "  python quilate.py --compare antes.json despues.json\n",
     )
+    p.add_argument("--compare", nargs=2, metavar=("ANTES", "DESPUÉS"),
+                   help="comparar dos JSON de ejecuciones anteriores y salir "
+                        "(no mide nada: contrasta lo ya medido)")
     p.add_argument("--quick", action="store_true", help="benchmark rápido (menor precisión)")
     p.add_argument("--no-bench", action="store_true", help="solo auditoría, sin benchmark")
     p.add_argument("--no-disk", action="store_true", help="omitir las pruebas de disco")
@@ -140,6 +146,19 @@ def _try_elevate(args: argparse.Namespace) -> int | None:
     return code
 
 
+def _run_comparison(rutas: list[str]) -> int:
+    antes_path, despues_path = Path(rutas[0]), Path(rutas[1])
+    try:
+        antes, despues = load_run(antes_path), load_run(despues_path)
+    except RunLoadError as exc:
+        print(f"\n  {C.RED}No se puede comparar: {exc}{C.RESET}")
+        print(f"  {C.DIM}Genera los ficheros con `quilate --json antes.json`, aplica los "
+              f"cambios y vuelve a ejecutar con otro nombre.{C.RESET}\n")
+        return 2
+    print_comparison(compare_runs(antes, despues), antes_path.name, despues_path.name)
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     configure_output()
@@ -147,6 +166,11 @@ def main() -> int:
     enable_ansi()
     if args.no_color:
         C.disable()
+
+    if args.compare:
+        # Comparar no mide nada, así que ni inventario, ni benchmark, ni
+        # permisos: se contrasta lo que ya está guardado y se sale.
+        return _run_comparison(args.compare)
 
     banner()
     if not is_admin():

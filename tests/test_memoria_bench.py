@@ -5,35 +5,51 @@ Dos bytearray creados uno detrás de otro quedan separados por el tamaño más l
 direcciones por sus bits 6-11, así que con esa separación cada línea del destino
 desaloja a la del origen y la copia se pasa la vida fallando. Se veía en que un
 nivel de caché aparecía más lento que la RAM.
+
+Desplazar el destino una cantidad fija tampoco bastaba: el desfase resultante
+depende de dónde el asignador coloque cada reserva, y este mismo test llegó a
+medir 32 bytes —media línea de caché— con el desplazamiento puesto. Por eso
+ahora se leen las direcciones reales y se busca la media vuelta del periodo.
 """
 
 import ctypes
 import unittest
 
-from quilate.workloads import _ANTIALIAS, _unaliased_pair, memcpy_bandwidth
+from quilate.workloads import (_DESFASE_OBJETIVO, _PERIODO_CONJUNTO,
+                               _unaliased_pair, memcpy_bandwidth)
 
-# Periodo con el que dos direcciones caen en el mismo conjunto de caché.
-PERIODO = 4096
+PERIODO = _PERIODO_CONJUNTO
+LINEA_CACHE = 64
 
 
 def direccion(view: memoryview) -> int:
     return ctypes.addressof(ctypes.c_char.from_buffer(view))
 
 
+def desfase(src: memoryview, dst: memoryview) -> int:
+    """Distancia al solapamiento, en bytes: 0 = mismo conjunto de caché."""
+    resto = abs(direccion(dst) - direccion(src)) % PERIODO
+    return min(resto, PERIODO - resto)
+
+
 class Antialiasing(unittest.TestCase):
-    def test_el_desplazamiento_no_es_multiplo_del_periodo(self):
-        # Si lo fuera no serviría de nada: volveríamos al mismo conjunto.
-        self.assertNotEqual(_ANTIALIAS % PERIODO, 0)
+    def test_el_objetivo_esta_lo_mas_lejos_posible_del_solapamiento(self):
+        self.assertEqual(_DESFASE_OBJETIVO, PERIODO // 2)
 
     def test_origen_y_destino_no_comparten_conjunto(self):
         for size in (16 * 1024, 192 * 1024, 4 * 1024**2):
             with self.subTest(size=size):
                 src, dst = _unaliased_pair(size)
-                separacion = abs(direccion(dst) - direccion(src))
-                # Lo que hacía daño era una separación de casi cero módulo 4096.
-                resto = separacion % PERIODO
-                self.assertGreater(min(resto, PERIODO - resto), 32,
+                self.assertGreater(desfase(src, dst), LINEA_CACHE,
                                    "origen y destino caen en el mismo conjunto de caché")
+
+    def test_el_desfase_no_depende_de_donde_caiga_la_reserva(self):
+        # El fallo anterior era intermitente justo por esto: salía bien casi
+        # siempre y de vez en cuando el asignador colocaba los dos bloques
+        # prácticamente alineados.
+        for _ in range(20):
+            src, dst = _unaliased_pair(16 * 1024)
+            self.assertEqual(desfase(src, dst), _DESFASE_OBJETIVO)
 
     def test_el_par_tiene_el_tamano_pedido(self):
         src, dst = _unaliased_pair(1024)

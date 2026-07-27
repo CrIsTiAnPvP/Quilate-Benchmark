@@ -6,6 +6,7 @@ que dos ejecuciones en la misma maquina sean comparables.
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import math
 import os
@@ -73,10 +74,17 @@ def work_compress(megabytes: int) -> int:
     return len(zlib.compress(build_corpus(megabytes), 6))
 
 
-# Desplazamiento entre origen y destino. No puede ser multiplo de 4096: la
-# cache mapea las direcciones por sus bits 6-11, asi que ese es el periodo con
-# el que dos bloques caen en el mismo conjunto.
-_ANTIALIAS = 4096 + 64
+# La cache mapea las direcciones por sus bits 6-11: dos bloques separados por un
+# multiplo de 4096 caen en el mismo conjunto y se desalojan mutuamente.
+_PERIODO_CONJUNTO = 4096
+# Media vuelta: el punto mas lejos posible del solapamiento, por los dos lados.
+_DESFASE_OBJETIVO = _PERIODO_CONJUNTO // 2
+# Desplazamiento de reserva cuando no se puede consultar la direccion real.
+_ANTIALIAS = _PERIODO_CONJUNTO + 64
+
+
+def _direccion(vista: memoryview) -> int:
+    return ctypes.addressof(ctypes.c_char.from_buffer(vista))
 
 
 def _unaliased_pair(size_bytes: int) -> tuple[memoryview, memoryview]:
@@ -86,12 +94,25 @@ def _unaliased_pair(size_bytes: int) -> tuple[memoryview, memoryview]:
     de cabecera del objeto, o sea 16 bytes justos modulo 4096. Con esa
     separacion cada linea del destino desaloja a la del origen y la copia se
     pasa la vida fallando: 16 KiB median 4,3 GB/s en vez de 65, y un nivel de
-    cache llegaba a aparecer mas lento que la RAM. Desplazando el destino el
-    problema desaparece.
+    cache llegaba a aparecer mas lento que la RAM.
+
+    Desplazar el destino una cantidad fija no basta: el desfase que se consigue
+    depende de donde el asignador coloque cada reserva, y se han medido
+    separaciones de 32 bytes —media linea de cache— con el desplazamiento
+    puesto. Aqui se leen las direcciones reales y se elige el hueco que deja
+    los dos bloques a media vuelta del periodo, que es el punto mas lejano del
+    solapamiento se coloquen donde se coloquen.
     """
-    src = bytearray(size_bytes + _ANTIALIAS)
-    dst = bytearray(size_bytes + _ANTIALIAS)
-    return memoryview(src)[:size_bytes], memoryview(dst)[_ANTIALIAS:_ANTIALIAS + size_bytes]
+    src = bytearray(size_bytes + _PERIODO_CONJUNTO)
+    dst = bytearray(size_bytes + 2 * _PERIODO_CONJUNTO)
+    vista_src = memoryview(src)[:size_bytes]
+    hueco = _ANTIALIAS
+    try:
+        diferencia = _direccion(memoryview(dst)) - _direccion(memoryview(src))
+        hueco = (_DESFASE_OBJETIVO - diferencia) % _PERIODO_CONJUNTO
+    except (TypeError, ValueError):    # plataforma sin acceso a la direccion
+        pass
+    return vista_src, memoryview(dst)[hueco:hueco + size_bytes]
 
 
 def work_memcpy(mb: int, passes: int) -> float:
@@ -99,11 +120,17 @@ def work_memcpy(mb: int, passes: int) -> float:
     size = mb * 1024 * 1024
     unit = 8 * 1024 * 1024
     src = bytearray(os.urandom(min(size, unit))) * max(1, size // unit)
-    # Mismo motivo que en memcpy_bandwidth: el destino va desplazado para no
-    # caer en los mismos conjuntos de cache que el origen.
-    dst = bytearray(len(src) + _ANTIALIAS)
+    # Mismo motivo que en memcpy_bandwidth: el destino se coloca a media vuelta
+    # del periodo de conjuntos para no desalojar al origen linea a linea.
+    dst = bytearray(len(src) + 2 * _PERIODO_CONJUNTO)
     view_src = memoryview(src)
-    view_dst = memoryview(dst)[_ANTIALIAS:_ANTIALIAS + len(src)]
+    hueco = _ANTIALIAS
+    try:
+        hueco = (_DESFASE_OBJETIVO
+                 - (_direccion(memoryview(dst)) - _direccion(view_src))) % _PERIODO_CONJUNTO
+    except (TypeError, ValueError):
+        pass
+    view_dst = memoryview(dst)[hueco:hueco + len(src)]
     view_dst[:] = view_src  # calentar páginas
     t0 = time.perf_counter()
     for _ in range(passes):

@@ -115,8 +115,21 @@ class CapturaDeWindows11(FixtureCase):
 
 
 class SinDatos(FixtureCase):
-    def test_sin_entradas(self):
+    """«No arranca nada» y «no he podido mirarlo» tienen que ser distintos."""
+
+    RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+    def test_registro_ilegible_no_es_un_equipo_limpio(self):
         with patched(audit, FakeRegistry({}), wmi=[]):
+            a = self.auditor()
+            with self.assertRaises(audit.SinDato):
+                a.check_startup()
+            self.assertEqual(a.findings, [])
+
+    def test_equipo_de_verdad_limpio_si_concluye(self):
+        # Las claves se abren y están vacías: eso sí es un cero legítimo.
+        vacias = {f"HKCU\\{self.RUN}": {}, f"HKLM\\{self.RUN}": {}}
+        with patched(audit, FakeRegistry(vacias), wmi=[]):
             a = self.auditor()
             self.assertIn("0", a.check_startup())
             self.assertEqual(a.findings, [])

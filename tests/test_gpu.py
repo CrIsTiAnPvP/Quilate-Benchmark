@@ -8,6 +8,7 @@ integrada, que lleva años sin actualizarse porque no se usa.
 
 import unittest
 
+from quilate import audit
 from quilate.sysinfo import SystemInfo, gpu_label, primary_gpu, _is_integrated
 from tests.support import FixtureCase, load
 
@@ -90,12 +91,15 @@ class PortatilSoloConIntegrada(FixtureCase):
 class CasosLimite(FixtureCase):
     def test_sin_graficas(self):
         self.assertIsNone(primary_gpu([]))
-        self.assertEqual(self.auditor().check_gpu_drivers(), "sin datos")
+        with self.assertRaises(audit.SinDato):
+            self.auditor().check_gpu_drivers()
 
     def test_sin_fecha_de_driver(self):
         si = SystemInfo()
         si.gpus = [{"name": "X", "driver_age_days": None}]
-        self.assertEqual(self.auditor(si).check_gpu_drivers(), "sin fecha de driver")
+        with self.assertRaises(audit.SinDato) as ctx:
+            self.auditor(si).check_gpu_drivers()
+        self.assertIn("X", str(ctx.exception))
 
     def test_campos_ausentes_no_revientan(self):
         # Un JSON de una versión anterior no trae `active` ni `integrated`.

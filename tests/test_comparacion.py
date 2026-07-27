@@ -1,0 +1,195 @@
+"""Comparar dos ejecuciones sin confundir una mejora con ruido.
+
+Quilate promete «+19% tras optimizar» y hasta ahora nadie contrastaba esa
+promesa. Comparar dos JSON es fácil; lo que no es trivial es decidir cuándo la
+diferencia significa algo. Estas pruebas fijan ese criterio: una diferencia por
+debajo del margen combinado de las dos medidas se declara ruido, aunque tenga
+buen aspecto.
+"""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from quilate.compare import (MARGEN_DESCONOCIDO_PCT, RunLoadError, calibracion,
+                             comparar_hallazgos, comparar_pruebas, compare_runs,
+                             load_run, mismo_equipo)
+
+
+def ejecucion(**cambios) -> dict:
+    base = {
+        "meta": {"version": "2.2.0", "generated_at": "2026-07-27T10:00:00"},
+        "system": {"hostname": "PC", "cpu_name": "CPU X", "ram_total": 16},
+        "scores": {"overall": 100.0, "components": {"disk": 100.0}},
+        "benchmark": {"disk_read": {"name": "Disco · lectura", "unit": "MB/s",
+                                    "raw": 1000.0, "score": 100.0}},
+        "dispersion": {"disk_read": {"label": "Lectura", "runs": 3, "median": 1000.0,
+                                     "spread_pct": 4.0, "stable": True}},
+        "findings": [],
+        "projection": {},
+        "coverage": {"checks_conclusive": 20, "checks_total": 24, "unverified": []},
+        "ambient_load": {},
+    }
+    base.update(cambios)
+    return base
+
+
+def con_lectura(mbs: float, spread: float = 4.0) -> dict:
+    run = ejecucion()
+    run["benchmark"]["disk_read"]["raw"] = mbs
+    run["dispersion"]["disk_read"]["spread_pct"] = spread
+    return run
+
+
+class CargaDeFicheros(unittest.TestCase):
+    def test_fichero_inexistente(self):
+        with self.assertRaises(RunLoadError):
+            load_run(Path("no_existe_12345.json"))
+
+    def test_json_invalido(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "roto.json"
+            p.write_text("{esto no es json", encoding="utf-8")
+            with self.assertRaises(RunLoadError):
+                load_run(p)
+
+    def test_json_valido_pero_de_otra_cosa(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "otro.json"
+            p.write_text(json.dumps({"cualquier": "cosa"}), encoding="utf-8")
+            with self.assertRaises(RunLoadError) as ctx:
+                load_run(p)
+            self.assertIn("Quilate", str(ctx.exception))
+
+    def test_ida_y_vuelta(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "ok.json"
+            p.write_text(json.dumps(ejecucion()), encoding="utf-8")
+            self.assertEqual(load_run(p)["scores"]["overall"], 100.0)
+
+
+class ElMargenDecide(unittest.TestCase):
+    def _veredicto(self, antes_mbs, despues_mbs, spread=4.0):
+        filas = comparar_pruebas(con_lectura(antes_mbs, spread),
+                                 con_lectura(despues_mbs, spread))
+        return filas[0]
+
+    def test_una_subida_pequena_es_ruido(self):
+        # +3% con dos medidas que bailan un 4% cada una: umbral 4%.
+        self.assertEqual(self._veredicto(1000, 1030)["verdict"], "dentro del margen")
+
+    def test_una_subida_grande_si_es_mejora(self):
+        self.assertEqual(self._veredicto(1000, 1400)["verdict"], "mejora")
+
+    def test_una_bajada_grande_es_empeorar(self):
+        self.assertEqual(self._veredicto(1000, 600)["verdict"], "empeora")
+
+    def test_con_medidas_inestables_hace_falta_mas_diferencia(self):
+        # La misma subida del 20% se declara ruido si las medidas bailaban un 60%.
+        self.assertEqual(self._veredicto(1000, 1200, spread=4)["verdict"], "mejora")
+        self.assertEqual(self._veredicto(1000, 1200, spread=60)["verdict"],
+                         "dentro del margen")
+
+    def test_el_umbral_es_la_media_de_los_dos_recorridos(self):
+        fila = self._veredicto(1000, 1000, spread=10)
+        self.assertAlmostEqual(fila["threshold"], 10.0)
+
+    def test_sin_dispersion_se_supone_un_margen_amplio(self):
+        antes, despues = con_lectura(1000), con_lectura(1080)
+        antes["dispersion"] = {}
+        fila = comparar_pruebas(antes, despues)[0]
+        self.assertFalse(fila["margin_known"])
+        self.assertGreaterEqual(fila["threshold"], MARGEN_DESCONOCIDO_PCT / 2)
+        # +8% no puede darse por bueno cuando no se sabe cuánto bailaba la medida.
+        self.assertEqual(fila["verdict"], "dentro del margen")
+
+    def test_prueba_presente_en_una_sola_ejecucion(self):
+        antes = con_lectura(1000)
+        despues = con_lectura(1000)
+        del despues["benchmark"]["disk_read"]
+        despues["benchmark"]["disk_write"] = {"name": "Disco · escritura",
+                                              "unit": "MB/s", "raw": 500.0, "score": 50.0}
+        veredictos = {f["key"]: f["verdict"] for f in comparar_pruebas(antes, despues)}
+        self.assertEqual(veredictos["disk_read"], "solo en una de las dos")
+        self.assertEqual(veredictos["disk_write"], "solo en una de las dos")
+
+
+class Hallazgos(unittest.TestCase):
+    def test_resueltos_nuevos_y_persistentes(self):
+        antes = ejecucion(findings=[{"id": "a", "title": "A"}, {"id": "b", "title": "B"}])
+        despues = ejecucion(findings=[{"id": "b", "title": "B"}, {"id": "c", "title": "C"}])
+        h = comparar_hallazgos(antes, despues)
+        self.assertEqual([f["id"] for f in h["resueltos"]], ["a"])
+        self.assertEqual([f["id"] for f in h["persisten"]], ["b"])
+        self.assertEqual([f["id"] for f in h["nuevos"]], ["c"])
+
+
+class Calibracion(unittest.TestCase):
+    """Lo que se prometió frente a lo que pasó."""
+
+    def _cal(self, partida, proyectado, logrado):
+        antes = ejecucion(scores={"overall": partida, "components": {}},
+                          projection={"current_overall": partida,
+                                      "projected_overall": proyectado})
+        despues = ejecucion(scores={"overall": logrado, "components": {}})
+        return calibracion(antes, despues)
+
+    def test_mejora_clavada(self):
+        cal = self._cal(100, 120, 120)
+        self.assertAlmostEqual(cal["realised"], 1.0)
+        self.assertAlmostEqual(cal["predicted_gain_pct"], 20.0)
+        self.assertAlmostEqual(cal["achieved_gain_pct"], 20.0)
+
+    def test_mejora_a_medias(self):
+        self.assertAlmostEqual(self._cal(100, 120, 110)["realised"], 0.5)
+
+    def test_empeorar_da_negativo(self):
+        self.assertLess(self._cal(100, 120, 90)["realised"], 0)
+
+    def test_sin_mejora_proyectada_no_se_divide_entre_cero(self):
+        self.assertIsNone(self._cal(100, 100, 110)["realised"])
+
+    def test_sin_proyeccion_no_hay_calibracion(self):
+        self.assertIsNone(calibracion(ejecucion(), ejecucion()))
+
+
+class EquipoDistinto(unittest.TestCase):
+    def test_mismo_equipo(self):
+        coincide, difs = mismo_equipo(ejecucion(), ejecucion())
+        self.assertTrue(coincide)
+        self.assertEqual(difs, [])
+
+    def test_cpu_distinta_se_avisa(self):
+        otro = ejecucion(system={"hostname": "PC", "cpu_name": "OTRA", "ram_total": 16})
+        coincide, difs = mismo_equipo(ejecucion(), otro)
+        self.assertFalse(coincide)
+        self.assertIn("CPU", difs[0])
+
+    def test_un_campo_ausente_no_cuenta_como_diferencia(self):
+        # Un JSON antiguo sin el campo no debe hacer parecer que es otro equipo.
+        viejo = ejecucion(system={"hostname": "PC"})
+        self.assertTrue(mismo_equipo(ejecucion(), viejo)[0])
+
+
+class InformeCompleto(unittest.TestCase):
+    def test_estructura_del_resultado(self):
+        cmp = compare_runs(ejecucion(), ejecucion())
+        for clave in ("meta", "overall", "tests", "components", "findings",
+                      "coverage", "calibration", "ambient"):
+            self.assertIn(clave, cmp)
+        self.assertTrue(cmp["meta"]["same_machine"])
+        self.assertEqual(cmp["overall"]["delta_pct"], 0.0)
+
+    def test_no_revienta_con_json_minimos(self):
+        # Un export antiguo no trae dispersión, cobertura ni carga ambiente.
+        minimo = {"meta": {}, "scores": {"overall": 90.0, "components": {}}}
+        cmp = compare_runs(minimo, minimo)
+        self.assertEqual(cmp["tests"], [])
+        self.assertIsNone(cmp["calibration"])
+
+
+if __name__ == "__main__":
+    unittest.main()

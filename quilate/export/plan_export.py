@@ -27,26 +27,116 @@ PLAN_HEADER = """# =============================================================
 #  LEE ESTO ANTES DE EJECUTAR
 #  1. Este script NO se ejecuta solo. Cada bloque pide confirmacion.
 #     Revisalo linea por linea y responde 's' solo a lo que entiendas.
-#  2. El bloque 0 crea un punto de restauracion y exporta el registro. Hazlo.
-#  3. Aplica los cambios por bloques y vuelve a medir entre bloques: si aplicas
-#     diez cosas de golpe no sabras cual funciono.
-#  4. Ejecutar como Administrador:
+#  2. Antes de tocar nada, ejecutalo con -WhatIf: enseña que haria cada bloque
+#     sin cambiar una sola cosa.
+#       powershell -ExecutionPolicy Bypass -File plan_optimizacion.ps1 -WhatIf
+#  3. Cada cambio se anota ANTES de aplicarlo en un script de reversion que se
+#     escribe al lado de este, con el valor que tenia tu equipo. No se supone
+#     el valor "por defecto": se lee el tuyo.
+#  4. El bloque 0 crea un punto de restauracion y exporta el registro. Hazlo.
+#  5. Aplica los cambios por bloques y vuelve a medir entre bloques: si aplicas
+#     diez cosas de golpe no sabras cual funciono. Para comparar:
+#       quilate --json antes.json   (antes)
+#       quilate --json despues.json (despues)
+#       quilate --compare antes.json despues.json
+#  6. Ejecutar como Administrador:
 #       powershell -ExecutionPolicy Bypass -File plan_optimizacion.ps1
 # ==============================================================================
 
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+param([switch]$WhatIf)
+
+if (-not $WhatIf -and -not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
     ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{
     Write-Host "Ejecuta este script como Administrador." -ForegroundColor Red
     exit 1
 }}
+
+$Base = if ($PSScriptRoot) {{ $PSScriptRoot }} else {{ (Get-Location).Path }}
+$RollbackPath = Join-Path $Base "deshacer_quilate_$(Get-Date -f yyyyMMdd_HHmm).ps1"
 
 function Confirmar($texto) {{
     $r = Read-Host "$texto  [s/N]"
     return ($r -eq 's' -or $r -eq 'S')
 }}
 
+# Anota como deshacer un cambio ANTES de hacerlo. El script de reversion se crea
+# solo si algo llega a aplicarse: un fichero vacio invitaria a confiar en el.
+function Registrar($titulo, $lineas) {{
+    if (-not (Test-Path $RollbackPath)) {{
+        Set-Content -Path $RollbackPath -Encoding UTF8 -Value @(
+            "# Reversion de los cambios aplicados por Quilate el $(Get-Date -f 'dd/MM/yyyy HH:mm')",
+            "# Cada linea restaura el valor que este equipo tenia justo antes del cambio.",
+            "# Ejecutar como Administrador:",
+            "#   powershell -ExecutionPolicy Bypass -File `"$RollbackPath`"",
+            ""
+        )
+    }}
+    Add-Content -Path $RollbackPath -Encoding UTF8 -Value @("# --- $titulo")
+    Add-Content -Path $RollbackPath -Encoding UTF8 -Value $lineas
+    Add-Content -Path $RollbackPath -Encoding UTF8 -Value @("")
+}}
+
+# Devuelve el comando que restaura un valor del registro, o el que lo borra si
+# ahora mismo no existe. Poner el "valor por defecto" en su lugar seria inventar:
+# el valor por defecto de Windows y el que tu tenias no tienen por que coincidir.
+function DeshacerValor($ruta, $nombre) {{
+    $item = Get-ItemProperty -Path $ruta -Name $nombre -ErrorAction SilentlyContinue
+    if ($null -eq $item) {{
+        return "Remove-ItemProperty -Path '$ruta' -Name '$nombre' -ErrorAction SilentlyContinue"
+    }}
+    $v = $item.$nombre
+    if ($v -is [byte[]]) {{
+        $bytes = ($v | ForEach-Object {{ "0x{{0:x2}}" -f $_ }}) -join ','
+        return "Set-ItemProperty -Path '$ruta' -Name '$nombre' -Value ([byte[]]($bytes))"
+    }}
+    if ($v -is [string]) {{
+        return "Set-ItemProperty -Path '$ruta' -Name '$nombre' -Value '$v'"
+    }}
+    return "Set-ItemProperty -Path '$ruta' -Name '$nombre' -Value $v"
+}}
+
+function Bloque {{
+    param([string]$Titulo, [string]$Hallazgo, [string]$Impacto,
+          [scriptblock]$Deshacer, [scriptblock]$Accion)
+    Write-Host ""
+    Write-Host "--- $Titulo" -ForegroundColor Cyan
+    if ($Hallazgo) {{ Write-Host "    $Hallazgo" -ForegroundColor DarkGray }}
+    if ($Impacto)  {{ Write-Host "    $Impacto"  -ForegroundColor DarkGray }}
+
+    if ($WhatIf) {{
+        Write-Host "    [simulacion] se ejecutaria:" -ForegroundColor Yellow
+        foreach ($linea in ($Accion.ToString() -split "`n")) {{
+            $t = $linea.Trim()
+            if ($t) {{ Write-Host "      $t" -ForegroundColor DarkYellow }}
+        }}
+        if (-not $Deshacer) {{
+            Write-Host "      (sin reversion automatica: no cambia ningun ajuste)" -ForegroundColor DarkGray
+        }}
+        return
+    }}
+
+    if (-not (Confirmar "$Titulo?")) {{
+        Write-Host "    omitido" -ForegroundColor DarkGray
+        return
+    }}
+    if ($Deshacer) {{
+        try {{
+            $lineas = @(& $Deshacer | Where-Object {{ $_ }})
+            if ($lineas.Count) {{ Registrar $Titulo $lineas }}
+            else {{ throw "no se ha podido leer el valor actual" }}
+        }} catch {{
+            Write-Host "    No se ha podido anotar como deshacer esto: $_" -ForegroundColor Red
+            if (-not (Confirmar "    Aplicarlo igualmente, sin poder revertirlo")) {{
+                Write-Host "    omitido" -ForegroundColor DarkGray
+                return
+            }}
+        }}
+    }}
+    & $Accion
+}}
+
 # --- BLOQUE 0: RED DE SEGURIDAD -----------------------------------------------
-if (Confirmar "Crear un punto de restauracion del sistema antes de empezar?") {{
+Bloque -Titulo "Crear un punto de restauracion del sistema antes de empezar" -Accion {{
     try {{
         Enable-ComputerRestore -Drive "$env:SystemDrive\\"
         Checkpoint-Computer -Description "Antes de Quilate" -RestorePointType MODIFY_SETTINGS
@@ -56,7 +146,7 @@ if (Confirmar "Crear un punto de restauracion del sistema antes de empezar?") {{
     }}
 }}
 
-if (Confirmar "Exportar copia de seguridad del registro (HKLM y HKCU) al escritorio?") {{
+Bloque -Titulo "Exportar copia de seguridad del registro (HKLM y HKCU) al escritorio" -Accion {{
     $dest = Join-Path ([Environment]::GetFolderPath('Desktop')) "backup_registro_$(Get-Date -f yyyyMMdd_HHmm)"
     New-Item -ItemType Directory -Path $dest -Force | Out-Null
     reg export HKLM "$dest\\HKLM.reg" /y | Out-Null
@@ -67,93 +157,163 @@ if (Confirmar "Exportar copia de seguridad del registro (HKLM y HKCU) al escrito
 
 PLAN_FOOTER = f"""
 # --- BLOQUE FINAL: MANTENIMIENTO SEGURO (recomendado siempre) ------------------
-if (Confirmar "Ejecutar comprobacion de integridad del sistema (DISM + SFC)?") {{
+Bloque -Titulo "Ejecutar comprobacion de integridad del sistema (DISM + SFC)" -Accion {{
     Write-Host "Esto puede tardar 15-30 minutos..." -ForegroundColor Yellow
     DISM /Online /Cleanup-Image /RestoreHealth
     sfc /scannow
 }}
 
-if (Confirmar "Limpiar archivos temporales?") {{
+Bloque -Titulo "Limpiar archivos temporales" -Accion {{
     Remove-Item "$env:TEMP\\*" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item "$env:WINDIR\\Temp\\*" -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "Temporales limpiados." -ForegroundColor Green
 }}
 
-if (Confirmar "Ejecutar el asistente de Liberador de espacio en disco?") {{ cleanmgr /d $env:SystemDrive }}
+Bloque -Titulo "Ejecutar el asistente de Liberador de espacio en disco" -Accion {{
+    cleanmgr /d $env:SystemDrive
+}}
 
 Write-Host ""
-Write-Host "Terminado. Reinicia y vuelve a ejecutar el benchmark para comparar." -ForegroundColor Cyan
+if ($WhatIf) {{
+    Write-Host "Simulacion terminada: no se ha cambiado nada." -ForegroundColor Cyan
+    Write-Host "Vuelve a ejecutarlo sin -WhatIf para aplicar lo que quieras." -ForegroundColor Cyan
+}} elseif (Test-Path $RollbackPath) {{
+    Write-Host "Reversion disponible en:" -ForegroundColor Cyan
+    Write-Host "  $RollbackPath" -ForegroundColor Cyan
+    Write-Host "Guardalo: contiene los valores que tenia tu equipo, no los de fabrica." -ForegroundColor Yellow
+}} else {{
+    Write-Host "No se ha aplicado ningun cambio reversible." -ForegroundColor Cyan
+}}
+Write-Host "Reinicia y vuelve a medir: quilate --json despues.json" -ForegroundColor Cyan
+Write-Host "Y compara:  quilate --compare antes.json despues.json" -ForegroundColor Cyan
 Write-Host "{AUTHOR} - {WEBSITE_URL}" -ForegroundColor DarkYellow
 """
 
-# Comandos de remediación automatizables (solo los seguros y reversibles)
-PLAN_ACTIONS: dict[str, tuple[str, str]] = {
+# Rutas de registro que se tocan, para no repetirlas entre accion y reversion.
+_VFX = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects"
+_DESKTOP = "HKCU:\\Control Panel\\Desktop"
+_TEMAS = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+_GAMEDVR = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR"
+_POWER = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power"
+
+# Comandos de remediacion automatizables (solo los seguros y reversibles).
+# Cada uno lleva ademas como deshacerse: el codigo que LEE el estado actual y
+# devuelve las lineas que lo restauran. Se ejecuta antes de aplicar el cambio,
+# asi que lo que se guarda es lo que el equipo tenia de verdad, no un valor de
+# fabrica que a lo mejor nunca tuvo. `None` = el bloque no cambia ningun ajuste.
+PLAN_ACTIONS: dict[str, tuple[str, str, str | None]] = {
     "power_plan": (
         "Activar el plan de energia de Alto rendimiento",
         'powercfg /setactive SCHEME_MIN\n'
         '    Write-Host "Plan de energia = Alto rendimiento" -ForegroundColor Green',
+        # El GUID se saca por patron y no por posicion: el texto de powercfg
+        # esta traducido y cambia entre versiones de Windows.
+        '$salida = (powercfg /getactivescheme | Out-String)\n'
+        '    if ($salida -match \'([0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\') {\n'
+        '        "powercfg /setactive $($Matches[1])"\n'
+        '    }',
     ),
     "trim_off": (
         "Reactivar TRIM en el SSD y forzar un pase de TRIM",
         'fsutil behavior set DisableDeleteNotify 0\n'
         '    Optimize-Volume -DriveLetter $env:SystemDrive.TrimEnd(":") -ReTrim -Verbose',
+        '$salida = (fsutil behavior query DisableDeleteNotify | Out-String)\n'
+        '    if ($salida -match \'=\\s*(\\d)\') {\n'
+        '        "fsutil behavior set DisableDeleteNotify $($Matches[1])"\n'
+        '    }',
     ),
     "visual_fx": (
         "Ajustar efectos visuales para maximo rendimiento (manteniendo suavizado de fuentes)",
-        'Set-ItemProperty "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects" '
-        'VisualFXSetting 2\n'
-        '    Set-ItemProperty "HKCU:\\Control Panel\\Desktop" UserPreferencesMask '
+        f'Set-ItemProperty "{_VFX}" VisualFXSetting 2\n'
+        f'    Set-ItemProperty "{_DESKTOP}" UserPreferencesMask '
         '([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))\n'
-        '    Set-ItemProperty "HKCU:\\Control Panel\\Desktop" MenuShowDelay "0"\n'
-        '    Set-ItemProperty "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize" '
-        'EnableTransparency 0\n'
+        f'    Set-ItemProperty "{_DESKTOP}" MenuShowDelay "0"\n'
+        f'    Set-ItemProperty "{_TEMAS}" EnableTransparency 0\n'
         '    Write-Host "Reinicia el explorador o la sesion para aplicar." -ForegroundColor Yellow',
+        f'DeshacerValor "{_VFX}" VisualFXSetting\n'
+        f'    DeshacerValor "{_DESKTOP}" UserPreferencesMask\n'
+        f'    DeshacerValor "{_DESKTOP}" MenuShowDelay\n'
+        f'    DeshacerValor "{_TEMAS}" EnableTransparency',
     ),
     "game_dvr": (
         "Desactivar la grabacion en segundo plano de Game Bar (deja el Modo de juego activo)",
         'Set-ItemProperty "HKCU:\\System\\GameConfigStore" GameDVR_Enabled 0\n'
-        '    New-Item "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR" -Force | Out-Null\n'
-        '    Set-ItemProperty "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR" '
-        'AppCaptureEnabled 0',
+        f'    New-Item "{_GAMEDVR}" -Force | Out-Null\n'
+        f'    Set-ItemProperty "{_GAMEDVR}" AppCaptureEnabled 0\n'
+        f'    Set-ItemProperty "{_GAMEDVR}" HistoricalCaptureEnabled 0',
+        'DeshacerValor "HKCU:\\System\\GameConfigStore" GameDVR_Enabled\n'
+        f'    DeshacerValor "{_GAMEDVR}" AppCaptureEnabled\n'
+        f'    DeshacerValor "{_GAMEDVR}" HistoricalCaptureEnabled',
     ),
     "pagefile_off": (
         "Volver a dejar el archivo de paginacion en modo automatico",
         '$cs = Get-CimInstance Win32_ComputerSystem\n'
         '    Set-CimInstance $cs -Property @{AutomaticManagedPagefile=$true}',
+        '$auto = (Get-CimInstance Win32_ComputerSystem).AutomaticManagedPagefile\n'
+        '    "Set-CimInstance (Get-CimInstance Win32_ComputerSystem) '
+        '-Property @{AutomaticManagedPagefile=`$$auto}"',
     ),
     "fast_startup": (
         "Activar hibernacion e inicio rapido",
         'powercfg /hibernate on\n'
-        '    Set-ItemProperty "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power" '
-        'HiberbootEnabled 1',
+        f'    Set-ItemProperty "{_POWER}" HiberbootEnabled 1',
+        '$hib = (Get-ItemProperty "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power" '
+        '-Name HibernateEnabled -ErrorAction SilentlyContinue).HibernateEnabled\n'
+        '    if ($hib -eq 0) { "powercfg /hibernate off" }\n'
+        f'    DeshacerValor "{_POWER}" HiberbootEnabled',
     ),
     "sysmain": (
-        "Desactivar SysMain (Superfetch) - reversible con 'sc config SysMain start=auto'",
+        "Desactivar SysMain (Superfetch)",
         'Stop-Service SysMain -Force -ErrorAction SilentlyContinue\n'
         '    Set-Service SysMain -StartupType Disabled\n'
-        '    Write-Host "Si notas peor respuesta, reactivalo: Set-Service SysMain -StartupType Automatic" '
+        '    Write-Host "Si notas peor respuesta, deshazlo con el script de reversion." '
         '-ForegroundColor Yellow',
+        '$s = Get-Service SysMain -ErrorAction SilentlyContinue\n'
+        '    if ($s) {\n'
+        '        "Set-Service SysMain -StartupType $($s.StartType)"\n'
+        '        if ($s.Status -eq "Running") { "Start-Service SysMain" }\n'
+        '    }',
     ),
     "wsearch_hdd": (
         "Desactivar el indexador de Windows Search (las busquedas seran mas lentas)",
         'Stop-Service WSearch -Force -ErrorAction SilentlyContinue\n'
         '    Set-Service WSearch -StartupType Disabled',
+        '$s = Get-Service WSearch -ErrorAction SilentlyContinue\n'
+        '    if ($s) {\n'
+        '        "Set-Service WSearch -StartupType $($s.StartType)"\n'
+        '        if ($s.Status -eq "Running") { "Start-Service WSearch" }\n'
+        '    }',
     ),
     "defrag_hdd": (
         "Desfragmentar y optimizar el disco mecanico",
         'Optimize-Volume -DriveLetter $env:SystemDrive.TrimEnd(":") -Defrag -Verbose',
+        None,   # reorganizar ficheros no es un ajuste: no hay nada que revertir
     ),
     "fs_dirty": (
         "Programar CHKDSK en el proximo reinicio",
         'chkdsk $env:SystemDrive /f /r',
+        'if (-not ((chkntfs $env:SystemDrive | Out-String) -match "dirty|sucio")) {\n'
+        '        "chkntfs /x $env:SystemDrive"\n'
+        '    }',
     ),
     "startup_bloat": (
         "Listar los programas de inicio para que decidas cuales desactivar",
         'Get-CimInstance Win32_StartupCommand | Select-Object Name,Command,Location | Format-Table -Auto\n'
         '    Write-Host "Desactivalos en Administrador de tareas > Inicio (ordenado por Impacto)." '
         '-ForegroundColor Yellow',
+        None,   # solo enseña una lista
     ),
 }
+
+
+def _ps_str(texto: str) -> str:
+    """Escapa un texto para meterlo en una cadena de PowerShell entre comillas.
+
+    Los titulos de los hallazgos llevan comillas angulares, cifras y nombres de
+    programa que vienen del sistema. Un `$` sin escapar convertiria parte del
+    titulo en una variable, y una comilla partiria la cadena y el script.
+    """
+    return (texto.replace("`", "``").replace('"', '`"').replace("$", "`$"))
 
 
 def _plan_component_summary(cards: list[ComponentCard]) -> str:
@@ -209,13 +369,15 @@ def export_plan(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         if not action:
             continue
         n += 1
-        desc, code = action
+        desc, code, capture = action
         gain = f"ganancia estimada +{f.gain * 100:.0f}% ({f.gain_note})"
+        deshacer = f" -Deshacer {{\n    {capture}\n}}" if capture else ""
         blocks.append(
             f"\n# --- BLOQUE {n}: {desc} ---\n"
-            f"# Hallazgo: {f.title}\n"
-            f"# Impacto: {gain} | esfuerzo {f.effort} | riesgo {f.risk}\n"
-            f'if (Confirmar "{desc}?") {{\n    {code}\n}}\n'
+            f'Bloque -Titulo "{desc}" `\n'
+            f'  -Hallazgo "Hallazgo: {_ps_str(f.title)}" `\n'
+            f'  -Impacto "{gain} | esfuerzo {f.effort} | riesgo {f.risk}"'
+            f"{deshacer} -Accion {{\n    {code}\n}}\n"
         )
 
     manual = [f for f in auditor.findings
@@ -233,5 +395,7 @@ def export_plan(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
     content = (PLAN_HEADER.format(date=f"{datetime.now():%d/%m/%Y %H:%M}", app=APP_NAME,
                                   version=APP_VERSION, author=AUTHOR, url=WEBSITE_URL)
                + "".join(blocks) + PLAN_FOOTER)
-    path.write_text(content, encoding="utf-8")
+    # Con BOM: PowerShell 5.1 lee los .ps1 sin marca como ANSI, y los titulos de
+    # los hallazgos llevan acentos y comillas angulares que llegarian rotos.
+    path.write_text(content, encoding="utf-8-sig")
     return n

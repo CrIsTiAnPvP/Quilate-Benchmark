@@ -51,6 +51,18 @@ SCORE_CAP = 250.0
 # Un NVMe ronda los 100 µs, un SATA los 200 y un disco mecánico los miles.
 CACHE_LATENCY_US = 20.0
 
+# Dispersión relativa a partir de la cual una cifra deja de ser comparable.
+# Una medida sola nunca delata que está mal: el test de disco daba 205.000 IOPS
+# con total aplomo mientras medía la caché del sistema operativo. Repartir el
+# mismo trabajo en tramos y mirar cuánto varían entre sí es lo que convierte un
+# número en un número con margen de error.
+UNSTABLE_SPREAD_PCT = 25.0
+
+# Porcentaje de CPU ajena en reposo por encima del cual la sesión no es
+# comparable con otra: no se está midiendo el equipo, se está midiendo el
+# equipo mientras hace otra cosa.
+BUSY_CPU_PCT = 20.0
+
 
 def cache_served(latency_us: float, direct: bool) -> bool:
     """Si la lectura salió de la caché de páginas en vez del disco.
@@ -97,10 +109,21 @@ class Benchmark:
         self.metrics: dict[str, dict] = {}
         self.memory_hierarchy: list[dict] = []
         self.load_snapshots: list[dict] = []   # antes / después de la carga pesada
+        # Cuánto varió cada medida consigo misma, y qué estaba haciendo el
+        # equipo mientras tanto. Sin esto, una cifra contaminada es
+        # indistinguible de una buena.
+        self.dispersion: dict[str, dict] = {}
+        self.ambient_load: dict[str, Any] = {}
 
     # -- helpers ----------------------------------------------------------------
-    def _timed(self, fn: Callable, *args, runs: int | None = None) -> float:
-        """Ejecuta y devuelve el MEJOR tiempo (menos ruido del scheduler)."""
+    def _timed(self, fn: Callable, *args, runs: int | None = None,
+               key: str = "", label: str = "") -> float:
+        """Ejecuta y devuelve el MEJOR tiempo (menos ruido del scheduler).
+
+        Se queda con el mejor porque es la cifra menos contaminada por el
+        planificador, pero anota la dispersión de todas: el mejor tiempo de una
+        tanda que varía un 40% no significa lo mismo que el de una estable.
+        """
         runs = runs or (1 if self.quick else 3)
         times = []
         for _ in range(runs):
@@ -108,7 +131,76 @@ class Benchmark:
             fn(*args)
             times.append(time.perf_counter() - t0)
             self._sample_sensors()
+        if key:
+            self._spread(key, label or key, times)
         return min(times)
+
+    def _spread(self, key: str, label: str, muestras: list[float]) -> None:
+        """Anota cuánto varía una medida entre repeticiones, en % de la mediana."""
+        muestras = [m for m in muestras if m > 0]
+        if len(muestras) < 2:
+            return
+        mediana = statistics.median(muestras)
+        if mediana <= 0:
+            return
+        pct = (max(muestras) - min(muestras)) / mediana * 100
+        self.dispersion[key] = {
+            "label": label,
+            "runs": len(muestras),
+            "median": round(mediana, 5),
+            "spread_pct": round(pct, 1),
+            "stable": pct <= UNSTABLE_SPREAD_PCT,
+        }
+
+    def unstable(self) -> list[dict]:
+        """Medidas cuya dispersión las hace poco comparables."""
+        return [d for d in self.dispersion.values() if not d["stable"]]
+
+    def _measure_ambient_load(self, moment: str) -> None:
+        """Carga ajena con el benchmark parado.
+
+        Se mide justo antes y justo después, cuando Quilate no está haciendo
+        nada: lo que salga es de otros. Es la única forma barata de saber si la
+        sesión es comparable con otra, y evita atribuir al hardware una nota
+        que en realidad se explica por lo que había abierto.
+        """
+        # El contador por proceso es diferencial: la primera llamada siempre
+        # devuelve 0.0. Hay que cebarlo ANTES de la ventana de medición y leerlo
+        # después, o la lista de culpables sale siempre vacía.
+        vivos = []
+        try:
+            for p in psutil.process_iter(["name"]):
+                try:
+                    p.cpu_percent()
+                    vivos.append(p)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            pct = psutil.cpu_percent(interval=0.4)
+        except Exception:
+            return
+        ocupados = []
+        nucleos = psutil.cpu_count(logical=True) or 1
+        for p in vivos:
+            try:
+                # El PID 0 es el proceso inactivo del sistema: consume por
+                # definición todo lo que nadie usa, y encabezaría la lista siempre.
+                if p.pid in (0, os.getpid()):
+                    continue
+                # cpu_percent va sobre un núcleo; se normaliza al total para
+                # que sume en la misma escala que la cifra del sistema.
+                uso = p.cpu_percent() / nucleos
+                if uso >= 1.0:
+                    ocupados.append((p.name(), round(uso, 1)))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        self.ambient_load[moment] = {
+            "cpu_pct": round(pct, 1),
+            "top": sorted(ocupados, key=lambda x: -x[1])[:5],
+        }
+
+    def busy_during_run(self) -> float:
+        """El peor porcentaje de CPU ajena visto con el benchmark parado."""
+        return max((v.get("cpu_pct", 0.0) for v in self.ambient_load.values()), default=0.0)
 
     def _sample_sensors(self) -> None:
         # En Windows psutil.cpu_freq() devuelve la frecuencia NOMINAL leída del
@@ -169,20 +261,20 @@ class Benchmark:
         sub_scores = []
 
         spinner_step("CPU 1T · criba de primos".ljust(38))
-        t = self._timed(work_sieve, 4_000_000)
+        t = self._timed(work_sieve, 4_000_000, key="sieve", label="Criba de primos")
         s = REFERENCE["sieve_s"] * PY_ADJUST / t * 100
         sub_scores.append(s)
         spinner_done(f"{t:.3f} s  → {s:.0f} pts")
 
         spinner_step("CPU 1T · coma flotante".ljust(38))
-        t = self._timed(work_float, 2_500_000)
+        t = self._timed(work_float, 2_500_000, key="float", label="Coma flotante")
         s = REFERENCE["float_s"] * PY_ADJUST / t * 100
         sub_scores.append(s)
         spinner_done(f"{t:.3f} s  → {s:.0f} pts")
 
         mib = 256 if self.quick else 512
         spinner_step(f"CPU 1T · SHA-256 ({mib} MiB)".ljust(38))
-        t = self._timed(work_hash, mib)
+        t = self._timed(work_hash, mib, key="hash", label="SHA-256")
         s = REFERENCE["hash_s"] * (mib / 512) / t * 100   # sin PY_ADJUST: corre en C
         sub_scores.append(s)
         spinner_done(f"{t:.3f} s  → {s:.0f} pts  ({mib / t:.0f} MB/s)")
@@ -191,7 +283,8 @@ class Benchmark:
         build_corpus(12)
         spinner_done("12 MiB")
         spinner_step("CPU 1T · compresión zlib (12 MiB)".ljust(38))
-        t = self._timed(work_compress, 12, runs=1 if self.quick else 2)
+        t = self._timed(work_compress, 12, runs=1 if self.quick else 2,
+                        key="compress", label="Compresión zlib")
         s = REFERENCE["compress_s"] / t * 100
         sub_scores.append(s)
         spinner_done(f"{t:.3f} s  → {s:.0f} pts")
@@ -228,6 +321,14 @@ class Benchmark:
             return
         after = self._snapshot("con todos los núcleos cargados")
         self._register_thermal_behaviour(before, after, per_task)
+        # El margen se saca por tandas, no tarea a tarea: con 4 tareas por hilo
+        # el recorrido entre las 96 individuales recoge el arranque y la cola
+        # del pool y sale un ±50% que no significa nada. Promediar cada tanda
+        # —tantas tareas como hilos— compara trabajos equivalentes.
+        tandas = [statistics.mean(per_task[i:i + threads])
+                  for i in range(0, len(per_task), threads)
+                  if len(per_task[i:i + threads]) == threads]
+        self._spread("cpu_multi", "Tandas de trabajo en paralelo", tandas)
         tps = tasks / wall
         score = tps / REFERENCE["mp_tps"] * 100
         # Escalado real: cuánto trabajo en paralelo por unidad de trabajo en serie.
@@ -308,7 +409,13 @@ class Benchmark:
         spinner_step("RAM · ancho de banda".ljust(38))
         mb = 64 if self.quick else 128
         passes = 6 if self.quick else 12
-        gbs = max(work_memcpy(mb, passes) for _ in range(1 if self.quick else 2))
+        # Siempre al menos dos pasadas, también en modo rápido: el ancho de
+        # banda de memoria es de las medidas que más bailan entre ejecuciones
+        # —se han visto 21 y 13 GB/s con medio minuto de diferencia— y sin una
+        # segunda pasada no hay forma de saber cuál de las dos creerse.
+        medidas = [work_memcpy(mb, passes) for _ in range(2 if self.quick else 3)]
+        self._spread("memory", "Ancho de banda de memoria", medidas)
+        gbs = max(medidas)
         score = gbs / REFERENCE["mem_gbs"] * 100
         self._register("memory", "Memoria", "GB/s", gbs, score, f"copias de {mb} MiB")
         spinner_done(f"{gbs:.2f} GB/s → {score:.0f} pts")
@@ -339,12 +446,30 @@ class Benchmark:
             spinner_step(f"Disco · escritura secuencial ({self.disk_size_mb} MB)".ljust(38))
             writer = DiskIO(str(path), write=True, block=block_size)
             writer.fill_random()
+            # Se cronometra por tramos del mismo trabajo, sin repetirlo: es
+            # gratis y es justo donde se ve la caché SLC agotarse a mitad de
+            # escritura, que a una sola cifra le pasa desapercibido.
+            tramos_w: list[float] = []
+            corte = max(block_size, size // 3)
             t0 = time.perf_counter()
             written = 0
+            marca, escrito_tramo = t0, 0
             while written < size:
-                written += writer.write(block_size)
+                n = writer.write(block_size)
+                written += n
+                escrito_tramo += n
+                if escrito_tramo >= corte:
+                    ahora = time.perf_counter()
+                    tramos_w.append((escrito_tramo / 1e6) / (ahora - marca))
+                    marca, escrito_tramo = ahora, 0
+            # El último tramo se cierra ANTES del sync: el vaciado del búfer es
+            # un coste único de la prueba, no de ese tramo, y metérselo dentro
+            # lo haría parecer lentísimo e inventaría dispersión que no existe.
+            if escrito_tramo:
+                tramos_w.append((escrito_tramo / 1e6) / max(1e-9, time.perf_counter() - marca))
             writer.sync()
             wt = time.perf_counter() - t0
+            self._spread("disk_write", "Escritura secuencial", tramos_w)
             self.disk_unbuffered = writer.unbuffered
             dropped = writer.drop_cache() if not writer.unbuffered else False
             writer.close()
@@ -373,15 +498,26 @@ class Benchmark:
             # --- Lectura secuencial ---
             spinner_step("Disco · lectura secuencial".ljust(38))
             reader = DiskIO(str(path), write=False, block=chunk_size)
+            tramos_r: list[float] = []
+            corte_r = max(chunk_size, size // 3)
             t0 = time.perf_counter()
             read_total = 0
+            marca, leido_tramo = t0, 0
             while read_total < size:
                 got = reader.read(chunk_size)
                 if not got:
                     break
                 read_total += got
+                leido_tramo += got
+                if leido_tramo >= corte_r:
+                    ahora = time.perf_counter()
+                    tramos_r.append((leido_tramo / 1e6) / (ahora - marca))
+                    marca, leido_tramo = ahora, 0
             rt = time.perf_counter() - t0
+            if leido_tramo:
+                tramos_r.append((leido_tramo / 1e6) / max(1e-9, time.perf_counter() - marca))
             reader.close()
+            self._spread("disk_read", "Lectura secuencial", tramos_r)
             rmbs = (read_total / 1e6) / rt
             if cached:
                 self.disk_cache_suspect = True
@@ -399,12 +535,23 @@ class Benchmark:
             rnd = random.Random(7)
             offsets = [rnd.randrange(0, max_off, 4096) for _ in range(ops)]
             iop_reader = DiskIO(str(path), write=False, block=4096)
+            tramos_i: list[float] = []
+            por_tramo = max(1, ops // 3)
             t0 = time.perf_counter()
+            marca, hechas = t0, 0
             for off in offsets:
                 iop_reader.seek(off)
                 iop_reader.read(4096)
+                hechas += 1
+                if hechas >= por_tramo:
+                    ahora = time.perf_counter()
+                    tramos_i.append(hechas / (ahora - marca))
+                    marca, hechas = ahora, 0
             it = time.perf_counter() - t0
+            if hechas:
+                tramos_i.append(hechas / max(1e-9, time.perf_counter() - marca))
             iop_reader.close()
+            self._spread("disk_iops", "IOPS aleatorias 4K", tramos_i)
             iops = ops / it
             latency_us = it / ops * 1e6
             if cached:
@@ -458,15 +605,46 @@ class Benchmark:
     def run_all(self) -> None:
         section("Benchmark en ejecución")
         print(f"  {C.DIM}Cierra el resto de aplicaciones para obtener medidas fiables.{C.RESET}\n")
+        self._measure_ambient_load("antes")
         self.run_cpu_single()
         self.run_cpu_multi()
         self.run_memory()
         self.run_memory_hierarchy()
         self.run_disk()
+        self._measure_ambient_load("después")
         self._finish()
 
     def _finish(self) -> None:
         """Cierra la sesión anotando de dónde salió (o no) cada dato sensible."""
+        inestables = self.unstable()
+        if inestables:
+            peor = max(inestables, key=lambda d: d["spread_pct"])
+            self._metric("dispersion", "Dispersión máxima entre tramos",
+                         peor["spread_pct"], "%",
+                         f"en «{peor['label']}»: la misma prueba varió eso consigo misma. "
+                         "Las cifras de esta sesión valen como orden de magnitud, no para "
+                         "comparar con otra ejecución")
+            print(f"\n  {C.YELLOW}⚠ Medidas poco estables: "
+                  + ", ".join(f"{d['label']} (±{d['spread_pct']:.0f}%)" for d in inestables)
+                  + f".{C.RESET}")
+            print(f"    {C.DIM}La misma prueba ha dado resultados distintos entre tramos. "
+                  f"Suele ser carga de fondo, límite térmico o caché del disco agotándose.{C.RESET}")
+
+        ocupada = self.busy_during_run()
+        if ocupada:
+            culpables = []
+            for datos in self.ambient_load.values():
+                culpables += [n for n, _ in datos.get("top", [])]
+            nota = "medido con el benchmark parado, así que ese consumo es de otros procesos"
+            if culpables:
+                nota += " (" + ", ".join(dict.fromkeys(culpables)) + ")"
+            self._metric("ambient_cpu", "CPU ajena en reposo", ocupada, "%", nota)
+            if ocupada >= BUSY_CPU_PCT:
+                print(f"\n  {C.YELLOW}⚠ El equipo no estaba en reposo: {ocupada:.0f}% de CPU "
+                      f"la consumían otros procesos.{C.RESET}")
+                print(f"    {C.DIM}La puntuación de esta sesión no es comparable con otra "
+                      f"hecha con el equipo libre.{C.RESET}")
+
         source = temperature_source()
         if source:
             self._metric("temp_source", "Fuente de temperatura de CPU", source)

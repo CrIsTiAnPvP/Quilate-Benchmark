@@ -62,13 +62,19 @@ class VolumenSucio(FixtureCase):
         self.assertEqual(a.findings, [])
 
     def test_respuesta_irreconocible(self):
-        a, resumen = self._auditar("respuesta inesperada del sistema")
+        with patched(audit, run_cmd=lambda *a, **k: "respuesta inesperada del sistema"):
+            a = self.auditor()
+            with self.assertRaises(audit.SinDato):
+                a.check_filesystem_health()
         self.assertEqual(a.findings, [])
-        self.assertIn("no concluyente", resumen)
 
     def test_sin_salida_no_hay_hallazgo(self):
         # Sin privilegios, fsutil devuelve «Acceso denegado» y run_cmd da None.
-        a, resumen = self._auditar("")
+        # Eso no es «limpio»: es que no se ha podido mirar.
+        with patched(audit, run_cmd=lambda *a, **k: ""):
+            a = self.auditor()
+            with self.assertRaises(audit.SinDato):
+                a.check_filesystem_health()
         self.assertEqual(a.findings, [])
 
     def test_el_caso_que_fallaba(self):

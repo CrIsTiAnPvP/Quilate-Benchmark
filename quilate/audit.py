@@ -16,8 +16,27 @@ from .storage_scan import ScanResult, candidate_bytes
 from .console import C, human_bytes, section, spinner_done, spinner_step
 from .const import IS_LINUX, IS_WINDOWS
 from .platform_utils import (boot_performance, pending_driver_updates, ps_json,
-                             reg_list_values, reg_read, run_cmd, winreg)
+                             reg_key_readable, reg_list_values, reg_read, run_cmd, winreg)
 from .sysinfo import KIND_LABELS, SystemInfo, local_volumes, primary_gpu
+
+
+class SinDato(Exception):
+    """La comprobación no pudo leer lo que necesitaba para opinar.
+
+    Existe porque devolver un mensaje neutro cuando falta el dato hace que el
+    informe dé por bueno algo que nadie ha llegado a mirar. Es el mismo error
+    de fondo que leer la velocidad nominal de la RAM en vez de la real, pero
+    aplicado al propio veredicto: sin dato no hay veredicto, y decirlo es la
+    única respuesta honesta.
+    """
+
+
+class NoAplica(Exception):
+    """La comprobación no tiene sentido en este equipo.
+
+    TRIM en un disco mecánico o la desfragmentación en un SSD no son datos que
+    falten: son preguntas que no procede hacer. No cuentan como pendientes.
+    """
 
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -59,6 +78,11 @@ class Auditor:
         self.findings: list[Finding] = []
         self.checks_run = 0
         self.notes: list[str] = []
+        # Comprobaciones que no llegaron a un veredicto y por qué. Se informan
+        # aparte: un informe que dice «24 pruebas» cuando cinco no pudieron
+        # mirar nada está exagerando su propia cobertura.
+        self.unverified: list[tuple[str, str]] = []
+        self.not_applicable: list[tuple[str, str]] = []
         # Arranque medido por Windows. `None` es «no se pudo leer», que no es lo
         # mismo que «rápido»: el log pide privilegios de administrador.
         self.boot_report: dict = {}
@@ -106,13 +130,23 @@ class Auditor:
                 ("TRIM periódico", self.check_linux_trim),
             ]
 
+        self.checks_total = len(checks)
         for label, fn in checks:
             spinner_step(label.ljust(38))
             try:
                 msg = fn()
                 self.checks_run += 1
                 spinner_done(msg or "ok")
+            except NoAplica as exc:
+                self.not_applicable.append((label, str(exc)))
+                spinner_done(f"no aplica: {exc}", neutral=True)
+            except SinDato as exc:
+                self.unverified.append((label, str(exc)))
+                spinner_done(f"sin comprobar: {exc}", ok=False)
             except Exception as exc:
+                # Una comprobación que revienta desaparecía del informe sin
+                # dejar rastro, que es la peor forma posible de fallar.
+                self.unverified.append((label, f"error interno · {type(exc).__name__}: {exc}"))
                 spinner_done(f"no evaluable ({type(exc).__name__})", ok=False)
 
     # ------------------------------------------------------- comprobaciones --
@@ -134,7 +168,7 @@ class Auditor:
             if worst is None or free_pct < worst[1]:
                 worst = (d, free_pct)
         if not worst:
-            return "sin volúmenes locales que auditar"
+            raise SinDato("no se ha identificado ningún volumen local")
         d, free_pct = worst
         if free_pct < 10:
             self.add(
@@ -169,6 +203,10 @@ class Auditor:
 
     def check_disk_media(self) -> str:
         media = self.si.system_drive_media
+        if not media or "desconocido" in media.lower():
+            # De este dato dependen TRIM, desfragmentación y SysMain: darlo por
+            # SSD cuando no se sabe apagaría tres avisos de golpe.
+            raise SinDato("no se ha podido identificar el tipo de disco de sistema")
         if "HDD" in media and "SSD" not in media:
             self.add(
                 id="hdd_system", title="El sistema arranca desde un disco mecánico (HDD)",
@@ -191,7 +229,9 @@ class Auditor:
 
     def check_memory(self) -> str:
         vm = psutil.virtual_memory()
-        total_gb = self.si.ram_total / 1024**3
+        # psutil siempre sabe cuánta RAM hay; si el inventario no la trae, es
+        # que falló WMI. Cogerla de ahí evita el «RAM insuficiente (0 GB)».
+        total_gb = (self.si.ram_total or vm.total) / 1024**3
         used_pct = vm.percent
         try:
             swap = psutil.swap_memory()
@@ -235,7 +275,7 @@ class Auditor:
     def check_ram_channels(self) -> str:
         sticks = [s for s in self.si.ram_sticks if s["capacity"] > 0]
         if not sticks:
-            return "sin datos (requiere Windows)"
+            raise SinDato("no se han podido enumerar los módulos de memoria")
         if len(sticks) == 1 and self.si.ram_total >= 6 * 1024**3:
             self.add(
                 id="single_channel", title="RAM en single channel (un solo módulo)",
@@ -314,7 +354,14 @@ class Auditor:
                                "Renueva la pasta térmica si el equipo tiene más de 3 años",
                                "Instala LibreHardwareMonitor para confirmarlo con cifras reales",
                                "Revisa los límites de potencia en la BIOS (PL1/PL2, PPT en AMD)"])
-            return " · ".join(partes) if partes else "no disponible (falta sensor)"
+            if not sustained:
+                # Sin temperatura y sin medida de rendimiento sostenido no hay
+                # ninguna base para decir que el equipo no está limitado: la
+                # temperatura de la GPU, si la hay, es contexto, no veredicto.
+                extra = f" (la GPU marca {gpu:.0f} °C)" if gpu is not None else ""
+                raise SinDato("este equipo no expone la temperatura de la CPU y no hay "
+                              "medida de rendimiento sostenido con la que deducirlo" + extra)
+            return " · ".join(partes)
 
         if gpu is not None:
             self.notes.append(f"Temperatura de GPU durante las pruebas: {gpu:.0f} °C "
@@ -355,7 +402,7 @@ class Auditor:
         """Espacio recuperable según el rastreo de archivos grandes."""
         scan = self.scan
         if scan is None or not scan.available:
-            return "omitido"
+            raise NoAplica("rastreo de archivos no ejecutado")
         if not scan.files and not scan.special:
             return f"nada por encima de {human_bytes(scan.min_size)}"
 
@@ -408,11 +455,13 @@ class Auditor:
             samples = self.bench.freq_samples if self.bench else []
             sustained = statistics.median(samples) if samples else None
         if not sustained or not base:
-            return "sin datos"
+            raise SinDato("no hay medida de frecuencia bajo carga"
+                          if not sustained else "se desconoce el reloj base")
         if nominal:
             # El sistema no expone la frecuencia real: la cifra es la de catálogo
-            # y compararla no diría nada.
-            return f"{sustained:.0f} MHz nominales (este equipo no expone la real)"
+            # y compararla consigo misma daba siempre «100% del máximo».
+            raise SinDato(f"este equipo solo expone la frecuencia nominal ({sustained:.0f} MHz), "
+                          "que no dice nada sobre la real")
 
         ratio = sustained / base
         if ratio < 0.85:
@@ -436,29 +485,36 @@ class Auditor:
 
     def check_startup(self) -> str:
         items: list[dict] = []
-        if IS_WINDOWS and winreg is not None:
-            for hive, path, bucket in (
-                (winreg.HKEY_CURRENT_USER,
-                 r"Software\Microsoft\Windows\CurrentVersion\Run", "Run"),
-                (winreg.HKEY_LOCAL_MACHINE,
-                 r"Software\Microsoft\Windows\CurrentVersion\Run", "Run"),
-                (winreg.HKEY_LOCAL_MACHINE,
-                 r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "Run32"),
-            ):
-                scope = "usuario" if hive == winreg.HKEY_CURRENT_USER else "equipo"
-                for name in reg_list_values(hive, path):
-                    items.append({"name": name, "location": f"Run ({scope})",
-                                  "enabled": self._startup_enabled([(hive, bucket)], name)})
-            items += self._startup_folder_items()
-            seen: set[tuple] = set()
-            unique = []
-            for it in sorted(items, key=lambda i: i["name"].lower()):
-                key = (it["name"].lower(), it["location"])
-                if key not in seen:
-                    seen.add(key)
-                    unique.append(it)
-            items = unique
+        if not (IS_WINDOWS and winreg is not None):
+            raise NoAplica("el inicio con Windows solo existe en Windows")
+        leidas = 0
+        for hive, path, bucket in (
+            (winreg.HKEY_CURRENT_USER,
+             r"Software\Microsoft\Windows\CurrentVersion\Run", "Run"),
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"Software\Microsoft\Windows\CurrentVersion\Run", "Run"),
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "Run32"),
+        ):
+            leidas += reg_key_readable(hive, path)
+            scope = "usuario" if hive == winreg.HKEY_CURRENT_USER else "equipo"
+            for name in reg_list_values(hive, path):
+                items.append({"name": name, "location": f"Run ({scope})",
+                              "enabled": self._startup_enabled([(hive, bucket)], name)})
+        items += self._startup_folder_items()
+        seen: set[tuple] = set()
+        unique = []
+        for it in sorted(items, key=lambda i: i["name"].lower()):
+            key = (it["name"].lower(), it["location"])
+            if key not in seen:
+                seen.add(key)
+                unique.append(it)
+        items = unique
         self.startup_items = items
+        if not leidas:
+            # Las tres claves Run existen en cualquier Windows. Si ninguna se
+            # deja abrir, «0 programas de inicio» no es un elogio al equipo.
+            raise SinDato("no se ha podido abrir ninguna clave Run del registro")
         enabled = [i["name"] for i in items if i["enabled"]]
         count = len(enabled)
         off = len(items) - count
@@ -504,6 +560,10 @@ class Auditor:
         por cada perfil de usuario (incluido .DEFAULT)."""
         data = ps_json("Get-CimInstance Win32_StartupCommand | Select-Object Name,Location",
                        timeout=25)
+        if not getattr(data, "ok", True):
+            self.notes.append("No se han podido leer las carpetas de Inicio "
+                              f"({data.error}): el recuento de programas de arranque "
+                              "solo cubre las entradas del registro.")
         hives = [(winreg.HKEY_CURRENT_USER, "StartupFolder"),
                  (winreg.HKEY_LOCAL_MACHINE, "StartupFolder")]
         out = []
@@ -548,7 +608,7 @@ class Auditor:
     def check_os_age(self) -> str:
         age = self.si.os_age_days
         if age is None:
-            return "sin datos"
+            raise SinDato("no se ha podido leer la fecha de instalación del sistema")
         years = age / 365.25
         startup_count = sum(1 for i in getattr(self, "startup_items", []) if i.get("enabled"))
         heavy_install = startup_count >= 15 or age > 1095
@@ -581,6 +641,9 @@ class Auditor:
         de verdad, acumulando fugas de memoria y actualizaciones a medio aplicar.
         """
         hours = self.si.uptime_hours
+        if not hours:
+            # Un equipo encendido cero horas no existe: es que no se ha leído.
+            raise SinDato("no se ha podido leer el tiempo desde el último arranque")
         days = hours / 24
         if days >= 14:
             severity, gain = ("high", 0.14) if days >= 30 else ("medium", 0.10)
@@ -606,7 +669,7 @@ class Auditor:
 
     def check_gpu_drivers(self) -> str:
         if not self.si.gpus:
-            return "sin datos"
+            raise SinDato("no se ha detectado ningún adaptador gráfico")
 
         newer = self._newer_gpu_driver()
         if newer:
@@ -633,7 +696,7 @@ class Auditor:
         target = primary_gpu(self.si.gpus) or {}
         age = target.get("driver_age_days")
         if age is None:
-            return "sin fecha de driver"
+            raise SinDato(f"{target.get('name') or 'la GPU'} no informa de la fecha de su driver")
         # Los fabricantes publican drivers cada 4-6 semanas, así que la
         # antigüedad es un indicador razonable cuando no se puede consultar.
         if age > 365:
@@ -678,6 +741,11 @@ class Auditor:
     def check_power_plan(self) -> str:
         out = run_cmd(["powercfg", "/getactivescheme"], timeout=15) or ""
         name = out.split("(", 1)[1].rstrip(")").strip() if "(" in out else out
+        if not name.strip():
+            # Sin nombre de plan, la comparación contra la lista de nombres
+            # «buenos» siempre fallaba y el hallazgo se emitía con el plan
+            # vacío: «Plan de energía en «»».
+            raise SinDato("powercfg no ha devuelto el plan activo")
         lowered = name.lower()
         good = any(k in lowered for k in ("alto rendimiento", "high performance", "máximo",
                                           "ultimate", "rendimiento"))
@@ -700,8 +768,10 @@ class Auditor:
 
     def check_trim(self) -> str:
         if "SSD" not in self.si.system_drive_media:
-            return "no aplica (sin SSD detectado)"
+            raise NoAplica("el disco de sistema no es un SSD")
         out = run_cmd(["fsutil", "behavior", "query", "DisableDeleteNotify"], timeout=15) or ""
+        if not out.strip():
+            raise SinDato("fsutil no ha devuelto el estado de TRIM")
         disabled = any(tok in out for tok in ("= 1", "=1"))
         if disabled:
             self.add(
@@ -722,9 +792,15 @@ class Auditor:
         pref = reg_read(winreg.HKEY_CURRENT_USER,
                         r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects",
                         "VisualFXSetting")
+        if not self.si.gpus and self.bench is None:
+            # El consejo depende de si al equipo le cuesta mover la interfaz.
+            # Sin GPU identificada ni puntuación, recomendarlo sería a ciegas.
+            raise SinDato("sin datos de GPU ni benchmark con los que juzgar si compensa")
         weak_gpu = any("intel" in (g.get("name") or "").lower() and "arc" not in (g.get("name") or "").lower()
                        for g in self.si.gpus)
         low_score = bool(self.bench and self.bench.overall() < 65)
+        # `pref` ausente (None) es el estado por defecto de Windows —«deja que
+        # Windows elija»—, que sí deja las animaciones puestas.
         if pref in (0, 1, None) and (weak_gpu or low_score):
             self.add(
                 id="visual_fx", title="Animaciones y transparencias de Windows activas",
@@ -743,6 +819,10 @@ class Auditor:
 
     def check_pagefile(self) -> str:
         data = ps_json("Get-CimInstance Win32_PageFileUsage | Select-Object Name,AllocatedBaseSize,CurrentUsage")
+        if not getattr(data, "ok", True):
+            # Sin esta distinción, una consulta fallida se leía como «no hay
+            # archivo de paginación» y se emitía el hallazgo igualmente.
+            raise SinDato(f"no se ha podido consultar el archivo de paginación ({data.error})")
         if not data:
             total_gb = self.si.ram_total / 1024**3
             if total_gb < 32:
@@ -765,6 +845,10 @@ class Auditor:
         val = reg_read(winreg.HKEY_LOCAL_MACHINE,
                        r"SYSTEM\CurrentControlSet\Control\Session Manager\Power",
                        "HiberbootEnabled")
+        if val is None:
+            # Ese valor existe en cualquier Windows moderno: si no está, lo que
+            # ha fallado es la lectura, no el inicio rápido.
+            raise SinDato("no se ha podido leer HiberbootEnabled")
         if val == 0 and "HDD" in self.si.system_drive_media:
             self.add(
                 id="fast_startup", title="Inicio rápido desactivado en un equipo con HDD",
@@ -784,6 +868,9 @@ class Auditor:
     def check_services(self) -> str:
         rows = ps_json("Get-Service | Where-Object {$_.Status -eq 'Running'} | "
                        "Select-Object Name,DisplayName,StartType")
+        if not getattr(rows, "ok", True) or not rows:
+            raise SinDato("no se ha podido enumerar los servicios"
+                          + (f" ({rows.error})" if getattr(rows, "error", None) else ""))
         running = len(rows)
         names = {str(r.get("Name", "")).lower() for r in rows}
         if "sysmain" in names and "HDD" not in self.si.system_drive_media:
@@ -819,6 +906,12 @@ class Auditor:
             return "desactivada por directiva"
         dvr = reg_read(winreg.HKEY_CURRENT_USER, r"System\GameConfigStore", "GameDVR_Enabled")
         capture = reg_read(winreg.HKEY_CURRENT_USER, gamedvr, "AppCaptureEnabled")
+        historico = reg_read(winreg.HKEY_CURRENT_USER, gamedvr, "HistoricalCaptureEnabled")
+        if dvr is None and capture is None and historico is None:
+            # Esos valores existen en cualquier perfil de Windows 10/11. Que no
+            # esté ninguno significa que no se ha podido leer la rama, no que la
+            # captura esté apagada.
+            raise SinDato("no se ha podido leer la configuración de Game Bar")
         if dvr == 0 or capture == 0:
             return "desactivada"
         # Lo que cuesta FPS es el búfer permanente de «Grabar lo que ha pasado»,
@@ -826,7 +919,7 @@ class Auditor:
         # consume recursos, así que si el valor no existe está apagada. GameDVR_Enabled
         # y AppCaptureEnabled valen 1 en una instalación recién hecha: mirarlos a ellos
         # marcaba el hallazgo en prácticamente cualquier equipo.
-        if reg_read(winreg.HKEY_CURRENT_USER, gamedvr, "HistoricalCaptureEnabled") == 1:
+        if historico == 1:
             self.add(
                 id="game_dvr", title="Grabación en segundo plano de Xbox Game Bar activa",
                 severity="low", category="fluidez", component="system",
@@ -860,17 +953,17 @@ class Auditor:
         Es la única fuente que convierte «tienes muchos programas de inicio» en
         una cifra: el propio sistema apunta cuánto tardó y qué lo retrasó.
         """
+        if not self.si.is_admin:
+            self.boot_report = {"error": "requiere administrador", "boots": [], "delays": []}
+            raise SinDato("el registro de arranque exige administrador para leerse")
         data = boot_performance()
         self.boot_report = data
         if data.get("error"):
-            # El log tiene una ACL que exige administrador incluso para leer, y
-            # con -FilterHashtable el error que devuelve PowerShell es «no se
-            # encontraron eventos», que se lee como «tu arranque está limpio».
-            # Sin privilegios no se puede afirmar nada del arranque.
-            if not self.si.is_admin:
-                data["error"] = "requiere administrador"
-                return "no medible: requiere administrador"
-            return f"no medible ({data['error'][:60]})"
+            # El log tiene una ACL propia, y con -FilterHashtable el error que
+            # devuelve PowerShell es «no se encontraron eventos», que se lee
+            # como «tu arranque está limpio».
+            raise SinDato(f"no se ha podido leer el registro de arranque "
+                          f"({data['error'][:60]})")
 
         # Los reinicios de instalación de actualizaciones siempre son lentos y no
         # representan el arranque de cada día: no entran en la mediana.
@@ -883,7 +976,8 @@ class Auditor:
             if ms:
                 tiempos.append(ms)
         if not tiempos:
-            return "sin arranques utilizables registrados"
+            raise SinDato("el registro no contiene ningún arranque utilizable "
+                          "(solo reinicios por actualización, o ninguno todavía)")
 
         mediana = statistics.median(tiempos)
         segundos = mediana / 1000
@@ -942,12 +1036,12 @@ class Auditor:
         drive = os.environ.get("SystemDrive", "C:")
         out = run_cmd(["fsutil", "dirty", "query", drive], timeout=15) or ""
         if not out:
-            return "no evaluable (sin respuesta)"
+            raise SinDato("fsutil no ha respondido (suele requerir administrador)")
         lowered = out.lower()
         if set(re.split(r"[^\w]+", lowered)) & self._NEGACIONES:
             return "limpio"
         if not any(termino in lowered for termino in self._SUCIO):
-            return "no concluyente (respuesta no reconocida)"
+            raise SinDato(f"respuesta de fsutil no reconocida: «{out[:60]}»")
         self.add(
             id="fs_dirty", title="El volumen de sistema está marcado como «sucio»",
             severity="high", category="almacenamiento", component="disk",
@@ -964,7 +1058,13 @@ class Auditor:
     def check_antivirus(self) -> str:
         rows = ps_json('Get-CimInstance -Namespace "root/SecurityCenter2" -ClassName AntiVirusProduct '
                        '-ErrorAction SilentlyContinue | Select-Object displayName,productState')
+        if not getattr(rows, "ok", True):
+            raise SinDato(f"no se ha podido consultar el Centro de seguridad ({rows.error})")
         names = [str(r.get("displayName")) for r in rows if r.get("displayName")]
+        if not names:
+            # Windows registra siempre Defender aquí; una lista vacía significa
+            # que el Centro de seguridad no ha contestado, no que no haya nada.
+            raise SinDato("el Centro de seguridad no ha devuelto ningún producto")
         third_party = [n for n in names if "defender" not in n.lower()]
         if len(third_party) >= 2:
             self.add(
@@ -979,11 +1079,11 @@ class Auditor:
                        "Desinstala el resto con la herramienta de limpieza oficial del fabricante",
                        "Windows Defender es suficiente para la mayoría de usuarios"])
             return f"{len(names)} productos ({', '.join(names)})"
-        return ", ".join(names) if names else "no detectado"
+        return ", ".join(names)
 
     def check_defrag(self) -> str:
         if "HDD" not in self.si.system_drive_media:
-            return "no aplica (SSD)"
+            raise NoAplica("desfragmentar un SSD solo desgasta celdas")
         self.add(
             id="defrag_hdd", title="Desfragmentación recomendable en disco mecánico",
             severity="low", category="almacenamiento", component="disk",
@@ -998,6 +1098,9 @@ class Auditor:
 
     def check_smart(self) -> str:
         rows = ps_json("Get-PhysicalDisk | Select-Object FriendlyName,HealthStatus,OperationalStatus")
+        if not getattr(rows, "ok", True) or not rows:
+            raise SinDato("no se ha podido consultar el estado de los discos"
+                          + (f" ({rows.error})" if getattr(rows, "error", None) else ""))
         bad = [r for r in rows if str(r.get("HealthStatus", "")).lower() not in ("healthy", "0", "sano")]
         if bad:
             names = ", ".join(str(r.get("FriendlyName")) for r in bad)
@@ -1015,7 +1118,7 @@ class Auditor:
             return f"degradado: {names}"
 
         extra = self._check_disk_wear()
-        return (extra or (f"{len(rows)} disco(s) sano(s)" if rows else "sin datos"))
+        return extra or f"{len(rows)} disco(s) sano(s)"
 
     def _check_disk_wear(self) -> str:
         """Desgaste y errores acumulados, que avisan mucho antes que HealthStatus.
@@ -1102,7 +1205,7 @@ class Auditor:
     def check_linux_governor(self) -> str:
         path = Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
         if not path.exists():
-            return "no disponible"
+            raise NoAplica("este kernel no expone gobernadores de frecuencia")
         gov = path.read_text().strip()
         if gov in ("powersave", "conservative"):
             self.add(
@@ -1117,7 +1220,7 @@ class Auditor:
     def check_linux_swappiness(self) -> str:
         path = Path("/proc/sys/vm/swappiness")
         if not path.exists():
-            return "no disponible"
+            raise SinDato("no se ha podido leer /proc/sys/vm/swappiness")
         val = int(path.read_text().strip())
         if val >= 60 and self.si.ram_total > 8 * 1024**3:
             self.add(
@@ -1131,11 +1234,16 @@ class Auditor:
 
     def check_linux_trim(self) -> str:
         out = run_cmd(["systemctl", "is-enabled", "fstrim.timer"], timeout=10)
-        if out and "enabled" not in out:
+        if not out:
+            # `systemctl` devuelve código distinto de cero cuando la unidad no
+            # existe o está deshabilitada, y run_cmd traduce eso a None: sin
+            # esto, «no hay TRIM periódico» y «no hay systemd» eran lo mismo.
+            raise SinDato("systemctl no ha informado del estado de fstrim.timer")
+        if "enabled" not in out:
             self.add(
                 id="linux_trim", title="fstrim.timer no está activado",
                 severity="medium", category="almacenamiento", component="disk",
                 detail="Sin TRIM periódico, el SSD degrada su rendimiento de escritura.",
                 gain=0.12, gain_note="escritura sostenida", effort="bajo", risk="nulo",
                 steps=["`sudo systemctl enable --now fstrim.timer`"])
-        return out or "no disponible"
+        return out

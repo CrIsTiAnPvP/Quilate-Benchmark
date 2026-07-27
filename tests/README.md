@@ -25,6 +25,29 @@ Todos son invisibles para un test que se limite a comprobar que el código no
 lanza excepciones. Por eso los fixtures guardan **datos crudos** del sistema, no
 salidas ya interpretadas.
 
+### La versión general del mismo fallo
+
+`test_cobertura.py` no cubre un caso concreto sino el patrón entero: ciega
+**todas** las fuentes externas —registro, WMI, comandos, log de arranque— y
+exige que ninguna comprobación conteste con un veredicto. Antes, una fuente que
+no respondía se traducía en un mensaje neutro que el informe contaba como
+prueba superada; `check_power_plan` estaba pasando por casualidad y solo se
+descubrió porque el fallo de codificación reventó otra comprobación primero.
+
+Solo cuatro quedan exentas, declaradas en el propio test: leen de psutil o de
+`/proc`, que siguen vivos aunque el resto calle.
+
+### Lo que se mide, se mide con margen
+
+`test_dispersion.py` fija que cada cifra del benchmark venga acompañada de
+cuánto varió consigo misma, y `test_comparacion.py` que ese margen decida si una
+diferencia entre dos ejecuciones significa algo. El caso real que lo motiva está
+en el propio test: seis tramos de una misma escritura de 512 MB en este SSD, de
+487 a 2366 MB/s. Su media tiene un aspecto perfectamente creíble.
+
+`test_plan.py` exige que todo bloque del plan que cambie un ajuste sepa
+deshacerse leyendo el valor actual, nunca suponiendo el de fábrica.
+
 ## Procedencia de los fixtures
 
 | Fichero | Origen |

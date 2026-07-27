@@ -7,6 +7,7 @@ rendimiento que el equipo no tiene.
 
 import unittest
 
+from quilate import audit
 from quilate.sysinfo import SystemInfo
 from tests.support import FixtureCase, load
 
@@ -86,7 +87,9 @@ class CasosLimite(FixtureCase):
         self.assertIn("single channel", a.check_ram_channels())
 
     def test_sin_datos_de_modulos(self):
-        self.assertIn("sin datos", self.auditor().check_ram_channels())
+        # Sin módulos enumerados no se puede decir «correcto»: no hay dato.
+        with self.assertRaises(audit.SinDato):
+            self.auditor().check_ram_channels()
 
     def test_sin_velocidad_nominal(self):
         si = SystemInfo()

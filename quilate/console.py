@@ -157,8 +157,12 @@ def spinner_step(msg: str) -> None:
     print(f"  {C.CYAN}▸{C.RESET} {msg} ", end="", flush=True)
 
 
-def spinner_done(detail: str = "ok", ok: bool = True) -> None:
-    mark = f"{C.GREEN}✓{C.RESET}" if ok else f"{C.YELLOW}~{C.RESET}"
+def spinner_done(detail: str = "ok", ok: bool = True, neutral: bool = False) -> None:
+    """`neutral` es para lo que no procede comprobar: ni aprobado ni pendiente."""
+    if neutral:
+        mark = f"{C.GREY}·{C.RESET}"
+    else:
+        mark = f"{C.GREEN}✓{C.RESET}" if ok else f"{C.YELLOW}~{C.RESET}"
     print(f"{mark} {C.DIM}{detail}{C.RESET}")
 
 

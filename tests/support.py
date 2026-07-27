@@ -50,6 +50,10 @@ class FakeRegistry:
     def list_values(self, hive: int, path: str) -> dict:
         return dict(self._key(hive, path) or {})
 
+    def key_readable(self, hive: int, path: str) -> bool:
+        """Una clave que el fixture no declara es una clave que no se abre."""
+        return self._key(hive, path) is not None
+
 
 class _FakeWinreg:
     HKEY_CURRENT_USER = HKCU
@@ -64,13 +68,15 @@ def patched(module, registry: FakeRegistry | None = None, wmi=None, **overrides)
     un invocable que reciba la consulta. `overrides` sustituye cualquier otro
     nombre del módulo: `patched(audit, boot_performance=lambda: {...})`.
     """
-    nombres = ("reg_read", "reg_list_values", "ps_json", "winreg", "IS_WINDOWS")
+    nombres = ("reg_read", "reg_list_values", "reg_key_readable", "ps_json",
+               "winreg", "IS_WINDOWS")
     original = {name: getattr(module, name, None)
                 for name in nombres + tuple(overrides)}
     try:
         if registry is not None:
             module.reg_read = registry.read
             module.reg_list_values = registry.list_values
+            module.reg_key_readable = registry.key_readable
         if wmi is not None:
             module.ps_json = wmi if callable(wmi) else (lambda *a, **k: wmi)
         for name, value in overrides.items():

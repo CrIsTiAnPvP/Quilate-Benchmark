@@ -40,12 +40,26 @@ def export_json(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         "metrics": bench.metrics if bench else {},
         "memory_hierarchy": bench.memory_hierarchy if bench else [],
         "load_snapshots": bench.load_snapshots if bench else [],
+        # Sin el margen y sin saber qué más estaba corriendo, dos ejecuciones
+        # se pueden restar pero no comparar.
+        "dispersion": getattr(bench, "dispersion", {}) if bench else {},
+        "ambient_load": getattr(bench, "ambient_load", {}) if bench else {},
         "scores": {
             "components": bench.component_scores() if bench else {},
             "overall": bench.overall() if bench else None,
         },
         "components": [asdict(c) for c in build_component_cards(si, bench, auditor)],
         "findings": [asdict(f) for f in auditor.findings],
+        # Sin esto, «0 hallazgos» y «0 hallazgos sobre 5 comprobaciones ciegas»
+        # producían exactamente el mismo JSON.
+        "coverage": {
+            "checks_conclusive": auditor.checks_run,
+            "checks_total": getattr(auditor, "checks_total", auditor.checks_run),
+            "unverified": [{"check": c, "reason": r}
+                           for c, r in getattr(auditor, "unverified", [])],
+            "not_applicable": [{"check": c, "reason": r}
+                               for c, r in getattr(auditor, "not_applicable", [])],
+        },
         "projection": projection,
         "storage_scan": _scan_payload(getattr(auditor, "scan", None)),
         "sensors": {

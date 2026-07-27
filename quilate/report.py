@@ -164,14 +164,25 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                   f"RAM, no disco) y se ha excluido de la nota.{C.RESET}")
             print(f"  {C.DIM}Prueba con --disk-size mayor que la RAM libre, o --disk-path en "
                   f"otra unidad.{C.RESET}\n")
-        print(f"  {'PRUEBA'.ljust(24)}{'MEDIDA'.rjust(16)}   {'PTS'.rjust(5)}  NOTA")
+        dispersion = getattr(bench, "dispersion", {})
+        # Los cuatro subtests monohilo se agregan en una sola fila: su margen es
+        # el del subtest que más bailó.
+        equivalencias = {"cpu_single": ("sieve", "float", "hash", "compress")}
+        print(f"  {'PRUEBA'.ljust(24)}{'MEDIDA'.rjust(16)}  {'±'.rjust(6)}  {'PTS'.rjust(5)}  NOTA")
         print(f"  {C.GREY}{'─' * (BOX_W - 2)}{C.RESET}")
-        for res in bench.results.values():
+        for key, res in bench.results.items():
             letter, color = grade(res.score)
             measure = f"{res.raw:,.2f} {res.unit}" if res.unit != "IOPS" else f"{res.raw:,.0f} IOPS"
-            print(f"  {res.name.ljust(24)}{measure.rjust(16)}   "
+            relacionadas = [dispersion[k] for k in equivalencias.get(key, (key,))
+                            if k in dispersion]
+            margen = " " * 6
+            if relacionadas:
+                peor = max(relacionadas, key=lambda d: d["spread_pct"])
+                tono = C.GREY if peor["stable"] else C.YELLOW
+                margen = f"{tono}{peor['spread_pct']:>5.0f}%{C.RESET}"
+            print(f"  {res.name.ljust(24)}{measure.rjust(16)}  {margen}  "
                   f"{color}{res.score:>5.0f}{C.RESET}  {color}{letter.ljust(3)}{C.RESET}"
-                  f"{bar(res.score, 20)}")
+                  f"{bar(res.score, 14)}")
             if res.detail:
                 print(f"    {C.GREY}↳ {res.detail}{C.RESET}")
 
@@ -212,8 +223,8 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
     section("Hallazgos de la auditoría")
     findings = sorted(auditor.findings, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), -f.gain))
     if not findings:
-        print(f"  {C.GREEN}✓ No se han detectado problemas de configuración relevantes. "
-              f"El sistema está bien ajustado.{C.RESET}")
+        print(f"  {C.GREEN}✓ No se han detectado problemas de configuración relevantes "
+              f"en las {auditor.checks_run} comprobaciones que sí pudieron completarse.{C.RESET}")
     else:
         counts: dict[str, int] = {}
         for f in findings:
@@ -285,6 +296,23 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                   f"esfuerzo {tag}{f.effort}{C.RESET}  ·  riesgo {f.risk}  ·  {f.category}")
         print(f"\n  {C.DIM}Recuerda: mide siempre antes y después. Aplicar diez cambios a la vez "
               f"impide saber cuál funcionó.{C.RESET}")
+
+    # --- Lo que no se ha podido comprobar ---
+    # Va antes del veredicto a propósito: es la advertencia de hasta dónde llega
+    # lo que el informe puede afirmar.
+    unverified = getattr(auditor, "unverified", [])
+    if unverified:
+        section("Sin comprobar")
+        print(f"  {C.DIM}Estas comprobaciones no llegaron a un veredicto. No significan "
+              f"«correcto»: significan que no hay dato.{C.RESET}\n")
+        for label, reason in unverified:
+            print(f"  {C.YELLOW}?{C.RESET} {C.BOLD}{label}{C.RESET}")
+            for line in _wrap(reason, 68):
+                print(f"    {C.DIM}{line}{C.RESET}")
+        skipped = getattr(auditor, "not_applicable", [])
+        if skipped:
+            print(f"\n  {C.DIM}No aplican a este equipo: "
+                  f"{', '.join(label for label, _ in skipped)}.{C.RESET}")
 
     if auditor.notes:
         print(f"\n  {C.YELLOW}Notas:{C.RESET}")

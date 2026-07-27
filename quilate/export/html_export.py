@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..audit import Auditor, SEVERITY_ORDER
-from ..benchmark import Benchmark, REFERENCE
+from ..benchmark import BUSY_CPU_PCT, Benchmark, REFERENCE
 from ..sensors import temperature_report, temperature_source
 from ..components import (ComponentCard, _no_score_text, build_component_cards,
                           finding_group)
@@ -539,8 +539,12 @@ def _hero(bench: Benchmark | None, auditor: Auditor, projection: dict[str, Any])
                      f'<div class="l">Tras optimizar</div></div>')
         boxes.append(f'<div class="box"><div class="n" style="color:var(--brand)">+{exp_pct:.0f}%'
                      f'</div><div class="l">Fluidez percibida estimada</div></div>')
+    sin_datos = len(getattr(auditor, "unverified", []))
+    etiqueta = f"Hallazgos en {auditor.checks_run} pruebas concluyentes"
+    if sin_datos:
+        etiqueta += f" · {sin_datos} sin comprobar"
     boxes.append(f'<div class="box"><div class="n">{len(auditor.findings)}</div>'
-                 f'<div class="l">Hallazgos en {auditor.checks_run} pruebas</div></div>')
+                 f'<div class="l">{etiqueta}</div></div>')
     return f'<div class="hero" id="resumen">{"".join(boxes)}</div>'
 
 
@@ -720,23 +724,54 @@ def _inventory(si: SystemInfo) -> str:
 
 
 def _benchmark_table(bench: Benchmark) -> str:
+    dispersion = getattr(bench, "dispersion", {})
+    # Las claves de dispersión de CPU no coinciden con las de resultado: los
+    # cuatro subtests monohilo se agregan en una sola fila.
+    equivalencias = {"cpu_single": ("sieve", "float", "hash", "compress")}
     trs = ""
-    for r in bench.results.values():
+    for key, r in bench.results.items():
         letter, _ = grade(r.score)
         measure = f"{r.raw:,.0f}" if r.unit == "IOPS" else f"{r.raw:,.2f}"
         detail = f'<div class="tags">{_e(r.detail)}</div>' if r.detail else ""
+        relacionadas = [dispersion[k] for k in equivalencias.get(key, (key,))
+                        if k in dispersion]
+        margen = "—"
+        if relacionadas:
+            peor = max(relacionadas, key=lambda d: d["spread_pct"])
+            color = "var(--dim)" if peor["stable"] else "var(--warn)"
+            margen = (f'<span style="color:{color}" title="dispersión entre '
+                      f'{peor["runs"]} medidas de «{_e(peor["label"])}»">'
+                      f'±{peor["spread_pct"]:.0f}%</span>')
         trs += (f"<tr><td>{_e(r.name)}{detail}</td><td>{measure} {_e(r.unit)}</td>"
+                f"<td>{margen}</td>"
                 f"<td><b>{r.score:.0f}</b></td><td>{letter}</td>"
                 f"<td>{_html_bar(r.score)}</td></tr>")
     overall = bench.overall()
     letter, _ = grade(overall)
+    inestables = bench.unstable() if hasattr(bench, "unstable") else []
+    aviso = ""
+    if inestables:
+        aviso = ('<p class="scan-note" style="color:var(--warn)">Medidas poco estables: '
+                 + ", ".join(f"{_e(d['label'])} (±{d['spread_pct']:.0f}%)" for d in inestables)
+                 + ". La misma prueba dio resultados distintos entre tramos, así que esas "
+                   "cifras valen como orden de magnitud pero no para comparar con otra "
+                   "ejecución.</p>")
+    ocupada = bench.busy_during_run() if hasattr(bench, "busy_during_run") else 0.0
+    if ocupada >= BUSY_CPU_PCT:
+        aviso += ('<p class="scan-note" style="color:var(--warn)">El equipo no estaba en '
+                  f"reposo: un {ocupada:.0f}% de CPU la consumían otros procesos con el "
+                  "benchmark parado.</p>")
     return ('<div class="card"><div class="tw"><table>'
-            "<tr><th>Prueba</th><th>Medida</th><th>Puntos</th><th>Nota</th>"
+            "<tr><th>Prueba</th><th>Medida</th><th>Margen</th><th>Puntos</th><th>Nota</th>"
             "<th>Relativo a la referencia</th></tr>" + trs
-            + f"<tr><td><b>Puntuación global</b></td><td></td>"
+            + f"<tr><td><b>Puntuación global</b></td><td></td><td></td>"
               f'<td style="color:{_score_color(overall)}"><b>{overall:.0f}</b></td>'
               f"<td><b>{letter}</b></td><td>{_html_bar(overall)}</td></tr>"
-              "</table></div></div>")
+              "</table></div>"
+            + aviso
+            + '<p class="scan-note">El margen es cuánto varió cada prueba consigo misma '
+              "entre repeticiones o tramos del mismo trabajo. Un número sin margen no "
+              "revela nunca que está contaminado.</p></div>")
 
 
 def _howto_subcard(card: ComponentCard) -> str:
@@ -857,6 +892,24 @@ def _system_state_block(auditor: Auditor, bench: Benchmark | None) -> str:
     arranque, programas de inicio uno a uno, procesos residentes y de dónde salió
     (o no) cada sensor."""
     out = []
+
+    # Va la primera: define hasta dónde llega lo que el resto del informe afirma.
+    sin_datos = getattr(auditor, "unverified", [])
+    no_aplican = getattr(auditor, "not_applicable", [])
+    if sin_datos or no_aplican:
+        cuerpo = ""
+        if sin_datos:
+            filas = "".join(f"<tr><td>{_e(c)}</td><td>{_e(r)}</td></tr>" for c, r in sin_datos)
+            cuerpo += ('<div class="tw"><table><tr><th>Comprobación</th>'
+                       "<th>Por qué no hay veredicto</th></tr>" + filas + "</table></div>")
+        if no_aplican:
+            cuerpo += ('<p class="scan-note">No aplican a este equipo: '
+                       + ", ".join(f"{_e(c)} ({_e(r)})" for c, r in no_aplican) + ".</p>")
+        out.append('<div class="card"><div class="sub-h">Cobertura de la auditoría</div>'
+                   f'<p class="scan-note">{auditor.checks_run} de '
+                   f'{getattr(auditor, "checks_total", auditor.checks_run)} comprobaciones '
+                   "llegaron a un veredicto. Las de abajo no: no significan «correcto», "
+                   "significan que no hay dato con el que opinar.</p>" + cuerpo + "</div>")
 
     boot = getattr(auditor, "boot_report", {}) or {}
     segundos = getattr(auditor, "boot_seconds", None)
