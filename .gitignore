@@ -1,0 +1,12 @@
+# Entorno virtual
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Salidas de PCBench
+*.json
+*.html
+plan_optimizacion.ps1
