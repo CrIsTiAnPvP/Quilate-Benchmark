@@ -145,30 +145,74 @@ def owns_console() -> bool:
         return False
 
 
-def relaunch_as_admin(extra_args: list[str] | None = None) -> bool:
+if IS_WINDOWS:
+    from ctypes import wintypes
+
+    class _ShellExecuteInfo(ctypes.Structure):
+        """SHELLEXECUTEINFOW. Se usa la variante "Ex" de ShellExecute porque es
+        la unica que devuelve el handle del proceso creado, y sin handle no se
+        puede esperar al hijo ni recoger su codigo de salida."""
+
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("fMask", ctypes.c_ulong),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", wintypes.HINSTANCE),
+            ("lpIDList", ctypes.c_void_p),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", wintypes.HKEY),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIcon", wintypes.HANDLE),
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+
+SEE_MASK_NOCLOSEPROCESS = 0x00000040
+SEE_MASK_NOASYNC = 0x00000100
+ERROR_CANCELLED = 1223
+
+
+def relaunch_as_admin(extra_args: list[str] | None = None,
+                      wait: bool = False) -> int | None:
     """Vuelve a lanzarse pidiendo elevacion por UAC.
 
-    Devuelve True si el proceso elevado llego a arrancar —en cuyo caso quien
-    llama debe terminar, porque el trabajo continua en la ventana nueva— y False
-    si el usuario rechazo el aviso o la politica del equipo lo impidio.
+    Devuelve None si el proceso elevado no llego a arrancar —UAC rechazado o
+    politica del equipo—; en otro caso quien llama debe terminar, porque el
+    trabajo continua en la ventana nueva. Con `wait` espera a que el hijo acabe y
+    devuelve su codigo de salida, para que en una terminal el codigo de salida
+    siga significando algo; sin el, devuelve 0 en cuanto arranca.
 
     No se puede elevar un proceso ya en marcha: hay que crear otro, y el unico
-    camino soportado es el verbo "runas" de ShellExecute. Se le pasa el
-    directorio actual para que los informes se generen donde el usuario espera y
-    no en system32, que es a donde va a parar un proceso elevado por defecto.
+    camino soportado es el verbo "runas". Se le pasa el directorio actual para
+    que los informes se generen donde el usuario espera y no en system32, que es
+    a donde va a parar un proceso elevado por defecto.
     """
     if not IS_WINDOWS:
-        return False
+        return None
     try:
-        args = list(sys.argv[1:]) + list(extra_args or [])
-        shell32 = ctypes.windll.shell32
-        shell32.ShellExecuteW.restype = ctypes.c_void_p   # HINSTANCE: 64 bits
-        rc = shell32.ShellExecuteW(
-            None, "runas", sys.executable, subprocess.list2cmdline(args),
-            os.getcwd(), 1,   # SW_SHOWNORMAL
-        )
-        # ShellExecute mantiene la convencion de los tiempos de 16 bits: mayor
-        # que 32 es exito; 5 (acceso denegado) es lo que devuelve un UAC rechazado.
-        return int(rc or 0) > 32
+        info = _ShellExecuteInfo()
+        info.cbSize = ctypes.sizeof(info)
+        info.fMask = SEE_MASK_NOASYNC | (SEE_MASK_NOCLOSEPROCESS if wait else 0)
+        info.lpVerb = "runas"
+        info.lpFile = sys.executable
+        info.lpParameters = subprocess.list2cmdline(
+            list(sys.argv[1:]) + list(extra_args or []))
+        info.lpDirectory = os.getcwd()
+        info.nShow = 1   # SW_SHOWNORMAL
+        if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)):
+            return None  # ERROR_CANCELLED (1223) si el usuario dijo que no
+        if not wait or not info.hProcess:
+            return 0
+        kernel32 = ctypes.windll.kernel32
+        kernel32.WaitForSingleObject(info.hProcess, 0xFFFFFFFF)
+        code = wintypes.DWORD()
+        kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
+        kernel32.CloseHandle(info.hProcess)
+        return int(code.value)
     except Exception:
-        return False
+        return None

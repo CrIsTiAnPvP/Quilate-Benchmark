@@ -67,32 +67,69 @@ def parse_args() -> argparse.Namespace:
 _relaunched = False   # lo consulta _wait_before_closing(): ver su docstring
 
 
-def _try_elevate(args: argparse.Namespace) -> bool:
-    """Ofrece relanzarse como administrador. True si hay que ceder el turno.
+def _interactive() -> bool:
+    """True si hay un usuario delante: entrada y salida son un terminal."""
+    try:
+        return bool(sys.stdin and sys.stdin.isatty() and sys.stdout.isatty())
+    except (AttributeError, OSError):
+        return False
 
-    El .exe se abre normalmente con doble clic, y ahí no hay forma de pedir
-    "ejecutar como administrador" salvo el menú contextual, que nadie usa: media
-    auditoría (SMART, TRIM, servicios) se quedaba fuera sin que el usuario
-    supiera por qué. Se le pregunta con el aviso de UAC de Windows, y si lo
-    rechaza el análisis continúa aquí mismo, sin los permisos.
 
-    Solo cuando somos dueños de la consola: relanzarse abre una ventana nueva, y
-    hacerlo desde una terminal ya abierta le robaría la salida y el código de
-    salida a quien nos invocó. Desde una terminal se pide con `--elevate`.
+def _ask_elevate() -> bool:
+    """Pregunta antes de relanzarse desde una terminal ya abierta.
+
+    Aquí el aviso de UAC no basta como pregunta: aunque se acepte, el análisis
+    se va a una ventana nueva y esta terminal se queda mirando. Conviene
+    decirlo antes, no después.
+    """
+    print(f"  {C.BOLD}¿Pedirlos ahora?{C.RESET} {C.DIM}El análisis se abrirá en una "
+          f"ventana nueva.{C.RESET}")
+    print(f"    {C.GOLD}[Enter]{C.RESET} Sí, pedirlos    "
+          f"{C.GOLD}[N]{C.RESET} No, seguir sin permisos    ", end="", flush=True)
+    try:
+        key = read_key()
+    except KeyboardInterrupt:
+        key = "n"
+    print()
+    return key not in ("n", "\x1b")
+
+
+def _try_elevate(args: argparse.Namespace) -> int | None:
+    """Ofrece relanzarse como administrador.
+
+    Devuelve None para continuar aquí sin permisos, o el código de salida con el
+    que terminar si el trabajo se ha ido a la ventana elevada.
+
+    Sin elevación se cae media auditoría (SMART, TRIM, servicios) sin que el
+    usuario sepa por qué, y con doble clic no hay forma de pedirla salvo el menú
+    contextual, que nadie usa. Se pide en los dos modos, pero de distinta manera:
+
+    - Doble clic: somos los únicos de la consola, así que se va directo al aviso
+      de UAC. Aceptar sustituye esta ventana por la elevada.
+    - Terminal: se pregunta primero, porque relanzarse abre otra ventana. Si se
+      acepta, esta espera al hijo y hereda su código de salida, para no dejar en
+      el aire a quien nos invocó desde un script.
+    - Salida redirigida a un fichero o a una tubería: no se pide nada. Ahí no hay
+      quien conteste, y la ventana nueva dejaría el destino vacío.
     """
     global _relaunched
     if args.no_elevate or not IS_WINDOWS or not getattr(sys, "frozen", False):
-        return False
-    if not (args.elevate or owns_console()):
-        return False
+        return None
+    double_click = owns_console()
+    if not double_click and not args.elevate:
+        if not _interactive() or not _ask_elevate():
+            return None
 
     print(f"  {C.CYAN}▸{C.RESET} Pidiendo permisos a Windows... "
           f"{C.DIM}acepta el aviso para el análisis completo.{C.RESET}")
-    if relaunch_as_admin(["--no-elevate"]):
-        _relaunched = True
-        return True
-    print(f"  {C.DIM}Permisos denegados; se continúa sin ellos.{C.RESET}")
-    return False
+    code = relaunch_as_admin(["--no-elevate"], wait=not double_click)
+    if code is None:
+        print(f"  {C.DIM}Permisos denegados; se continúa sin ellos.{C.RESET}")
+        return None
+    _relaunched = True
+    if not double_click:
+        print(f"  {C.GREEN}✓{C.RESET} Análisis completado en la ventana con permisos.")
+    return code
 
 
 def main() -> int:
@@ -107,8 +144,9 @@ def main() -> int:
     if not is_admin():
         print(f"\n  {C.YELLOW}⚠ Sin permisos de administrador: algunas comprobaciones "
               f"(SMART, TRIM, servicios) pueden no estar disponibles.{C.RESET}")
-        if _try_elevate(args):
-            return 0
+        code = _try_elevate(args)
+        if code is not None:
+            return code
         print(f"  {C.DIM}Para un análisis completo, abre la terminal como administrador.{C.RESET}")
 
     section("Recopilando información del sistema")
@@ -239,10 +277,7 @@ def _export_menu(si, bench, auditor, projection) -> None:
     medido en memoria, sin repetir el benchmark.
     """
     global _menu_shown
-    try:
-        if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
-            return
-    except (AttributeError, OSError):
+    if not _interactive():
         return
 
     actions = [("h", "Informe HTML", "html"), ("j", "Datos JSON", "json")]
@@ -315,7 +350,7 @@ def _wait_before_closing() -> None:
     if _menu_shown or _relaunched or not getattr(sys, "frozen", False):
         return
     try:
-        if sys.stdin and sys.stdin.isatty() and sys.stdout.isatty():
+        if _interactive():
             input(f"\n{C.DIM}Pulsa Enter para cerrar...{C.RESET}")
     except (EOFError, OSError):
         pass

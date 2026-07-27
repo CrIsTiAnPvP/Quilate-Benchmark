@@ -92,13 +92,21 @@ icono del proyecto, que se regenera desde `quilate.png` con
 `python tools/make_icon.py` cuando cambia el logo. Acepta
 las mismas opciones que el script.
 
-Al abrirlo con doble clic, y solo entonces, **pide permisos de administrador**
-con el aviso de UAC de Windows: es la única forma de que un doble clic llegue a
-leer SMART, TRIM y los servicios. Si el usuario rechaza el aviso, el análisis
-continúa en la misma ventana sin esos permisos, avisando de lo que se pierde.
-Desde una terminal no lo pide —relanzarse abriría una ventana nueva y le robaría
-la salida a quien lo invocó—; ahí se fuerza con `--elevate`, o se desactiva del
-todo con `--no-elevate`.
+Cuando le faltan permisos, **los pide** con el aviso de UAC de Windows: sin ellos
+se caen SMART, TRIM y la revisión de servicios. Si el usuario rechaza el aviso,
+el análisis continúa sin ellos, diciendo lo que se pierde. Cómo lo pide depende
+de cómo se haya abierto:
+
+- **Doble clic**: va directo al aviso de UAC. Aceptar sustituye esa ventana por
+  la elevada.
+- **Desde una terminal**: pregunta antes, porque relanzarse abre una ventana
+  nueva y esta terminal se quedaría mirando. Si se acepta, espera al proceso
+  elevado y hereda su código de salida.
+- **Con la salida redirigida** a un fichero o a una tubería: no pide nada. Ahí no
+  hay quien conteste, y la ventana nueva dejaría el destino vacío.
+
+`--elevate` fuerza el intento sin preguntar y `--no-elevate` lo desactiva del
+todo.
 
 Al abrir el `.exe` con doble clic no hay forma de pasarle flags, así que cuando
 termina el análisis —y solo si no se pidió ningún fichero por línea de comandos—
