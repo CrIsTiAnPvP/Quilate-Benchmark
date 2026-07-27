@@ -14,7 +14,7 @@ from .console import (BOX_W, C, _wrap, bar, grade, human_bytes, kv, section)
 from .const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
 from .projection import priority_rank
 from .storage_scan import RECLAIMABLE, REVIEWABLE, ScanResult, candidate_bytes
-from .sysinfo import SystemInfo
+from .sysinfo import SystemInfo, gpu_label
 
 
 def print_component_cards(cards: list[ComponentCard]) -> None:
@@ -129,7 +129,7 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         ram_desc += f" · {si.ram_channels} módulo(s)"
     kv("Memoria", ram_desc)
     for g in si.gpus:
-        kv("GPU", f"{g['name']}  ·  driver {g.get('driver')} ({g.get('driver_date') or '?'})")
+        kv("GPU", f"{gpu_label(g)}  ·  driver {g.get('driver')} ({g.get('driver_date') or '?'})")
     kv("Disco de sistema", f"{si.system_drive}  ·  {si.system_drive_media}")
     for d in si.disks:
         if d["total"] > 5 * 1024**3:
@@ -149,17 +149,21 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
             note += f" · factor de compensación de intérprete ×{PY_ADJUST}"
         print(f"  {C.DIM}{note}{C.RESET}")
         if getattr(sys, "frozen", False):
-            # El test multihilo lanza procesos hijo, y en el ejecutable cada uno
-            # arranca el intérprete empaquetado. Cuesta un 10-20% de la nota
-            # multihilo, así que comparar .exe contra python sería injusto.
-            print(f"  {C.DIM}Ejecutándose desde el .exe: la prueba multihilo pierde algo de "
-                  f"puntuación por el arranque de los procesos hijo.{C.RESET}")
-            print(f"  {C.DIM}Compara siempre ejecuciones del mismo tipo (.exe con .exe)."
-                  f"{C.RESET}")
+            # El arranque de los procesos hijo —caro en el .exe, donde cada uno
+            # levanta el intérprete empaquetado— ya no entra en el cronómetro del
+            # test multihilo: se hace antes, con una tarea vacía. Aun así conviene
+            # comparar ejecuciones del mismo tipo.
+            print(f"  {C.DIM}Ejecutándose desde el .exe. El arranque de los procesos hijo queda "
+                  f"fuera de la medición, pero compara siempre .exe con .exe.{C.RESET}")
         print()
         if getattr(bench, "disk_on_ram", False):
             print(f"  {C.YELLOW}Los resultados de disco se midieron sobre un sistema de "
                   f"ficheros en RAM: ignóralos.{C.RESET}\n")
+        if getattr(bench, "disk_cache_suspect", False):
+            print(f"  {C.YELLOW}Parte del test de disco salía de la caché del sistema (medía "
+                  f"RAM, no disco) y se ha excluido de la nota.{C.RESET}")
+            print(f"  {C.DIM}Prueba con --disk-size mayor que la RAM libre, o --disk-path en "
+                  f"otra unidad.{C.RESET}\n")
         print(f"  {'PRUEBA'.ljust(24)}{'MEDIDA'.rjust(16)}   {'PTS'.rjust(5)}  NOTA")
         print(f"  {C.GREY}{'─' * (BOX_W - 2)}{C.RESET}")
         for res in bench.results.values():

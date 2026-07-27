@@ -34,6 +34,7 @@ class SystemInfo:
     ram_available: int = 0
     ram_sticks: list[dict] = field(default_factory=list)
     ram_speed_mhz: int | None = None
+    ram_speed_rated_mhz: int | None = None
     ram_channels: int | None = None
     gpus: list[dict] = field(default_factory=list)
     disks: list[dict] = field(default_factory=list)
@@ -125,18 +126,25 @@ def _collect_windows_info(si: SystemInfo) -> None:
         si.cpu_name = (cpu[0].get("Name") or si.cpu_name).strip()
         si.cpu_max_mhz = float(cpu[0].get("MaxClockSpeed") or si.cpu_max_mhz)
 
-    mem = ps_json("Get-CimInstance Win32_PhysicalMemory | "
-                  "Select-Object BankLabel,DeviceLocator,Capacity,Speed,Manufacturer,PartNumber")
+    mem = ps_json("Get-CimInstance Win32_PhysicalMemory | Select-Object BankLabel,DeviceLocator,"
+                  "Capacity,Speed,ConfiguredClockSpeed,Manufacturer,PartNumber")
     if mem:
+        # En SMBIOS, Speed es la velocidad máxima que soporta el módulo y
+        # ConfiguredClockSpeed la que está corriendo de verdad. Sin XMP/EXPO
+        # activado difieren, y la que importa es la segunda: informar de la
+        # nominal es dar por bueno un rendimiento que el equipo no tiene.
         si.ram_sticks = [{
             "slot": m.get("DeviceLocator") or m.get("BankLabel") or "?",
             "capacity": int(m.get("Capacity") or 0),
-            "speed": int(m.get("Speed") or 0),
+            "speed": int(m.get("ConfiguredClockSpeed") or m.get("Speed") or 0),
+            "rated_speed": int(m.get("Speed") or 0),
             "vendor": (m.get("Manufacturer") or "").strip(),
             "part": (m.get("PartNumber") or "").strip(),
         } for m in mem]
         speeds = [s["speed"] for s in si.ram_sticks if s["speed"]]
+        rated = [s["rated_speed"] for s in si.ram_sticks if s["rated_speed"]]
         si.ram_speed_mhz = max(speeds) if speeds else None
+        si.ram_speed_rated_mhz = max(rated) if rated else None
         si.ram_channels = len([s for s in si.ram_sticks if s["capacity"] > 0])
 
     gpus = ps_json("Get-CimInstance Win32_VideoController | "
@@ -155,11 +163,22 @@ def _collect_windows_info(si: SystemInfo) -> None:
         reg_vram = vram_by_name.get(name.lower())
         if reg_vram and reg_vram > vram:
             vram, vram_source = reg_vram, "registro (qwMemorySize)"
+        # LibreHardwareMonitor y Win32_VideoController no siempre escriben igual
+        # el nombre de la tarjeta, así que si no casa exacto se busca por
+        # coincidencia parcial antes de darla por no medida.
         live = telemetry.get(name.lower())
+        if live is None:
+            live = next((t for clave, t in telemetry.items()
+                         if clave in name.lower() or name.lower() in clave), None)
         if live and live.get("vram"):
             vram, vram_source = live["vram"], "nvidia-smi"
+        width = g.get("CurrentHorizontalResolution")
         si.gpus.append({
             "name": name,
+            "integrated": _is_integrated(name),
+            # Sin resolución activa el adaptador está ahí pero no pinta nada:
+            # típico de la iGPU cuando el monitor va por la tarjeta dedicada.
+            "active": bool(width),
             "driver": g.get("DriverVersion"),
             "driver_date": drv_date.strftime("%Y-%m-%d") if drv_date else None,
             "driver_age_days": (datetime.now() - drv_date).days if drv_date else None,
@@ -170,9 +189,8 @@ def _collect_windows_info(si: SystemInfo) -> None:
             "utilization": (live or {}).get("utilization"),
             "clock_mhz": (live or {}).get("clock_mhz"),
             "power_w": (live or {}).get("power_w"),
-            "resolution": f"{g.get('CurrentHorizontalResolution') or '?'}x"
-                          f"{g.get('CurrentVerticalResolution') or '?'}"
-                          f" @ {g.get('CurrentRefreshRate') or '?'}Hz",
+            "resolution": (f"{width}x{g.get('CurrentVerticalResolution') or '?'}"
+                           f" @ {g.get('CurrentRefreshRate') or '?'}Hz") if width else None,
         })
 
     _map_storage(si)
@@ -188,6 +206,84 @@ def _collect_windows_info(si: SystemInfo) -> None:
         if isinstance(types, int):
             types = [types]
         si.is_laptop = any(t in (8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32) for t in types)
+
+
+# Nombres de gráficas integradas. Las dedicadas llevan modelo ("GeForce RTX 5060 Ti",
+# "Radeon RX 7800 XT", "Arc A770"); las iGPU se quedan en el genérico del fabricante.
+_INTEGRATED_HINTS = ("amd radeon(tm) graphics", "radeon(tm) vega", "vega graphics",
+                     "uhd graphics", "hd graphics", "iris", "intel(r) graphics",
+                     "microsoft basic display")
+
+
+def _is_integrated(name: str) -> bool:
+    return any(hint in name.lower() for hint in _INTEGRATED_HINTS)
+
+
+def gpu_label(gpu: dict) -> str:
+    """Nombre del adaptador con el contexto que evita confundirlo con la
+    gráfica principal (integrada, o presente pero sin pintar nada)."""
+    tags = []
+    if gpu.get("integrated"):
+        tags.append("integrada")
+    if not gpu.get("active", True):
+        tags.append("sin pantalla conectada")
+    name = str(gpu.get("name") or "?")
+    return f"{name} ({', '.join(tags)})" if tags else name
+
+
+def primary_gpu(gpus: list[dict]) -> dict | None:
+    """La gráfica que representa al equipo: la que pinta en pantalla y, entre
+    varias, la dedicada. Si nada lo aclara, la de más VRAM.
+
+    Windows lista también la iGPU del procesador aunque el monitor vaya por la
+    tarjeta dedicada, y no siempre la deja en primer lugar.
+    """
+    if not gpus:
+        return None
+    return max(gpus, key=lambda g: (bool(g.get("active", True)),
+                                    not g.get("integrated", False),
+                                    g.get("vram") or 0))
+
+
+def _storage_reliability() -> dict[int, dict]:
+    """Desgaste, horas de uso y errores acumulados de cada disco físico.
+
+    Sale de Get-StorageReliabilityCounter, que es nativo de Windows y expone los
+    atributos SMART que de verdad importan. Requiere privilegios de
+    administrador: sin ellos devuelve vacío, y quien llame debe tratar la
+    ausencia como «no medido», nunca como «disco nuevo».
+
+    Un campo a None significa que ese disco no publica el atributo. Es habitual
+    en discos USB y en algunos SATA antiguos.
+    """
+    rows = ps_json(
+        "Get-PhysicalDisk | ForEach-Object { $d = $_; "
+        "$c = $d | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue; "
+        "if ($c) { [PSCustomObject]@{ DeviceId = $d.DeviceId; Wear = $c.Wear; "
+        "Temperature = $c.Temperature; PowerOnHours = $c.PowerOnHours; "
+        "ReadErrorsUncorrected = $c.ReadErrorsUncorrected; "
+        "WriteErrorsUncorrected = $c.WriteErrorsUncorrected } } }",
+        timeout=40)
+
+    def num(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    out: dict[int, dict] = {}
+    for row in rows:
+        number = num(row.get("DeviceId"))
+        if number is None:
+            continue
+        out[number] = {
+            "wear": num(row.get("Wear")),
+            "temperature": num(row.get("Temperature")),
+            "power_on_hours": num(row.get("PowerOnHours")),
+            "read_errors": num(row.get("ReadErrorsUncorrected")),
+            "write_errors": num(row.get("WriteErrorsUncorrected")),
+        }
+    return out
 
 
 def _vram_from_registry() -> dict[str, int]:
@@ -253,6 +349,7 @@ def _map_storage(si: SystemInfo) -> None:
         if letter and number is not None:
             letter_to_disk[letter] = int(number)
 
+    reliability = _storage_reliability()
     for p in ps_json("Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,"
                      "BusType,Size,HealthStatus,SpindleSpeed"):
         media = p.get("MediaType")
@@ -273,6 +370,9 @@ def _map_storage(si: SystemInfo) -> None:
             "size": int(p.get("Size") or 0),
             "health": p.get("HealthStatus"),
             "rpm": p.get("SpindleSpeed"),
+            # HealthStatus es un binario sano/no sano. El desgaste y los errores
+            # acumulados avisan mucho antes de que Windows lo dé por degradado.
+            **reliability.get(number, {}),
         })
     by_number = {d["number"]: d for d in si.physical_disks if d["number"] is not None}
 

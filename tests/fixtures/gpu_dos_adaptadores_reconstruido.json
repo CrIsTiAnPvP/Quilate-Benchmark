@@ -1,0 +1,62 @@
+{
+  "_origen": "RECONSTRUIDO, no capturado. No se tiene acceso a esa máquina.",
+  "_nota": [
+    "Procede de una captura de pantalla del panel «Gráfica» de Quilate en un equipo ajeno,",
+    "no de un volcado de Win32_VideoController. Los dos campos que deciden la lógica sí están",
+    "respaldados por lo que se veía en pantalla:",
+    "  · El panel mostraba «?x? @ ?Hz» para la Radeon. El código anterior generaba esa cadena",
+    "    exactamente cuando CurrentHorizontalResolution/Vertical/RefreshRate eran falsy, así que",
+    "    en esa máquina la integrada no reportaba resolución.",
+    "  · «AMD Radeon(TM) Graphics» se imprimía literal desde Win32_VideoController.Name.",
+    "Lo que NO está verificado es el resto de campos: AdapterRAM y DriverDate se han deducido",
+    "del texto renderizado. Si algún día hay acceso al equipo, reemplazar por un `quilate --json`."
+  ],
+  "video_controllers": [
+    {
+      "Name": "NVIDIA GeForce RTX 5060 Ti",
+      "DriverVersion": "32.0.16.1047",
+      "AdapterRAM": 4293918720,
+      "CurrentHorizontalResolution": 1920,
+      "CurrentVerticalResolution": 1080,
+      "CurrentRefreshRate": 119
+    },
+    {
+      "Name": "AMD Radeon(TM) Graphics",
+      "DriverVersion": "32.0.13066.12",
+      "AdapterRAM": 536870912,
+      "CurrentHorizontalResolution": null,
+      "CurrentVerticalResolution": null,
+      "CurrentRefreshRate": null
+    }
+  ],
+  "gpus": [
+    {
+      "name": "NVIDIA GeForce RTX 5060 Ti",
+      "integrated": false,
+      "active": true,
+      "driver": "32.0.16.1047",
+      "driver_date": "2026-05-19",
+      "driver_age_days": 69,
+      "vram": 17179869184
+    },
+    {
+      "name": "AMD Radeon(TM) Graphics",
+      "integrated": true,
+      "active": false,
+      "driver": "32.0.13066.12",
+      "driver_date": "2025-06-10",
+      "driver_age_days": 412,
+      "vram": 536870912
+    }
+  ],
+  "esperado": {
+    "principal": "NVIDIA GeForce RTX 5060 Ti",
+    "hallazgo_driver": false,
+    "resumen": "NVIDIA GeForce RTX 5060 Ti: al día (69 días)",
+    "por_que": [
+      "La integrada arrastra un driver de 412 días porque no se usa. Elegir el adaptador",
+      "más antiguo —lo que se hacía— colgaba ese hallazgo de la gráfica que sí importa,",
+      "que está al día con 69 días."
+    ]
+  }
+}

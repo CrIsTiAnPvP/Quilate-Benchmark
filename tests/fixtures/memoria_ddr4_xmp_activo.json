@@ -1,0 +1,28 @@
+{
+  "_origen": "capturado el 2026-07-27; DDR4-3200 con XMP activado",
+  "physical_memory": [
+    {
+      "ConfiguredClockSpeed": 3200,
+      "PartNumber": "CMK16GX4M2E3200C16",
+      "BankLabel": "P0 CHANNEL A",
+      "DeviceLocator": "DIMM 1",
+      "Speed": 3200,
+      "Manufacturer": "Unknown",
+      "Capacity": 8589934592
+    },
+    {
+      "ConfiguredClockSpeed": 3200,
+      "PartNumber": "CMK16GX4M2E3200C16",
+      "BankLabel": "P0 CHANNEL B",
+      "DeviceLocator": "DIMM 1",
+      "Speed": 3200,
+      "Manufacturer": "Unknown",
+      "Capacity": 8589934592
+    }
+  ],
+  "esperado": {
+    "ram_speed_mhz": 3200,
+    "ram_speed_rated_mhz": 3200,
+    "hallazgo_xmp": false
+  }
+}

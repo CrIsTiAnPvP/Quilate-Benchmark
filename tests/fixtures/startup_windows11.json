@@ -1,0 +1,253 @@
+{
+  "_origen": "capturado de un Windows 11 real el 2026-07-27",
+  "_nota": "Los valores de las claves Run van vacíos a propósito: el código solo usa los nombres, y las líneas de comando llevan rutas de perfil. SIDs anonimizados. Estado esperado verificado a mano contra StartupApproved, entrada por entrada.",
+  "registry": {
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run": {
+      "Alfa": "",
+      "BRAVO": "",
+      "CharlieClient": "",
+      "runtime.app.DE Delta": "",
+      "runtime.app.EchoForge": "",
+      "FoxtrotAppAgent": "",
+      "Golfwolf": "",
+      "org.hotelvpn.client": "",
+      "IndiaDriveFS": "",
+      "JulietAppEngine": "",
+      "Kilo Client": "",
+      "LimaRgb": "",
+      "runtime.app.Mike": "",
+      "runtime.app.November Manager": "",
+      "oscar_PapaHide_Updater": "",
+      "QuebecPlayerBeta": "",
+      "Romeo Desktop": "",
+      "Sierra": ""
+    },
+    "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run": {
+      "TangoHealth": "",
+      "UniformAudService": "",
+      "Victor Guard": "",
+      "iWhiskeyHelper": "",
+      "XrayflareWARP": ""
+    },
+    "HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run": {
+      "Y19Z": "",
+      "ZuluStsMon00": "",
+      "AlfaDos": "",
+      "bravodos-tray.exe": "",
+      "CharlieDosUpdateSched": ""
+    },
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run": {
+      "BRAVO": "hex:020000000000000000000000",
+      "Sierra": "hex:020000000000000000000000",
+      "QuebecPlayerBeta": "hex:03000000b65ab4a9e01ddd01",
+      "runtime.app.November Manager": "hex:03000000b102ab013daadc01",
+      "NovemberVPN-GUI": "hex:020000000000000000000000",
+      "GolfGamesLauncher": "hex:030000009a049d713d2dda01",
+      "iLimaPhotos": "hex:020000000000000000000000",
+      "HotelBrowserAutoLaunch_FEDCBA9876543210FEDCBA987654321": "hex:030000002c48566b3d2dda01",
+      "runtime.app.DE Delta": "hex:03000000780c7f074886dc01",
+      "LimaRgb": "hex:03000000a0b4aa013daadc01",
+      "MikeDrive": "hex:03000000bceaa16a673cdc01",
+      "iLimaDrive": "hex:020000000000000000000000",
+      "Kilo Client": "hex:030000000000000000000000",
+      "AlfaDos": "hex:030000004b99a4612759da01",
+      "Oscar Agent": "hex:0300000057342c72673cdc01",
+      "Kilo Mods Manager": "hex:03000000b33c550bb6ccda01",
+      "Romeo Desktop": "hex:030000000000000000000000",
+      "org.hotelvpn.client": "hex:020000000000000000000000",
+      "runtime.app.EchoForge": "hex:03000000bbbaed62673cdc01",
+      "CharlieClient": "hex:03000000c31c32abe01ddd01",
+      "oscar_PapaHide_Updater": "hex:020000000000000000000000",
+      "Alfa": "hex:030000009a2a61623d2dda01",
+      "Golfwolf": "hex:03000000d145f98b516bda01",
+      "runtime.app.Mike": "hex:03000000cfdbaa013daadc01",
+      "INDI": "hex:03000000c7df2e543930da01",
+      "JulietAppEngine": "hex:020000000000000000000000",
+      "iLimaServices": "hex:020000000000000000000000",
+      "FoxtrotAppAgent": "hex:030000001d49c860673cdc01",
+      "IndiaDriveFS": "hex:020000000000000000000000",
+      "JulietMultiPlayer": "hex:030000000cacbfea5ec9da01",
+      "HotelBrowserAutoLaunch_0123456789ABCDEF0123456789ABCDEF": "hex:03000000268235693d2dda01"
+    },
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\StartupFolder": {},
+    "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run": {
+      "UniformAudService": "hex:020000000000000000000000",
+      "Victor Guard": "hex:020000000000000000000000",
+      "iWhiskeyHelper": "hex:020000000000000000000000",
+      "XrayflareWARP": "hex:030000000483dab9c91ddd01",
+      "TangoHealth": "hex:060000000000000000000000"
+    },
+    "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run32": {
+      "PapaStormStartUpAutoRun": "hex:03000000a1e6c9663d2dda01",
+      "ZuluStsMon00": "hex:020000000000000000000000",
+      "bravodos-tray.exe": "hex:020000000000000000000000",
+      "Quebec CCXProcess": "hex:030000009e5eeeb331cbda01",
+      "Y19Z": "hex:020000000000000000000000",
+      "AlfaDos": "hex:0300000042fc815de01ddd01",
+      "CharlieDosUpdateSched": "hex:020000000000000000000000"
+    },
+    "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\StartupFolder": {
+      "FoxtrotSound.lnk": "hex:030000004ab86629762fda01",
+      "DeltaDesk.lnk": "hex:03000000e9fb835cd24ddc01",
+      "Echo iPSMonitor.lnk": "hex:060000000000000000000000",
+      "Xrayflare WARP.lnk": "hex:030000008d65aeb354e1dc01"
+    }
+  },
+  "startup_commands": [
+    {
+      "Name": "IndiaDriveFS",
+      "Location": "HKU\\S-1-5-18\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "JulietAppEngine",
+      "Location": "HKU\\S-1-5-18\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "Alfa",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "BRAVO",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "CharlieClient",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "runtime.app.DE Delta",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "runtime.app.EchoForge",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "FoxtrotAppAgent",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "Golfwolf",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "org.hotelvpn.client",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "IndiaDriveFS",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "JulietAppEngine",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "Kilo Client",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "LimaRgb",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "runtime.app.Mike",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "runtime.app.November Manager",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "oscar_PapaHide_Updater",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "QuebecPlayerBeta",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "Romeo Desktop",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "Sierra",
+      "Location": "HKU\\S-1-5-21-ANON\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "IndiaDriveFS",
+      "Location": "HKU\\.DEFAULT\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "JulietAppEngine",
+      "Location": "HKU\\.DEFAULT\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "DeltaDesk",
+      "Location": "Common Startup"
+    },
+    {
+      "Name": "Echo iPSMonitor",
+      "Location": "Common Startup"
+    },
+    {
+      "Name": "FoxtrotSound",
+      "Location": "Common Startup"
+    },
+    {
+      "Name": "TangoHealth",
+      "Location": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "UniformAudService",
+      "Location": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "Victor Guard",
+      "Location": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "iWhiskeyHelper",
+      "Location": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    },
+    {
+      "Name": "XrayflareWARP",
+      "Location": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+    }
+  ],
+  "_volatilidad": [
+    "El estado de estas entradas cambia solo. Durante la sesión en que se hizo esta captura,",
+    "tres de ellas se reescribieron: una revisó su blob y otras dos pasaron de activas a",
+    "desactivadas. Los instaladores y los propios launchers reescriben tanto el valor de Run",
+    "como su marca en StartupApproved. Por eso los totales salen de ESTA captura y no de",
+    "ninguna ejecución anterior; si se recaptura, hay que recalcularlos."
+  ],
+  "esperado": {
+    "total": 31,
+    "activos": 15,
+    "desactivados": 16
+  },
+  "muestra": {
+    "Alfa": false,
+    "BRAVO": true,
+    "Romeo Desktop": false,
+    "Sierra": true,
+    "AlfaDos": false,
+    "XrayflareWARP": false,
+    "DeltaDesk": false,
+    "Echo iPSMonitor": true,
+    "TangoHealth": true
+  },
+  "_anonimizado": "Los nombres de aplicación están sustituidos por otros que conservan la misma forma (espacios, puntos, guiones bajos, dígitos, sufijos .exe y .lnk), que es lo que ejercita el manejo de nombres. Los blobs de estado y la estructura son los capturados.",
+  "carpetas_inicio": [
+    "DeltaDesk",
+    "Echo iPSMonitor",
+    "FoxtrotSound"
+  ],
+  "duplicado_entre_perfiles": "IndiaDriveFS",
+  "solo_en_startupapproved": [
+    "MikeDrive",
+    "GolfGamesLauncher",
+    "INDI"
+  ]
+}

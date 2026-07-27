@@ -7,11 +7,16 @@ __pycache__/
 *.py[cod]
 
 # Salidas de Quilate
-*.json
 *.html
+*.json
 plan_optimizacion.ps1
+
+# Las capturas de los tests no son salidas: son datos de entrada versionados.
+!tests/fixtures/*.json
 
 # Empaquetado
 build/
 dist/
 *.spec
+
+.claude

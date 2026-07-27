@@ -35,6 +35,10 @@ _source_resolved = False
 _tried: list[tuple[str, str]] = []      # (fuente, resultado)
 _gpu_cache: tuple[float, list[dict]] | None = None
 _nvsmi_path: str | None | bool = False  # False = sin buscar todavia
+# Namespace del monitor de hardware: False = sin probar, None = no hay ninguno.
+# Sin esto, un equipo sin LibreHardwareMonitor —lo normal— pagaria dos consultas
+# a PowerShell fallidas cada vez que caduca la cache de GPU.
+_hw_monitor_ns: str | None | bool = False
 
 
 # ==============================================================================
@@ -299,8 +303,82 @@ def gpu_telemetry(max_age: float = 2.0) -> list[dict]:
             "power_w": num(parts[6]),
             "source": "nvidia-smi",
         })
+    gpus += _gpu_from_hardware_monitor(exclude=[g["name"].lower() for g in gpus])
     _gpu_cache = (now, gpus)
     return gpus
+
+
+def _gpu_from_hardware_monitor(exclude: list[str]) -> list[dict]:
+    """Telemetría de gráficas AMD e Intel, que no tienen equivalente a nvidia-smi.
+
+    Sin esto, quien tenga una Radeon o una Arc se queda sin temperatura de GPU:
+    el resto del programa solo sabe leer nvidia-smi. Depende de que
+    LibreHardwareMonitor esté abierto, así que es un extra cuando está y no un
+    requisito.
+    """
+    global _hw_monitor_ns
+    if not IS_WINDOWS or _hw_monitor_ns is None:
+        return []
+    candidatos = ([_hw_monitor_ns] if isinstance(_hw_monitor_ns, str)
+                  else ["root/LibreHardwareMonitor", "root/OpenHardwareMonitor"])
+    for namespace in candidatos:
+        rows = ps_json(f'Get-CimInstance -Namespace "{namespace}" -ClassName Sensor '
+                       "-ErrorAction Stop | Select-Object Name,Value,SensorType,Identifier",
+                       timeout=10)
+        if not rows:
+            continue
+        _hw_monitor_ns = namespace
+        # Los sensores solo traen el identificador; el nombre comercial de la
+        # tarjeta está en la clase Hardware, y es el que hay que casar con el
+        # que devuelve Win32_VideoController.
+        nombres = {}
+        for h in ps_json(f'Get-CimInstance -Namespace "{namespace}" -ClassName Hardware '
+                         "-ErrorAction Stop | Select-Object Name,Identifier", timeout=10):
+            ident = str(h.get("Identifier") or "").strip("/")
+            if ident and h.get("Name"):
+                nombres[ident] = str(h["Name"]).strip()
+        # Los sensores se agrupan por el identificador de su tarjeta:
+        # /amdgpu/0/temperature/0 → /amdgpu/0
+        tarjetas: dict[str, dict] = {}
+        for r in rows:
+            ident = str(r.get("Identifier") or "")
+            partes = ident.strip("/").split("/")
+            if len(partes) < 2 or "gpu" not in partes[0].lower():
+                continue
+            try:
+                valor = float(r.get("Value"))
+            except (TypeError, ValueError):
+                continue
+            clave = "/".join(partes[:2])
+            tarjeta = tarjetas.setdefault(clave, {"name": "", "source": namespace.split("/")[-1]})
+            tipo = str(r.get("SensorType") or "").lower()
+            nombre = str(r.get("Name") or "").lower()
+            if tipo == "temperature" and "core" in nombre and tarjeta.get("temperature") is None:
+                tarjeta["temperature"] = valor
+            elif tipo == "load" and "core" in nombre and tarjeta.get("utilization") is None:
+                tarjeta["utilization"] = valor
+            elif tipo == "power" and tarjeta.get("power_w") is None:
+                tarjeta["power_w"] = valor
+            elif tipo == "clock" and "core" in nombre and tarjeta.get("clock_mhz") is None:
+                tarjeta["clock_mhz"] = valor
+            elif tipo == "smalldata" and "memory used" in nombre:
+                tarjeta["vram_used"] = int(valor * 1024 * 1024)
+            elif tipo == "smalldata" and "memory total" in nombre:
+                tarjeta["vram"] = int(valor * 1024 * 1024)
+
+        out = []
+        for clave, tarjeta in tarjetas.items():
+            tarjeta["name"] = nombres.get(clave) or clave
+            # nvidia-smi ya da mejor dato para las NVIDIA: no se duplican.
+            if any(tarjeta["name"].lower() in e or e in clave.lower() for e in exclude):
+                continue
+            if any(k in tarjeta for k in ("temperature", "utilization", "power_w")):
+                out.append(tarjeta)
+        if out:
+            return out
+    if not isinstance(_hw_monitor_ns, str):
+        _hw_monitor_ns = None   # ningun monitor abierto: no se vuelve a preguntar
+    return []
 
 
 def gpu_temperature() -> float | None:

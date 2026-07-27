@@ -17,10 +17,12 @@ from typing import Any, Callable
 import psutil
 
 from .console import C, section, spinner_done, spinner_step
+from .const import IS_WINDOWS
+from .rawio import DiskIO
 from .sensors import (cpu_frequency_mhz, cpu_temperature, gpu_telemetry,
                       temperature_source)
-from .workloads import (_mp_unit, build_corpus, memcpy_bandwidth, work_compress,
-                        work_float, work_hash, work_memcpy, work_sieve)
+from .workloads import (_mp_noop, _mp_unit, build_corpus, memcpy_bandwidth,
+                        work_compress, work_float, work_hash, work_memcpy, work_sieve)
 
 
 REFERENCE = {
@@ -45,6 +47,19 @@ CPU_KEYS = ("sieve_s", "float_s", "compress_s")
 # lectura servida desde caché disparen la puntuación total.
 SCORE_CAP = 250.0
 
+# Por debajo de esta latencia no hay almacenamiento que valga: eso es memoria.
+# Un NVMe ronda los 100 µs, un SATA los 200 y un disco mecánico los miles.
+CACHE_LATENCY_US = 20.0
+
+
+def cache_served(latency_us: float, direct: bool) -> bool:
+    """Si la lectura salió de la caché de páginas en vez del disco.
+
+    `direct` es cierto cuando la E/S ya esquiva la caché (sin buffer en Windows,
+    caché descartada en Linux) y entonces no hay nada que sospechar.
+    """
+    return not direct and latency_us < CACHE_LATENCY_US
+
 # Pesos para la nota global
 WEIGHTS = {"cpu_single": 0.26, "cpu_multi": 0.24, "memory": 0.16, "disk": 0.34}
 
@@ -68,7 +83,15 @@ class Benchmark:
         self.results: dict[str, BenchResult] = {}
         self.thermal_samples: list[float] = []
         self.freq_samples: list[float] = []
+        # Frecuencia real con todos los núcleos cargados, y de dónde salió. Es la
+        # única cifra de frecuencia que significa algo: la «máxima» que publica
+        # Win32_Processor es el reloj base, no el boost.
+        self.freq_under_load: float | None = None
+        self.freq_source: str = ""
         self.disk_on_ram = False
+        # La medida de disco solo vale si esquiva la caché de páginas del SO.
+        self.disk_unbuffered = False
+        self.disk_cache_suspect = False
         self.scaling_efficiency: float | None = None
         # Métricas que no puntúan pero explican el porqué de la puntuación.
         self.metrics: dict[str, dict] = {}
@@ -88,6 +111,13 @@ class Benchmark:
         return min(times)
 
     def _sample_sensors(self) -> None:
+        # En Windows psutil.cpu_freq() devuelve la frecuencia NOMINAL leída del
+        # registro, no la real: en un 5900X marca 3701 MHz esté como esté el
+        # equipo. Sirve en Linux, donde sale de cpufreq. La frecuencia real de
+        # Windows se toma en los snapshots, que van por contador de rendimiento
+        # y cuestan demasiado para muestrearlos aquí.
+        if IS_WINDOWS:
+            return
         try:
             freq = psutil.cpu_freq()
             if freq and freq.current:
@@ -172,28 +202,49 @@ class Benchmark:
 
     def run_cpu_multi(self) -> None:
         threads = psutil.cpu_count(logical=True) or 1
+        cores = psutil.cpu_count(logical=False) or threads
         tasks = threads * (2 if self.quick else 4)
         spinner_step(f"CPU {threads}T · carga paralela ({tasks} uds)".ljust(38))
+
+        # Referencia para el escalado: una unidad a solas, sin contención. Medirla
+        # con todos los núcleos ocupados —como se hacía— la degrada en la misma
+        # proporción que al resultado, y la eficiencia se cancela sola: salía un
+        # 64% donde el escalado real era del 27%.
+        solo = min(_mp_unit(0) for _ in range(1 if self.quick else 2))
+
         before = self._snapshot("antes de la carga")
-        t0 = time.perf_counter()
         try:
             with Pool(processes=threads) as pool:
+                # Crear el Pool arranca un intérprete por proceso. Dentro del
+                # cronómetro, eso mide el arranque de Python y no la CPU: pesa un
+                # 7% desde el código fuente y bastante más desde el .exe, donde
+                # cada hijo descomprime el intérprete empaquetado.
+                pool.map(_mp_noop, range(threads * 4))
+                t0 = time.perf_counter()
                 per_task = pool.map(_mp_unit, range(tasks))
+                wall = time.perf_counter() - t0
         except Exception as exc:  # entornos sin fork/spawn disponible
             spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
             return
-        wall = time.perf_counter() - t0
         after = self._snapshot("con todos los núcleos cargados")
         self._register_thermal_behaviour(before, after, per_task)
         tps = tasks / wall
         score = tps / REFERENCE["mp_tps"] * 100
-        single_task = statistics.median(per_task)
-        ideal_tps = threads / single_task
-        efficiency = min(100.0, tps / ideal_tps * 100) if ideal_tps else 0.0
-        self._register("cpu_multi", "CPU multihilo", "uds/s", tps, score,
-                       f"{threads} hilos · escalado {efficiency:.0f}%")
+        # Escalado real: cuánto trabajo en paralelo por unidad de trabajo en serie.
+        # Se compara con los núcleos físicos, no con los hilos: con SMT, 24 hilos
+        # sobre 12 núcleos no pueden dar 24× ni en el mejor de los casos, así que
+        # dividir entre 24 haría parecer defectuoso a un equipo perfectamente sano.
+        speedup = tasks * solo / wall if wall else 0.0
+        efficiency = speedup / cores * 100 if cores else 0.0
+        detail = (f"{threads} hilos sobre {cores} núcleos · {speedup:.1f}× frente a "
+                  f"un solo núcleo · escalado {efficiency:.0f}%")
+        self._register("cpu_multi", "CPU multihilo", "uds/s", tps, score, detail)
         self.scaling_efficiency = efficiency
-        spinner_done(f"{tps:.2f} uds/s → {score:.0f} pts  (escalado {efficiency:.0f}%)")
+        self._metric("mp_speedup", "Aceleración multinúcleo", round(speedup, 1), "×",
+                     f"trabajo en paralelo frente a una unidad a solas ({solo:.3f} s); "
+                     f"el techo práctico son los {cores} núcleos físicos")
+        spinner_done(f"{tps:.2f} uds/s → {score:.0f} pts  ({speedup:.1f}× · escalado "
+                     f"{efficiency:.0f}%)")
 
     def _register_thermal_behaviour(self, before: dict, after: dict,
                                     per_task: list[float]) -> None:
@@ -214,6 +265,9 @@ class Benchmark:
                 self._metric("sustained", "Rendimiento sostenido", round(retention, 1), "%",
                              "trabajo del último cuarto frente al primero; por debajo de "
                              "~90% indica límite térmico o de potencia")
+        if after.get("cpu_mhz"):
+            self.freq_under_load = float(after["cpu_mhz"])
+            self.freq_source = str(after.get("cpu_mhz_source") or "")
         if before.get("cpu_mhz") and after.get("cpu_mhz"):
             note = f"en reposo marcaba {before['cpu_mhz']:.0f} MHz"
             if "nominal" in after.get("cpu_mhz_source", ""):
@@ -272,7 +326,8 @@ class Benchmark:
 
         path = Path(self.target_dir) / f".quilate_{os.getpid()}.tmp"
         size = self.disk_size_mb * 1024 * 1024
-        block = os.urandom(1024 * 1024)
+        block_size = 1024 * 1024
+        chunk_size = 4 * 1024 * 1024
         try:
             free = shutil.disk_usage(self.target_dir).free
             if free < size * 2.5:
@@ -282,36 +337,60 @@ class Benchmark:
 
             # --- Escritura secuencial ---
             spinner_step(f"Disco · escritura secuencial ({self.disk_size_mb} MB)".ljust(38))
-            fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
+            writer = DiskIO(str(path), write=True, block=block_size)
+            writer.fill_random()
             t0 = time.perf_counter()
             written = 0
             while written < size:
-                written += os.write(fd, block)
-            os.fsync(fd)
+                written += writer.write(block_size)
+            writer.sync()
             wt = time.perf_counter() - t0
-            os.close(fd)
+            self.disk_unbuffered = writer.unbuffered
+            dropped = writer.drop_cache() if not writer.unbuffered else False
+            writer.close()
             wmbs = (written / 1e6) / wt
             wscore = wmbs / REFERENCE["disk_write_mbs"] * 100
             self._register("disk_write", "Disco · escritura", "MB/s", wmbs, wscore)
             spinner_done(f"{wmbs:.0f} MB/s → {wscore:.0f} pts")
 
+            # Si la lectura no esquiva la caché de páginas, lo que se mide es la
+            # RAM: el fichero acaba de escribirse y sigue entero en memoria. Esos
+            # números no pueden puntuar. El disco pesa un 34% de la nota global y
+            # se pegaba al techo en cualquier equipo con RAM de sobra, midiera lo
+            # que midiera el disco de verdad.
+            direct = self.disk_unbuffered or dropped
+            source = ("sin caché del SO" if self.disk_unbuffered
+                      else "caché descartada" if dropped else "con caché del SO")
+            # Una sonda de unas pocas lecturas aleatorias basta para saberlo, y
+            # decide por igual la lectura secuencial y las IOPS: leen el mismo
+            # fichero, así que o las dos salen del disco o ninguna. Comparar la
+            # lectura contra la escritura no vale: la escritura también puede ir
+            # inflada por la caché SLC del SSD y entonces la razón no delata nada.
+            cached = False
+            if not direct:   # con E/S directa no hay nada que sondear
+                cached = cache_served(self._cache_probe(path, size), direct=False)
+
             # --- Lectura secuencial ---
             spinner_step("Disco · lectura secuencial".ljust(38))
-            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-            fd = os.open(str(path), flags)
+            reader = DiskIO(str(path), write=False, block=chunk_size)
             t0 = time.perf_counter()
             read_total = 0
-            while True:
-                chunk = os.read(fd, 4 * 1024 * 1024)
-                if not chunk:
+            while read_total < size:
+                got = reader.read(chunk_size)
+                if not got:
                     break
-                read_total += len(chunk)
+                read_total += got
             rt = time.perf_counter() - t0
+            reader.close()
             rmbs = (read_total / 1e6) / rt
-            rscore = rmbs / REFERENCE["disk_read_mbs"] * 100
-            self._register("disk_read", "Disco · lectura", "MB/s", rmbs, rscore,
-                           "puede estar influido por la caché del SO")
-            spinner_done(f"{rmbs:.0f} MB/s → {rscore:.0f} pts")
+            if cached:
+                self.disk_cache_suspect = True
+                spinner_done(f"{rmbs:,.0f} MB/s: servido desde la caché del SO, no puntúa",
+                             ok=False)
+            else:
+                rscore = rmbs / REFERENCE["disk_read_mbs"] * 100
+                self._register("disk_read", "Disco · lectura", "MB/s", rmbs, rscore, source)
+                spinner_done(f"{rmbs:.0f} MB/s → {rscore:.0f} pts")
 
             # --- IOPS aleatorias 4K ---
             spinner_step("Disco · IOPS aleatorias 4K".ljust(38))
@@ -319,28 +398,35 @@ class Benchmark:
             max_off = max(0, size - 4096)
             rnd = random.Random(7)
             offsets = [rnd.randrange(0, max_off, 4096) for _ in range(ops)]
+            iop_reader = DiskIO(str(path), write=False, block=4096)
             t0 = time.perf_counter()
             for off in offsets:
-                os.lseek(fd, off, os.SEEK_SET)
-                os.read(fd, 4096)
+                iop_reader.seek(off)
+                iop_reader.read(4096)
             it = time.perf_counter() - t0
-            os.close(fd)
+            iop_reader.close()
             iops = ops / it
-            iscore = iops / REFERENCE["disk_iops_4k"] * 100
-            self._register("disk_iops", "Disco · IOPS 4K", "IOPS", iops, iscore,
-                           "cifras muy altas (>200k) indican que el fichero cabía en la caché "
-                           "del SO: usa --disk-size 2048 o mayor para medir el disco de verdad")
-            spinner_done(f"{iops:,.0f} IOPS → {iscore:.0f} pts")
-
-            # La latencia por operación es lo que se percibe al abrir programas:
-            # más representativa que las IOPS agregadas, y comparable entre equipos.
             latency_us = it / ops * 1e6
-            note = ("tiempo de una lectura aleatoria con cola 1: <100 µs NVMe, "
-                    "~200 µs SATA, >5.000 µs disco mecánico")
-            if latency_us < 20:
-                note += (" · por debajo de 20 µs el fichero se estaba sirviendo desde la "
-                         "caché del SO, no desde el disco: sube --disk-size")
-            self._metric("disk_latency", "Latencia media 4K", round(latency_us, 1), "µs", note)
+            if cached:
+                self.disk_cache_suspect = True
+                spinner_done(f"{iops:,.0f} IOPS · {latency_us:.1f} µs: caché del SO, no puntúa",
+                             ok=False)
+            else:
+                iscore = iops / REFERENCE["disk_iops_4k"] * 100
+                self._register("disk_iops", "Disco · IOPS 4K", "IOPS", iops, iscore, source)
+                spinner_done(f"{iops:,.0f} IOPS → {iscore:.0f} pts")
+                # La latencia por operación es lo que se percibe al abrir programas:
+                # más representativa que las IOPS agregadas, y comparable entre equipos.
+                self._metric("disk_latency", "Latencia media 4K", round(latency_us, 1), "µs",
+                             "tiempo de una lectura aleatoria con cola 1: <100 µs NVMe, "
+                             f"~200 µs SATA, >5.000 µs disco mecánico · medido {source}")
+
+            if self.disk_cache_suspect:
+                self._metric("disk_cached", "Medida de disco incompleta", "caché del SO", "",
+                             "este sistema no permite E/S sin buffer y no se ha podido descartar "
+                             "la caché de páginas, así que parte del test medía RAM y se ha "
+                             "excluido de la nota. Usa --disk-path en otra unidad o un "
+                             "--disk-size mayor que la RAM libre")
         except Exception as exc:
             spinner_done(f"error: {exc}", ok=False)
         finally:
@@ -348,6 +434,26 @@ class Benchmark:
                 path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def _cache_probe(self, path: Path, size: int) -> float:
+        """Latencia mediana de unas pocas lecturas aleatorias de 4K, en µs.
+
+        Por debajo de 20 µs no hay almacenamiento que valga: eso es memoria. Un
+        NVMe ronda los 100 µs, un SATA los 200 y un disco mecánico los miles.
+        """
+        rnd = random.Random(11)
+        offsets = [rnd.randrange(0, max(4096, size - 4096), 4096) for _ in range(64)]
+        probe = DiskIO(str(path), write=False, block=4096)
+        times = []
+        try:
+            for off in offsets:
+                t0 = time.perf_counter()
+                probe.seek(off)
+                probe.read(4096)
+                times.append((time.perf_counter() - t0) * 1e6)
+        finally:
+            probe.close()
+        return statistics.median(times) if times else 0.0
 
     def run_all(self) -> None:
         section("Benchmark en ejecución")

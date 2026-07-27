@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,9 +15,9 @@ from .sensors import cpu_temperature, gpu_temperature, temperature_report, tempe
 from .storage_scan import ScanResult, candidate_bytes
 from .console import C, human_bytes, section, spinner_done, spinner_step
 from .const import IS_LINUX, IS_WINDOWS
-from .platform_utils import (pending_driver_updates, ps_json, reg_list_values,
-                             reg_read, run_cmd, winreg)
-from .sysinfo import KIND_LABELS, SystemInfo, local_volumes
+from .platform_utils import (boot_performance, pending_driver_updates, ps_json,
+                             reg_list_values, reg_read, run_cmd, winreg)
+from .sysinfo import KIND_LABELS, SystemInfo, local_volumes, primary_gpu
 
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -58,6 +59,10 @@ class Auditor:
         self.findings: list[Finding] = []
         self.checks_run = 0
         self.notes: list[str] = []
+        # Arranque medido por Windows. `None` es «no se pudo leer», que no es lo
+        # mismo que «rápido»: el log pide privilegios de administrador.
+        self.boot_report: dict = {}
+        self.boot_seconds: float | None = None
 
     def add(self, **kwargs) -> None:
         self.findings.append(Finding(**kwargs))
@@ -72,7 +77,7 @@ class Auditor:
             ("Memoria RAM", self.check_memory),
             ("Configuración de canales de RAM", self.check_ram_channels),
             ("Temperaturas y throttling", self.check_thermals),
-            ("Frecuencia sostenida de CPU", self.check_cpu_frequency),
+            ("Frecuencia de CPU bajo carga", self.check_cpu_frequency),
             ("Programas de inicio", self.check_startup),
             ("Procesos en segundo plano", self.check_background_load),
             ("Tiempo sin reiniciar", self.check_uptime),
@@ -88,6 +93,7 @@ class Auditor:
                 ("Inicio rápido / hibernación", self.check_fast_startup),
                 ("SysMain e indexación", self.check_services),
                 ("Game DVR y captura en segundo plano", self.check_game_dvr),
+                ("Duración real del arranque", self.check_boot_time),
                 ("Integridad del sistema de archivos", self.check_filesystem_health),
                 ("Antivirus y solapamientos", self.check_antivirus),
                 ("Fragmentación / optimización", self.check_defrag),
@@ -243,15 +249,23 @@ class Auditor:
                        "Verifica en el Administrador de tareas → Rendimiento → Memoria que aparece «Dual»"])
             return "single channel (1 módulo)"
         speed = self.si.ram_speed_mhz
-        if speed and speed <= 2400 and "AMD" in (self.si.cpu_name or "").upper():
+        rated = self.si.ram_speed_rated_mhz
+        # Comparar con lo que los módulos dicen soportar detecta el perfil sin
+        # activar en cualquier generación. El umbral fijo anterior (2400 MT/s y
+        # solo en AMD) valía para DDR4: la base JEDEC de DDR5 ya son 4800, así
+        # que un kit DDR5 de 6000 corriendo a 4800 no lo veía nadie.
+        if speed and rated and rated > speed * 1.05:
+            amd = "AMD" in (self.si.cpu_name or "").upper()
             self.add(
-                id="ram_slow", title=f"RAM funcionando a {speed} MT/s (perfil XMP/EXPO sin activar)",
+                id="ram_slow",
+                title=f"RAM a {speed} MT/s con módulos de {rated} (perfil XMP/EXPO sin activar)",
                 severity="medium", category="memoria", component="memory",
-                detail="Las memorias arrancan por defecto a la velocidad JEDEC base. Activar el "
-                       "perfil XMP/EXPO en la BIOS suele subir de 2133-2400 a 3200-6000 MT/s sin "
-                       "coste alguno. En Ryzen el impacto en juegos es especialmente alto porque "
-                       "el Infinity Fabric escala con la frecuencia de memoria.",
-                gain=0.12, gain_note="rendimiento en juegos y latencia",
+                detail=f"Los módulos declaran soportar {rated} MT/s pero están corriendo a {speed}: "
+                       "sin el perfil activado, la BIOS arranca a la velocidad JEDEC base. Activarlo "
+                       "es gratis y devuelve la velocidad por la que ya has pagado."
+                       + (" En Ryzen el impacto en juegos es especialmente alto porque el Infinity "
+                          "Fabric escala con la frecuencia de memoria." if amd else ""),
+                gain=0.12 if amd else 0.07, gain_note="rendimiento en juegos y latencia",
                 effort="bajo", risk="medio",
                 steps=["Entra en la BIOS/UEFI (Del o F2 al arrancar)",
                        "Activa el perfil XMP (Intel) o EXPO/DOCP (AMD)",
@@ -379,42 +393,75 @@ class Auditor:
         return note
 
     def check_cpu_frequency(self) -> str:
-        samples = self.bench.freq_samples if self.bench else []
-        if not samples or not self.si.cpu_max_mhz:
+        """Frecuencia real bajo carga frente al reloj base.
+
+        La referencia es el reloj BASE, no un supuesto máximo: `MaxClockSpeed` de
+        Win32_Processor devuelve la base (3701 MHz en un 5900X que llega a 4.9
+        GHz), así que compararla consigo misma daba siempre «100% del máximo».
+        Lo que sí significa algo es quedarse por debajo de la base con todos los
+        núcleos cargados: eso es límite de potencia o térmico.
+        """
+        base = self.si.cpu_base_mhz or self.si.cpu_max_mhz
+        sustained = self.bench.freq_under_load if self.bench else None
+        nominal = bool(self.bench and "nominal" in self.bench.freq_source)
+        if sustained is None:
+            samples = self.bench.freq_samples if self.bench else []
+            sustained = statistics.median(samples) if samples else None
+        if not sustained or not base:
             return "sin datos"
-        sustained = statistics.median(samples)
-        ratio = sustained / self.si.cpu_max_mhz
-        if ratio < 0.62:
+        if nominal:
+            # El sistema no expone la frecuencia real: la cifra es la de catálogo
+            # y compararla no diría nada.
+            return f"{sustained:.0f} MHz nominales (este equipo no expone la real)"
+
+        ratio = sustained / base
+        if ratio < 0.85:
             self.add(
-                id="freq_low", title=f"CPU sostenida al {ratio * 100:.0f}% de su frecuencia máxima",
+                id="freq_low", title=f"CPU al {ratio * 100:.0f}% de su frecuencia base bajo carga",
                 severity="high", category="cpu", component="cpu_multi",
-                detail=f"Media de {sustained:.0f} MHz bajo carga frente a {self.si.cpu_max_mhz:.0f} MHz "
-                       "nominales. Causas habituales: plan de energía en modo ahorro, límites de "
-                       "potencia (PL1/PL2 o TDP del portátil), batería, o throttling térmico.",
+                detail=f"{sustained:.0f} MHz con todos los núcleos cargados, por debajo de los "
+                       f"{base:.0f} MHz de reloj base. Un procesador sano se mantiene en la base o "
+                       "por encima gracias al boost. Causas habituales: plan de energía en modo "
+                       "ahorro, límites de potencia (PL1/PL2 o TDP del portátil), batería, o "
+                       "throttling térmico.",
                 gain=0.25, gain_note="rendimiento de CPU",
                 effort="bajo", risk="bajo",
                 steps=["Pon el plan de energía en Alto rendimiento y conecta el portátil a la red",
                        "Revisa el modo de rendimiento del fabricante (Lenovo Vantage, MyASUS, Armoury Crate…)",
                        "Comprueba temperaturas: si superan 90 °C, es un problema térmico",
                        "En portátiles: revisa que el cargador sea el original y con potencia suficiente"])
-            return f"{sustained:.0f} MHz sostenidos ({ratio * 100:.0f}% del máximo)"
-        return f"{sustained:.0f} MHz sostenidos ({ratio * 100:.0f}%)"
+            return f"{sustained:.0f} MHz bajo carga ({ratio * 100:.0f}% de la base)"
+        return (f"{sustained:.0f} MHz bajo carga · base {base:.0f} MHz "
+                f"({ratio * 100:.0f}%)")
 
     def check_startup(self) -> str:
-        items: list[str] = []
+        items: list[dict] = []
         if IS_WINDOWS and winreg is not None:
-            for hive, path in (
-                (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"),
-                (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            for hive, path, bucket in (
+                (winreg.HKEY_CURRENT_USER,
+                 r"Software\Microsoft\Windows\CurrentVersion\Run", "Run"),
                 (winreg.HKEY_LOCAL_MACHINE,
-                 r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"),
+                 r"Software\Microsoft\Windows\CurrentVersion\Run", "Run"),
+                (winreg.HKEY_LOCAL_MACHINE,
+                 r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "Run32"),
             ):
-                items.extend(reg_list_values(hive, path).keys())
-            data = ps_json("Get-CimInstance Win32_StartupCommand | Select-Object Name,Location", timeout=25)
-            items.extend(str(d.get("Name")) for d in data if d.get("Name"))
-            items = sorted(set(items))
+                scope = "usuario" if hive == winreg.HKEY_CURRENT_USER else "equipo"
+                for name in reg_list_values(hive, path):
+                    items.append({"name": name, "location": f"Run ({scope})",
+                                  "enabled": self._startup_enabled([(hive, bucket)], name)})
+            items += self._startup_folder_items()
+            seen: set[tuple] = set()
+            unique = []
+            for it in sorted(items, key=lambda i: i["name"].lower()):
+                key = (it["name"].lower(), it["location"])
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(it)
+            items = unique
         self.startup_items = items
-        count = len(items)
+        enabled = [i["name"] for i in items if i["enabled"]]
+        count = len(enabled)
+        off = len(items) - count
         if count >= 12:
             sev, gain = ("high", 0.35) if count >= 20 else ("medium", 0.22)
             self.add(
@@ -422,16 +469,53 @@ class Auditor:
                 severity=sev, category="arranque", component="system",
                 detail="Cada entrada compite por CPU y, sobre todo, por E/S de disco durante el "
                        "arranque. Es la causa número uno de «el PC tarda mucho en estar usable». "
-                       f"Detectados: {', '.join(items[:10])}"
-                       f"{'…' if count > 10 else ''}.",
+                       f"Activos: {', '.join(enabled[:10])}"
+                       f"{'…' if count > 10 else ''}."
+                       + (f" No se cuentan {off} entradas ya desactivadas." if off else ""),
                 gain=gain, gain_note="tiempo hasta escritorio usable",
                 effort="bajo", risk="nulo",
                 steps=["Ctrl+Shift+Esc → pestaña Inicio: ordena por «Impacto de inicio» y desactiva lo de impacto Alto",
                        "Desactiva actualizadores (Adobe, Java, iTunes), launchers de juegos y clientes de nube que no uses a diario",
                        "No desactives: antivirus, drivers de audio, software de touchpad ni utilidades del fabricante esenciales",
                        "Revisa también Programador de tareas → tareas con disparador «Al iniciar sesión»"])
-            return f"{count} entradas de inicio"
-        return f"{count} entradas de inicio (razonable)"
+            return f"{count} entradas de inicio activas" + (f" (+{off} desactivadas)" if off else "")
+        return (f"{count} entradas de inicio activas (razonable)"
+                + (f", {off} desactivadas" if off else ""))
+
+    # Task Manager no borra el valor de Run al desactivar una app: deja la entrada
+    # y anota el estado en StartupApproved. Sin mirar ahí, todo lo que el usuario
+    # ha ido desactivando sigue contando como si arrancara con Windows.
+    _APPROVED = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved"
+
+    def _startup_enabled(self, buckets: list[tuple], name: str) -> bool:
+        """El primer byte del blob lleva el bit 0 a 1 cuando está desactivada
+        (0x03, 0x07); 0x02 y 0x06 son activas. Sin blob, Windows la ejecuta."""
+        for hive, bucket in buckets:
+            raw = reg_read(hive, f"{self._APPROVED}\\{bucket}", name)
+            if isinstance(raw, (bytes, bytearray)) and raw:
+                return not raw[0] & 1
+        return True
+
+    def _startup_folder_items(self) -> list[dict]:
+        """Accesos directos de las carpetas Inicio. Van por WMI porque la ruta
+        depende del perfil; su estado está en StartupApproved\\StartupFolder,
+        con el nombre del .lnk. Las entradas de registro que devuelve la misma
+        consulta se ignoran: ya se leen del registro, y ahí llegan duplicadas
+        por cada perfil de usuario (incluido .DEFAULT)."""
+        data = ps_json("Get-CimInstance Win32_StartupCommand | Select-Object Name,Location",
+                       timeout=25)
+        hives = [(winreg.HKEY_CURRENT_USER, "StartupFolder"),
+                 (winreg.HKEY_LOCAL_MACHINE, "StartupFolder")]
+        out = []
+        for d in data:
+            name = str(d.get("Name") or "").strip()
+            location = str(d.get("Location") or "")
+            # Todo lo que no sea una ruta de registro es una carpeta de inicio.
+            if not name or location.lower().startswith("hk"):
+                continue
+            out.append({"name": name, "location": "Carpeta Inicio",
+                        "enabled": self._startup_enabled(hives, f"{name}.lnk")})
+        return out
 
     def check_background_load(self) -> str:
         procs = []
@@ -466,7 +550,7 @@ class Auditor:
         if age is None:
             return "sin datos"
         years = age / 365.25
-        startup_count = len(getattr(self, "startup_items", []))
+        startup_count = sum(1 for i in getattr(self, "startup_items", []) if i.get("enabled"))
         heavy_install = startup_count >= 15 or age > 1095
         if years >= 3 and heavy_install:
             self.add(
@@ -542,8 +626,12 @@ class Auditor:
                        "Actualizaciones opcionales"])
             return f"hay uno más nuevo: {newer[:40]}"
 
-        oldest = max(self.si.gpus, key=lambda g: g.get("driver_age_days") or 0)
-        age = oldest.get("driver_age_days")
+        # Solo cuenta la gráfica que mueve la pantalla. Un equipo con GPU dedicada
+        # suele arrastrar además la iGPU del procesador, con un driver de hace
+        # años porque no se usa: culpar a esa desvía la recomendación de la que
+        # de verdad importa.
+        target = primary_gpu(self.si.gpus) or {}
+        age = target.get("driver_age_days")
         if age is None:
             return "sin fecha de driver"
         # Los fabricantes publican drivers cada 4-6 semanas, así que la
@@ -553,11 +641,11 @@ class Auditor:
         elif age > 180:
             severity, gain = "low", 0.06
         else:
-            return f"al día ({age} días)"
+            return f"{target['name']}: al día ({age} días)"
         self.add(
-            id="gpu_driver", title=f"Driver gráfico con {age} días de antigüedad",
+            id="gpu_driver", title=f"{target['name']}: driver con {age} días de antigüedad",
             severity=severity, category="fluidez", component="system",
-            detail=f"{oldest['name']} usa un driver de {oldest.get('driver_date')}. Los "
+            detail=f"{target['name']} usa un driver de {target.get('driver_date')}. Los "
                    "fabricantes publican versiones cada 4-6 semanas con optimizaciones "
                    "específicas por juego y correcciones de rendimiento; es una de las "
                    "actualizaciones con mejor relación beneficio/esfuerzo. No se ha podido "
@@ -568,7 +656,8 @@ class Auditor:
             steps=["Descarga el driver desde nvidia.com / amd.com / intel.com, no desde Windows Update",
                    "En NVIDIA elige instalación personalizada → limpia",
                    "Si vienes de otra marca de GPU, limpia primero con DDU en modo seguro"])
-        return f"driver de {oldest.get('driver_date')} ({age} días)"
+        return f"{target['name']}: driver de {target.get('driver_date')} ({age} días)"
+
 
     def _newer_gpu_driver(self) -> str | None:
         """Título de la actualización de driver gráfico pendiente, si se pidió
@@ -724,11 +813,20 @@ class Auditor:
         return f"{running} servicios en ejecución"
 
     def check_game_dvr(self) -> str:
+        gamedvr = r"Software\Microsoft\Windows\CurrentVersion\GameDVR"
+        if reg_read(winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Policies\Microsoft\Windows\GameDVR", "AllowGameDVR") == 0:
+            return "desactivada por directiva"
         dvr = reg_read(winreg.HKEY_CURRENT_USER, r"System\GameConfigStore", "GameDVR_Enabled")
-        capture = reg_read(winreg.HKEY_CURRENT_USER,
-                           r"Software\Microsoft\Windows\CurrentVersion\GameDVR",
-                           "AppCaptureEnabled")
-        if dvr == 1 or capture == 1:
+        capture = reg_read(winreg.HKEY_CURRENT_USER, gamedvr, "AppCaptureEnabled")
+        if dvr == 0 or capture == 0:
+            return "desactivada"
+        # Lo que cuesta FPS es el búfer permanente de «Grabar lo que ha pasado»,
+        # no que la Game Bar pueda grabar si se lo pides. Es opt-in y avisa de que
+        # consume recursos, así que si el valor no existe está apagada. GameDVR_Enabled
+        # y AppCaptureEnabled valen 1 en una instalación recién hecha: mirarlos a ellos
+        # marcaba el hallazgo en prácticamente cualquier equipo.
+        if reg_read(winreg.HKEY_CURRENT_USER, gamedvr, "HistoricalCaptureEnabled") == 1:
             self.add(
                 id="game_dvr", title="Grabación en segundo plano de Xbox Game Bar activa",
                 severity="low", category="fluidez", component="system",
@@ -737,29 +835,131 @@ class Auditor:
                        "función de «grabar los últimos 30 segundos», no aporta nada.",
                 gain=0.04, gain_note="FPS en juegos",
                 effort="bajo", risk="nulo",
-                steps=["Configuración → Juegos → Capturas: desactiva «Grabar lo que ocurrió»",
+                steps=["Configuración → Juegos → Capturas: desactiva «Grabar lo que ha pasado»",
                        "Configuración → Juegos → Xbox Game Bar: desactivar si no la usas",
                        "Activa el Modo de juego (sí conviene tenerlo activado)"])
             return "activa"
-        return "desactivada"
+        return "sin grabación en segundo plano"
+
+    @staticmethod
+    def _event_ms(fields: dict, *names: str) -> float | None:
+        """Primer campo del evento que traiga un número de milisegundos."""
+        for name in names:
+            raw = fields.get(name)
+            if raw in (None, ""):
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def check_boot_time(self) -> str:
+        """Duración real del arranque, medida por Windows en cada encendido.
+
+        Es la única fuente que convierte «tienes muchos programas de inicio» en
+        una cifra: el propio sistema apunta cuánto tardó y qué lo retrasó.
+        """
+        data = boot_performance()
+        self.boot_report = data
+        if data.get("error"):
+            # El log tiene una ACL que exige administrador incluso para leer, y
+            # con -FilterHashtable el error que devuelve PowerShell es «no se
+            # encontraron eventos», que se lee como «tu arranque está limpio».
+            # Sin privilegios no se puede afirmar nada del arranque.
+            if not self.si.is_admin:
+                data["error"] = "requiere administrador"
+                return "no medible: requiere administrador"
+            return f"no medible ({data['error'][:60]})"
+
+        # Los reinicios de instalación de actualizaciones siempre son lentos y no
+        # representan el arranque de cada día: no entran en la mediana.
+        tiempos = []
+        for boot in data["boots"]:
+            fields = boot["fields"]
+            if str(fields.get("BootIsRebootAfterInstall") or "0") == "1":
+                continue
+            ms = self._event_ms(fields, "MainPathBootTime", "BootTime")
+            if ms:
+                tiempos.append(ms)
+        if not tiempos:
+            return "sin arranques utilizables registrados"
+
+        mediana = statistics.median(tiempos)
+        segundos = mediana / 1000
+        self.boot_seconds = segundos
+
+        # Quién lo retrasa, agregado por nombre y quedándonos con el peor caso.
+        culpables: dict[str, tuple[float, str]] = {}
+        for item in data["delays"]:
+            fields = item["fields"]
+            nombre = str(fields.get("Name") or fields.get("FriendlyName") or "").strip()
+            ms = self._event_ms(fields, "TotalTime", "DegradationTime", "IncidentTime")
+            if not nombre or not ms:
+                continue
+            if nombre not in culpables or ms > culpables[nombre][0]:
+                culpables[nombre] = (ms, item.get("kind") or "elemento")
+        top = sorted(culpables.items(), key=lambda kv: -kv[1][0])[:5]
+        detalle_top = ", ".join(f"{n} ({ms / 1000:.1f} s, {tipo})" for n, (ms, tipo) in top)
+
+        if segundos <= 35:
+            return f"{segundos:.0f} s de mediana en {len(tiempos)} arranques"
+        if segundos <= 60:
+            severidad, ganancia = "low", 0.08
+        elif segundos <= 100:
+            severidad, ganancia = "medium", 0.18
+        else:
+            severidad, ganancia = "high", 0.30
+
+        pasos = ["Ctrl+Shift+Esc → pestaña Inicio: desactiva lo que no uses a diario"]
+        if top:
+            pasos.insert(0, f"Empieza por lo que más tarda: {top[0][0]}")
+        pasos += ["Comprueba de nuevo tras un reinicio: Windows recalcula la medida sola",
+                  "Visor de eventos → Registros de aplicaciones y servicios → Microsoft → "
+                  "Windows → Diagnostics-Performance para ver el desglose completo"]
+        self.add(
+            id="boot_slow", title=f"El arranque tarda {segundos:.0f} s",
+            severity=severidad, category="arranque", component="system",
+            detail=f"Mediana de {segundos:.0f} s sobre {len(tiempos)} arranques, medida por el "
+                   "propio Windows (se descartan los reinicios por actualización, que siempre "
+                   "son lentos). Un equipo con SSD y un arranque limpio se queda en 15-30 s."
+                   + (f" Lo que más lo retrasa: {detalle_top}." if detalle_top
+                      else " Windows no ha señalado ningún culpable concreto."),
+            gain=ganancia, gain_note="tiempo hasta escritorio usable (medido, no estimado)",
+            effort="bajo", risk="nulo", steps=pasos)
+        return f"{segundos:.0f} s de mediana en {len(tiempos)} arranques"
+
+    # «Está sucio» y «NO está sucio» solo se diferencian por la negación, que va
+    # traducida. Buscarla como palabra suelta es lo único que aguanta el cambio
+    # de idioma y que la respuesta llegue con los acentos rotos. Decirle a
+    # alguien que su sistema de ficheros está corrupto —y mandarle un chkdsk /r
+    # de horas— por no saber leer la respuesta es mucho peor que no decir nada,
+    # así que ante la duda no se informa.
+    _NEGACIONES = {"not", "no", "nicht", "non", "pas", "niet", "nao", "não"}
+    _SUCIO = ("dirty", "sucio", "sujo", "verschmutzt", "sporco", "vuil")
 
     def check_filesystem_health(self) -> str:
         drive = os.environ.get("SystemDrive", "C:")
         out = run_cmd(["fsutil", "dirty", "query", drive], timeout=15) or ""
-        if "not dirty" not in out.lower() and "no está" not in out.lower() and out:
-            self.add(
-                id="fs_dirty", title="El volumen de sistema está marcado como «sucio»",
-                severity="high", category="almacenamiento", component="disk",
-                detail="Windows ha detectado inconsistencias en el sistema de archivos y programará "
-                       "una comprobación. Puede indicar un apagado incorrecto o, más preocupante, "
-                       "un disco con sectores defectuosos.",
-                gain=0.10, gain_note="estabilidad y velocidad de E/S",
-                effort="bajo", risk="bajo",
-                steps=[f"Programa una comprobación: `chkdsk {drive} /f /r` y reinicia",
-                       "Revisa el estado SMART del disco con CrystalDiskInfo",
-                       "Haz copia de seguridad antes de nada si SMART muestra advertencias"])
-            return "marcado como sucio"
-        return "limpio"
+        if not out:
+            return "no evaluable (sin respuesta)"
+        lowered = out.lower()
+        if set(re.split(r"[^\w]+", lowered)) & self._NEGACIONES:
+            return "limpio"
+        if not any(termino in lowered for termino in self._SUCIO):
+            return "no concluyente (respuesta no reconocida)"
+        self.add(
+            id="fs_dirty", title="El volumen de sistema está marcado como «sucio»",
+            severity="high", category="almacenamiento", component="disk",
+            detail="Windows ha detectado inconsistencias en el sistema de archivos y programará "
+                   "una comprobación. Puede indicar un apagado incorrecto o, más preocupante, "
+                   "un disco con sectores defectuosos.",
+            gain=0.10, gain_note="estabilidad y velocidad de E/S",
+            effort="bajo", risk="bajo",
+            steps=[f"Programa una comprobación: `chkdsk {drive} /f /r` y reinicia",
+                   "Revisa el estado SMART del disco con CrystalDiskInfo",
+                   "Haz copia de seguridad antes de nada si SMART muestra advertencias"])
+        return "marcado como sucio"
 
     def check_antivirus(self) -> str:
         rows = ps_json('Get-CimInstance -Namespace "root/SecurityCenter2" -ClassName AntiVirusProduct '
@@ -813,7 +1013,90 @@ class Auditor:
                        "Revisa los atributos SMART con CrystalDiskInfo (reallocated sectors, pending)",
                        "Planifica la sustitución del disco"])
             return f"degradado: {names}"
-        return f"{len(rows)} disco(s) sano(s)" if rows else "sin datos"
+
+        extra = self._check_disk_wear()
+        return (extra or (f"{len(rows)} disco(s) sano(s)" if rows else "sin datos"))
+
+    def _check_disk_wear(self) -> str:
+        """Desgaste y errores acumulados, que avisan mucho antes que HealthStatus.
+
+        Un SSD al 90% de vida consumida sigue reportándose como «Healthy» hasta
+        que deja de funcionar. Sin privilegios estos contadores no se leen, y
+        entonces no se afirma nada: ausencia de dato no es ausencia de problema.
+        """
+        gastados, con_errores, calientes = [], [], []
+        medidos = 0
+        for disk in self.si.physical_disks:
+            nombre = str(disk.get("name") or "disco")
+            desgaste = disk.get("wear")
+            errores = (disk.get("read_errors") or 0) + (disk.get("write_errors") or 0)
+            grados = disk.get("temperature")
+            if desgaste is None and grados is None and disk.get("power_on_hours") is None:
+                continue
+            medidos += 1
+            # El desgaste es un contador de ciclos de escritura: en un disco
+            # mecánico no significa nada, y los HDD lo devuelven igualmente a 0.
+            es_ssd = "SSD" in str(disk.get("media") or "").upper()
+            if es_ssd and desgaste is not None and desgaste >= 60:
+                gastados.append((nombre, desgaste))
+            if errores > 0:
+                con_errores.append((nombre, errores))
+            # Los USB suelen mentir con la temperatura; solo se mira lo interno.
+            if grados and grados >= 65 and str(disk.get("bus") or "").upper() != "USB":
+                calientes.append((nombre, grados))
+
+        if con_errores:
+            lista = ", ".join(f"{n} ({e} errores)" for n, e in con_errores)
+            self.add(
+                id="disk_errors", title=f"Errores de lectura/escritura no corregidos ({lista})",
+                severity="critical", category="almacenamiento", component="disk",
+                detail="El disco ha registrado operaciones que no pudo corregir. Es pérdida de "
+                       "datos ya ocurrida, no un riesgo futuro, y Windows sigue informando del "
+                       "disco como «Healthy» hasta que falla del todo.",
+                gain=0.0, gain_note="no es una optimización: es pérdida de datos",
+                effort="alto", risk="alto",
+                steps=["Copia de seguridad inmediata, antes de cualquier otra cosa",
+                       "Comprueba los atributos completos con CrystalDiskInfo o smartctl",
+                       "Sustituye el disco: los errores no corregidos no se arreglan"])
+
+        if gastados:
+            peor = max(gastados, key=lambda x: x[1])
+            severidad = "critical" if peor[1] >= 90 else "high" if peor[1] >= 80 else "medium"
+            self.add(
+                id="disk_wear", title=f"{peor[0]}: {peor[1]}% de vida útil consumida",
+                severity=severidad, category="almacenamiento", component="disk",
+                detail=f"El contador de desgaste del disco va por el {peor[1]}%. Es una "
+                       "estimación del propio firmware sobre los ciclos de escritura "
+                       "consumidos. Cerca del 100% el disco pasa a solo lectura o falla, y "
+                       "antes de eso la velocidad de escritura ya se degrada.",
+                gain=0.0, gain_note="no es una optimización: es vida restante del disco",
+                effort="alto", risk="bajo",
+                steps=["Planifica la sustitución antes de llegar al 100%",
+                       "Mantén copia de seguridad al día mientras tanto",
+                       "Evita moverle cargas de escritura intensiva (torrents, edición, swap)"])
+
+        if calientes:
+            peor = max(calientes, key=lambda x: x[1])
+            self.add(
+                id="disk_hot", title=f"{peor[0]} a {peor[1]} °C",
+                severity="medium", category="térmico", component="disk",
+                detail="Por encima de 65-70 °C los SSD NVMe reducen velocidad para protegerse, "
+                       "y el calor sostenido acorta su vida. Suele ser falta de disipador o de "
+                       "flujo de aire, no un defecto del disco.",
+                gain=0.08, gain_note="velocidad sostenida de disco",
+                effort="medio", risk="bajo",
+                steps=["Monta el disipador del M.2 si la placa lo trae y no está puesto",
+                       "Mejora el flujo de aire de la caja",
+                       "Aléjalo de la gráfica si comparte espacio con ella"])
+
+        if not medidos:
+            return "sin contadores de fiabilidad (requiere administrador)"
+        partes = [f"{medidos} disco(s) con contadores"]
+        if gastados:
+            partes.append(f"desgaste máx {max(d for _, d in gastados)}%")
+        if con_errores:
+            partes.append("con errores no corregidos")
+        return " · ".join(partes)
 
     # --------------------------------------------------------- solo Linux ----
     def check_linux_governor(self) -> str:

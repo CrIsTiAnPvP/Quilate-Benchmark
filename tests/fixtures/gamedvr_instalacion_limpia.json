@@ -1,0 +1,15 @@
+{
+  "_origen": "capturado el 2026-07-27; instalación con capturas nunca tocadas",
+  "_nota": "GameDVR_Enabled vale 1 de fábrica y no significa grabación en segundo plano. HistoricalCaptureEnabled no existe, que es el estado 'Desactivado' del interruptor «Grabar lo que ha pasado».",
+  "registry": {
+    "HKCU\\System\\GameConfigStore": {
+      "GameDVR_Enabled": 1
+    },
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR": {},
+    "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\GameDVR": {}
+  },
+  "esperado": {
+    "hallazgo": false,
+    "resumen": "sin grabación en segundo plano"
+  }
+}

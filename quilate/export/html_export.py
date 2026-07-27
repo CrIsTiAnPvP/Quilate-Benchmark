@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from ..audit import Auditor, SEVERITY_ORDER
-from ..benchmark import Benchmark
+from ..benchmark import Benchmark, REFERENCE
+from ..sensors import temperature_report, temperature_source
 from ..components import (ComponentCard, _no_score_text, build_component_cards,
                           finding_group)
 from ..console import grade
@@ -22,7 +23,7 @@ from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE, WEBSITE_URL
 from ..projection import priority_rank
 from ..report import build_verdict
 from ..storage_scan import (RECLAIMABLE, REVIEWABLE, ScanResult, candidate_bytes)
-from ..sysinfo import KIND_LABELS, SystemInfo
+from ..sysinfo import KIND_LABELS, SystemInfo, gpu_label, primary_gpu
 
 COMPONENT_LABELS = {"cpu_single": "CPU monohilo", "cpu_multi": "CPU multihilo",
                     "memory": "Memoria", "disk": "Almacenamiento"}
@@ -109,12 +110,22 @@ svg.ic.lg{width:20px;height:20px}
 /* barra de navegación */
 .topbar{position:sticky;top:0;z-index:50;background:rgba(13,17,23,.93);
 backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
-.tb{max-width:1300px;margin:0 auto;height:var(--nav);display:flex;align-items:center;
-gap:16px;padding:0 20px}
-.tb .logo{font-weight:800;letter-spacing:-.3px;white-space:nowrap;font-size:15px}
+/* Altura variable: con muchas secciones la navegación se repartía en una fila
+   con scroll horizontal y la barra oculta, así que los últimos enlaces quedaban
+   fuera de la vista sin ninguna pista de que seguían ahí. Ahora envuelve.
+   OJO: la altura mínima va en píxeles fijos a propósito. Con min-height:var(--nav)
+   la barra se dimensionaba con la variable que el JS calcula midiéndola, y como
+   offsetHeight incluye el borde inferior cada medida salía un píxel más alta que
+   la anterior: la barra crecía sin parar. --nav es solo salida, nunca entrada. */
+.tb{max-width:1300px;margin:0 auto;min-height:40px;display:flex;align-items:center;
+flex-wrap:wrap;gap:10px 16px;padding:8px 20px}
+.tb .logo{font-weight:800;letter-spacing:-.3px;white-space:nowrap;font-size:15px;
+display:flex;align-items:center;gap:8px}
 .tb .logo b{color:var(--brand)}
-.tb nav{display:flex;gap:2px;flex:1;overflow-x:auto;scrollbar-width:none}
-.tb nav::-webkit-scrollbar{display:none}
+.brandmark{width:22px;height:22px;flex:none;display:block}
+.brandmark.foot{width:16px;height:16px;vertical-align:-3px;margin-right:7px}
+.fbrand{display:flex;align-items:center}
+.tb nav{display:flex;gap:2px;flex:1 1 420px;flex-wrap:wrap}
 .tb nav a{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:8px;
 color:var(--dim);text-decoration:none;font-size:13px;white-space:nowrap;transition:.15s}
 .tb nav a:hover{color:var(--txt);background:var(--card)}
@@ -301,6 +312,24 @@ HTML_JS = """
   var secs = Array.prototype.slice.call(document.querySelectorAll('details.sec'));
   var links = Array.prototype.slice.call(document.querySelectorAll('.tb nav a'));
   var toggle = document.getElementById('toggle-all');
+  var topbar = document.querySelector('.topbar');
+
+  // La barra ya no tiene altura fija: los enlaces envuelven en varias filas si
+  // hacen falta. Todo lo que dependia de su altura la mide en vez de suponerla.
+  function navHeight(){ return topbar ? topbar.offsetHeight : 56; }
+  var navPrev = 0;
+  function syncNav(){
+    // Solo se escribe si la altura cambio de verdad. El observador vigila la
+    // misma barra que la variable dimensiona indirectamente, asi que sin este
+    // corte cualquier diferencia de un pixel se realimenta hasta el infinito.
+    var h = navHeight();
+    if (Math.abs(h - navPrev) < 1) return;
+    navPrev = h;
+    document.documentElement.style.setProperty('--nav', h + 'px');
+  }
+  syncNav();
+  window.addEventListener('resize', syncNav);
+  if (window.ResizeObserver && topbar) new ResizeObserver(syncNav).observe(topbar);
 
   function setAll(open){
     secs.forEach(function(s){ s.open = open; });
@@ -323,7 +352,7 @@ HTML_JS = """
   function spy(){
     var best = null, bestTop = -1e9;
     targets.forEach(function(t){
-      var top = t.getBoundingClientRect().top - 90;
+      var top = t.getBoundingClientRect().top - (navHeight() + 34);
       if (top <= 0 && top > bestTop) { bestTop = top; best = t; }
     });
     links.forEach(function(a){
@@ -424,6 +453,32 @@ def _icon(name: str, cls: str = "ic") -> str:
     return f'<svg class="{cls}" viewBox="0 0 24 24" aria-hidden="true"><use href="#{name}"/></svg>'
 
 
+def _logo(cls: str = "brandmark", uid: str = "a") -> str:
+    """Isotipo de Quilate, mismo trazado que quilate.svg.
+
+    Va inline y completo en cada sitio donde aparece, no como <use> del sprite:
+    el sprite lleva display:none y ahí Chromium no resuelve el degradado ni la
+    máscara —los iconos de trazo sí salen porque no referencian nada—, así que
+    el logotipo quedaba invisible. El sufijo evita que dos copias compartan id.
+    """
+    oro, muesca = f"ql-oro-{uid}", f"ql-muesca-{uid}"
+    return (
+        f'<svg class="{cls}" viewBox="0 0 100 100" aria-hidden="true">'
+        f'<defs><linearGradient id="{oro}" x1="20" y1="10" x2="84" y2="94" '
+        'gradientUnits="userSpaceOnUse">'
+        '<stop offset="0" stop-color="#ffeeb0"/><stop offset=".34" stop-color="#f8d156"/>'
+        '<stop offset=".70" stop-color="#e9ab1e"/><stop offset="1" stop-color="#b87c0b"/>'
+        "</linearGradient>"
+        f'<mask id="{muesca}"><rect width="100" height="100" fill="#fff"/>'
+        '<rect x="56.5" y="46" width="21" height="52" fill="#000" '
+        'transform="rotate(-45 67 72)"/></mask></defs>'
+        f'<circle cx="48" cy="46" r="30" fill="none" stroke="url(#{oro})" stroke-width="14" '
+        f'mask="url(#{muesca})"/>'
+        f'<rect x="60.5" y="50.8" width="13" height="42.4" rx="1" fill="url(#{oro})" '
+        'transform="rotate(-45 67 72)"/></svg>'
+    )
+
+
 def _sprite() -> str:
     symbols = "".join(f'<symbol id="{k}" viewBox="0 0 24 24">{v}</symbol>'
                       for k, v in ICONS.items())
@@ -520,7 +575,7 @@ def _sidebar(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         ("i-cpu", f"{si.cpu_name} ({si.cpu_cores}C/{si.cpu_threads}T)"),
         ("i-ram", ram),
         ("i-disk", f"{si.system_drive} · {si.system_drive_media}"),
-        ("i-gpu", si.gpus[0]["name"] if si.gpus else "sin datos de GPU"),
+        ("i-gpu", (primary_gpu(si.gpus) or {}).get("name") or "sin datos de GPU"),
         ("i-clock", f"{si.uptime_hours:.1f} h encendido"),
     ]
     items = "".join(f"<li>{_icon(k)}<span>{_e(v)}</span></li>" for k, v in equipo)
@@ -558,14 +613,19 @@ def _inventory(si: SystemInfo) -> str:
         rows.append(("BIOS", si.bios_date))
     rows += [
         ("Tiempo encendido", f"{si.uptime_hours:.1f} h"),
+        # Es el reloj base: Win32_Processor no publica la frecuencia de boost.
         ("CPU", f"{si.cpu_name} — {si.cpu_cores} núcleos / {si.cpu_threads} hilos"
-                + (f" · máx {si.cpu_max_mhz:.0f} MHz" if si.cpu_max_mhz else "")),
+                + (f" · base {si.cpu_base_mhz or si.cpu_max_mhz:.0f} MHz"
+                   if (si.cpu_base_mhz or si.cpu_max_mhz) else "")),
         ("Memoria", f"{si.ram_total / 1024**3:.1f} GB"
                     + (f" @ {si.ram_speed_mhz} MT/s" if si.ram_speed_mhz else "")
-                    + (f" · {si.ram_channels} módulo(s)" if si.ram_channels else "")),
+                    + (f" · {si.ram_channels} módulo(s)" if si.ram_channels else "")
+                    + (f" · módulos de {si.ram_speed_rated_mhz} MT/s, perfil XMP/EXPO sin activar"
+                       if si.ram_speed_rated_mhz and si.ram_speed_mhz
+                       and si.ram_speed_rated_mhz > si.ram_speed_mhz else "")),
     ]
     for g in si.gpus:
-        rows.append(("GPU", f"{g['name']} · driver {g.get('driver')} "
+        rows.append(("GPU", f"{gpu_label(g)} · driver {g.get('driver')} "
                             f"({g.get('driver_date') or 'fecha n/d'})"))
     rows += [
         ("Disco de sistema", f"{si.system_drive} · {si.system_drive_media}"),
@@ -576,17 +636,54 @@ def _inventory(si: SystemInfo) -> str:
     kvs = "".join(f'<div class="k">{_e(k)}</div><div>{_e(v)}</div>' for k, v in rows)
     out = [f'<div class="card"><div class="kvs">{kvs}</div></div>']
 
+    if si.ram_sticks:
+        trs = ""
+        for s in si.ram_sticks:
+            marca = " ".join(x for x in (s.get("vendor"), s.get("part")) if x) or "—"
+            real = s.get("speed") or 0
+            nominal = s.get("rated_speed") or 0
+            vel = f"{real} MT/s" if real else "—"
+            if nominal and real and nominal > real:
+                vel += f' <span class="tags">(soporta {nominal})</span>'
+            trs += (f"<tr><td>{_e(s.get('slot') or '?')}</td>"
+                    f"<td>{_human(s.get('capacity') or 0)}</td><td>{vel}</td>"
+                    f"<td>{_e(marca)}</td></tr>")
+        out.append('<div class="card"><div class="sub-h">Módulos de memoria</div><div class="tw">'
+                   "<table><tr><th>Ranura</th><th>Capacidad</th><th>Velocidad</th>"
+                   "<th>Fabricante y modelo</th></tr>" + trs + "</table></div></div>")
+
     phys = ""
+    hay_fiabilidad = any(p.get("power_on_hours") is not None or p.get("temperature") is not None
+                         for p in si.physical_disks)
     for p in si.physical_disks:
         health = str(p.get("health") or "n/d")
         color = "var(--ok)" if health.lower() in ("healthy", "sano", "0") else "var(--bad)"
         phys += (f"<tr><td>{_e(p['name'])}</td><td>{_e(p['media'])}</td>"
                  f"<td>{_e(p['bus'])}</td><td>{_human(p['size'])}</td>"
-                 f'<td style="color:{color}">{_e(health)}</td></tr>')
+                 f'<td style="color:{color}">{_e(health)}</td>')
+        if hay_fiabilidad:
+            # El desgaste solo significa algo en un disco de estado sólido.
+            es_ssd = "SSD" in str(p.get("media") or "").upper()
+            desgaste = p.get("wear")
+            horas = p.get("power_on_hours")
+            grados = p.get("temperature")
+            errores = (p.get("read_errors") or 0) + (p.get("write_errors") or 0)
+            phys += (f"<td>{f'{desgaste}%' if es_ssd and desgaste is not None else '—'}</td>"
+                     f"<td>{f'{horas:,} h'.replace(',', '.') if horas is not None else '—'}</td>"
+                     f"<td>{f'{grados} °C' if grados is not None else '—'}</td>"
+                     f'<td style="color:{"var(--bad)" if errores else "inherit"}">'
+                     f"{errores if errores else '—'}</td>")
+        phys += "</tr>"
     if phys:
-        out.append('<div class="card"><div class="sub-h">Discos físicos</div><div class="tw">'
-                   "<table><tr><th>Unidad</th><th>Tipo</th><th>Conexión</th><th>Capacidad</th>"
-                   "<th>Salud</th></tr>" + phys + "</table></div></div>")
+        extra = ("<th>Desgaste</th><th>Horas</th><th>Temp.</th><th>Errores</th>"
+                 if hay_fiabilidad else "")
+        nota = ("" if hay_fiabilidad else
+                '<p class="scan-note">Los contadores de desgaste, horas de uso y errores '
+                "necesitan privilegios de administrador y no se han podido leer.</p>")
+        out.append('<div class="card"><div class="sub-h">Discos físicos</div>' + nota
+                   + '<div class="tw"><table>'
+                   "<tr><th>Unidad</th><th>Tipo</th><th>Conexión</th><th>Capacidad</th>"
+                   "<th>Salud</th>" + extra + "</tr>" + phys + "</table></div></div>")
 
     vols = ""
     for d in si.disks:
@@ -755,6 +852,94 @@ def _metrics_block(bench: Benchmark) -> str:
     return out
 
 
+def _system_state_block(auditor: Auditor, bench: Benchmark | None) -> str:
+    """Estado del sistema que la auditoría mide pero no cabía en un hallazgo:
+    arranque, programas de inicio uno a uno, procesos residentes y de dónde salió
+    (o no) cada sensor."""
+    out = []
+
+    boot = getattr(auditor, "boot_report", {}) or {}
+    segundos = getattr(auditor, "boot_seconds", None)
+    if segundos or boot.get("error"):
+        if segundos:
+            arranques = len([b for b in boot.get("boots", [])
+                             if str(b["fields"].get("BootIsRebootAfterInstall") or "0") != "1"])
+            cuerpo = (f'<div class="kvs"><div class="k">Duración</div>'
+                      f"<div><b>{segundos:.0f} s</b> de mediana sobre {arranques} arranques</div>")
+            retrasos = sorted(
+                ((str(d["fields"].get("Name") or d["fields"].get("FriendlyName") or ""),
+                  d["fields"].get("TotalTime") or d["fields"].get("DegradationTime"),
+                  d.get("kind") or "") for d in boot.get("delays", [])),
+                key=lambda x: -float(x[1] or 0))
+            vistos, filas = set(), ""
+            for nombre, ms, tipo in retrasos:
+                if not nombre or nombre in vistos or not ms:
+                    continue
+                vistos.add(nombre)
+                filas += (f"<tr><td>{_e(nombre)}</td><td>{_e(tipo)}</td>"
+                          f"<td>{float(ms) / 1000:.1f} s</td></tr>")
+                if len(vistos) >= 12:
+                    break
+            cuerpo += "</div>"
+            if filas:
+                cuerpo += ('<div class="sub-h">Lo que más lo retrasa</div><div class="tw">'
+                           "<table><tr><th>Elemento</th><th>Tipo</th><th>Retraso</th></tr>"
+                           + filas + "</table></div>")
+        else:
+            cuerpo = ('<p class="scan-note">No se ha podido medir: '
+                      f"{_e(boot['error'])}.</p>")
+        out.append('<div class="card"><div class="sub-h">Arranque medido por Windows</div>'
+                   '<p class="scan-note">Lo cronometra el propio sistema en cada encendido. '
+                   "Se descartan los reinicios por actualización, que siempre son lentos.</p>"
+                   + cuerpo + "</div>")
+
+    startup = getattr(auditor, "startup_items", [])
+    if startup:
+        filas = ""
+        for item in sorted(startup, key=lambda i: (not i.get("enabled"), i["name"].lower())):
+            activo = item.get("enabled")
+            estado = ('<span class="badge b-medium">activo</span>' if activo
+                      else '<span class="badge b-info">desactivado</span>')
+            filas += (f"<tr><td>{_e(item['name'])}</td>"
+                      f"<td>{_e(item.get('location') or '')}</td><td>{estado}</td></tr>")
+        activos = sum(1 for i in startup if i.get("enabled"))
+        out.append('<div class="card"><div class="sub-h">Programas de inicio</div>'
+                   f'<p class="scan-note">{activos} activos de {len(startup)}. Los desactivados '
+                   "siguen registrados pero Windows no los ejecuta.</p><div class=\"tw\">"
+                   "<table><tr><th>Programa</th><th>Origen</th><th>Estado</th></tr>"
+                   + filas + "</table></div></div>")
+
+    procesos = getattr(auditor, "top_processes", [])
+    if procesos:
+        filas = "".join(f"<tr><td>{_e(p['name'])}</td><td>{_human(p['rss'])}</td></tr>"
+                        for p in procesos)
+        out.append('<div class="card"><div class="sub-h">Procesos que más memoria ocupan</div>'
+                   '<div class="tw"><table><tr><th>Proceso</th><th>Memoria</th></tr>'
+                   + filas + "</table></div></div>")
+
+    intentos = temperature_report()
+    if intentos:
+        fuente = temperature_source()
+        filas = "".join(f"<tr><td>{_e(s)}</td><td>{_e(r)}</td></tr>" for s, r in intentos)
+        out.append('<div class="card"><div class="sub-h">Sensores de temperatura</div>'
+                   + (f'<p class="scan-note">Fuente en uso: <b>{_e(fuente)}</b>.</p>' if fuente
+                      else '<p class="scan-note">Ninguna fuente respondió. Leer la temperatura '
+                           "de CPU en Windows exige un driver en modo kernel; instalar "
+                           "LibreHardwareMonitor y dejarlo abierto la hace accesible.</p>")
+                   + '<div class="tw"><table><tr><th>Fuente</th><th>Resultado</th></tr>'
+                   + filas + "</table></div></div>")
+
+    if bench:
+        filas = "".join(f"<tr><td>{_e(k)}</td><td>{v}</td></tr>"
+                        for k, v in REFERENCE.items())
+        out.append('<div class="card"><div class="sub-h">Escala de referencia</div>'
+                   '<p class="scan-note">100 puntos equivalen a estos valores. Los tiempos van '
+                   "en segundos; el resto, en su unidad.</p><div class=\"tw\">"
+                   "<table><tr><th>Prueba</th><th>Referencia</th></tr>" + filas
+                   + "</table></div></div>")
+    return "".join(out)
+
+
 def _storage_scan_block(scan: ScanResult) -> str:
     safe, review = candidate_bytes(scan)
     head = (f'<p class="scan-note">Umbral {_human(scan.min_size)} · '
@@ -881,6 +1066,12 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
     secs.append(("componentes", "Ficha por componente", "i-cpu",
                  _html_component_cards(cards), f"{len(cards)} componentes"))
 
+    estado = _system_state_block(auditor, bench)
+    if estado:
+        arranque = getattr(auditor, "boot_seconds", None)
+        secs.append(("estado", "Estado del sistema", "i-clock", estado,
+                     f"arranque {arranque:.0f} s" if arranque else ""))
+
     scan = getattr(auditor, "scan", None)
     if scan is not None and scan.available and (scan.files or scan.special):
         safe, review = candidate_bytes(scan)
@@ -950,7 +1141,8 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         f'<body data-host="{_e(_slug(si.hostname))}" data-stamp="{date}">'
         f"{_sprite()}"
         '<div class="topbar"><div class="tb">'
-        f'<div class="logo">Quilate <b>Suite</b></div><nav>{nav}</nav>'
+        f'<div class="logo">{_logo(uid="nav")}<span>Quilate <b>Suite</b></span></div>'
+        f"<nav>{nav}</nav>"
         '<button class="btn" id="export-sel" disabled title="Marca secciones con su casilla '
         'para exportarlas juntas en un solo fichero">'
         f'{_icon("i-download")}<span>Exportar (0)</span></button>'
@@ -965,7 +1157,8 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         "</header>"
         f"{_hero(bench, auditor, projection)}{body}"
         "</main></div>"
-        f'<footer><span>{_e(APP_NAME)} v{APP_VERSION} · escala de referencia: '
+        f'<footer><span class="fbrand">{_logo("brandmark foot", uid="pie")}'
+        f"{_e(APP_NAME)} v{APP_VERSION} · escala de referencia: "
         f"100 pts = gama media reciente</span>"
         f'<span>{_e(AUTHOR)} — <a href="{WEBSITE_URL}">{_e(WEBSITE)}</a></span></footer>'
         '<button class="btn" id="top" title="Volver arriba" '

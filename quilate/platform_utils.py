@@ -17,18 +17,35 @@ else:
     winreg = None
 
 
-def run_cmd(args: list[str], timeout: int = 25) -> str | None:
+def _console_encoding() -> str:
+    """Codificación real de la salida de los programas de consola de Windows.
+
+    Es la página de códigos OEM (850 en un Windows en español), no la ANSI que
+    Python usa por defecto (1252). Decodificar con la que no es no rompe nada de
+    forma visible: convierte «Máximo» en «M ximo» y «no está sucio» en
+    «no est  sucio», y ahí es donde una comprobación que busca texto localizado
+    deja de encontrarlo y empieza a informar de problemas que no existen.
+    """
+    if not IS_WINDOWS:
+        return "utf-8"
+    try:
+        return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+    except Exception:
+        return "cp850"
+
+
+def run_cmd(args: list[str], timeout: int = 25, encoding: str | None = None) -> str | None:
     """Ejecuta un comando y devuelve stdout, o None si falla."""
     try:
         res = subprocess.run(
             args,
             capture_output=True,
-            text=True,
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
-            errors="replace",
         )
-        return res.stdout.strip() if res.returncode == 0 else None
+        if res.returncode != 0:
+            return None
+        return res.stdout.decode(encoding or _console_encoding(), errors="replace").strip()
     except Exception:
         return None
 
@@ -37,11 +54,16 @@ def ps(command: str, timeout: int = 30) -> Any:
     """Ejecuta PowerShell devolviendo JSON parseado (o None)."""
     if not IS_WINDOWS:
         return None
-    wrapped = f"$ProgressPreference='SilentlyContinue'; {command}"
+    # PowerShell escribe por la consola, así que su salida sale también en la
+    # página OEM y un nombre de volumen con acentos llegaría roto. Se le pide
+    # UTF-8 expresamente en vez de adivinar.
+    wrapped = ("$ProgressPreference='SilentlyContinue'; "
+               "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+               f"{command}")
     out = run_cmd(
         ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-Command", wrapped],
-        timeout=timeout,
+        timeout=timeout, encoding="utf-8",
     )
     if not out:
         return None
@@ -61,6 +83,70 @@ def ps_json(select: str, timeout: int = 30) -> list[dict]:
     if isinstance(data, list):
         return [d for d in data if isinstance(d, dict)]
     return []
+
+
+# Windows cronometra cada arranque y anota qué lo retrasó. Es la única fuente que
+# convierte «tienes muchos programas de inicio» en «estos tres se llevan 19 s».
+#   100 → duración del arranque
+#   101 → una aplicación tardó más de lo normal
+#   102 → un driver tardó de más
+#   103 → un servicio tardó de más
+_BOOT_LOG = "Microsoft-Windows-Diagnostics-Performance/Operational"
+_BOOT_EVENTS = (100, 101, 102, 103)
+
+
+def boot_performance(max_boots: int = 30, max_delays: int = 200, timeout: int = 40) -> dict:
+    """Arranques medidos por el propio Windows, en milisegundos.
+
+    Requiere privilegios de administrador: el log tiene una ACL que se los pide
+    incluso para leer. Sin ellos devuelve `{"error": ...}` y quien llame debe
+    tratarlo como «no medido», no como «arranque rápido».
+
+    Los nombres de los campos se devuelven tal cual vienen del XML del evento,
+    sin normalizar, para que un esquema distinto al esperado se pueda diagnosticar
+    desde el JSON exportado en vez de perderse.
+    """
+    if not IS_WINDOWS:
+        return {"error": "solo Windows", "boots": [], "delays": []}
+
+    # Los eventos de duración (100) y los de culpables (101-103) se piden por
+    # separado: en un equipo con muchos retrasos, un único -MaxEvents sobre los
+    # cuatro identificadores puede no llegar a devolver ni un solo arranque.
+    retrasos = ",".join(str(i) for i in _BOOT_EVENTS if i != 100)
+    command = (
+        "$leer = {"
+        "  param($ids, $max)"
+        f"  Get-WinEvent -FilterHashtable @{{LogName='{_BOOT_LOG}'; Id=$ids}}"
+        "    -MaxEvents $max -ErrorAction Stop | ForEach-Object {"
+        "      $d = @{};"
+        "      foreach ($n in ([xml]$_.ToXml()).Event.EventData.Data) { $d[$n.Name] = $n.'#text' };"
+        "      [PSCustomObject]@{ Id = $_.Id; Time = $_.TimeCreated.ToString('s'); Data = $d } } };"
+        "try {"
+        f"  $arranques = @(& $leer @(100) {max_boots});"
+        # Que no haya retrasos anotados es un resultado válido, no un fallo.
+        f"  $retrasos = @(); try {{ $retrasos = @(& $leer @({retrasos}) {max_delays}) }} catch {{ }};"
+        "  @{ ok = $true; events = @($arranques + $retrasos) } | ConvertTo-Json -Depth 6 -Compress"
+        "} catch {"
+        "  @{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress }"
+    )
+    data = ps(command, timeout=timeout)
+    if not isinstance(data, dict):
+        return {"error": "no se pudo leer el registro de arranque", "boots": [], "delays": []}
+    if not data.get("ok"):
+        return {"error": str(data.get("error") or "acceso denegado"), "boots": [], "delays": []}
+
+    boots, delays = [], []
+    for event in data.get("events") or []:
+        fields = event.get("Data") or {}
+        if not isinstance(fields, dict):
+            continue
+        entry = {"time": event.get("Time"), "fields": fields}
+        if event.get("Id") == 100:
+            boots.append(entry)
+        else:
+            entry["kind"] = {101: "aplicación", 102: "driver", 103: "servicio"}.get(event.get("Id"))
+            delays.append(entry)
+    return {"error": None, "boots": boots, "delays": delays}
 
 
 def reg_read(hive: int, path: str, name: str) -> Any:

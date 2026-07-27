@@ -15,7 +15,7 @@ from .benchmark import BenchResult, Benchmark, SCORE_CAP, WEIGHTS
 from .console import grade, human_bytes
 from .projection import combine_gains
 from .sensors import temperature_source
-from .sysinfo import KIND_LABELS, SystemInfo, local_volumes
+from .sysinfo import KIND_LABELS, SystemInfo, gpu_label, local_volumes
 
 
 # (clave, etiqueta, componentes de los hallazgos, claves del benchmark)
@@ -62,13 +62,21 @@ def _component_specs(key: str, si: SystemInfo, bench: Benchmark | None,
     if key == "cpu":
         out.append(("Modelo", si.cpu_name or "Desconocido"))
         out.append(("Núcleos / hilos", f"{si.cpu_cores} / {si.cpu_threads}"))
-        if si.cpu_max_mhz:
-            out.append(("Frecuencia máxima", f"{si.cpu_max_mhz:.0f} MHz"))
-        samples = bench.freq_samples if bench else []
-        if samples:
-            sustained = statistics.median(samples)
-            pct = f" ({sustained / si.cpu_max_mhz * 100:.0f}% del máximo)" if si.cpu_max_mhz else ""
-            out.append(("Frecuencia sostenida", f"{sustained:.0f} MHz{pct}"))
+        base = si.cpu_base_mhz or si.cpu_max_mhz
+        if base:
+            # Es el reloj base, no el máximo: Win32_Processor no publica el boost.
+            out.append(("Frecuencia base", f"{base:.0f} MHz"))
+        cargada = bench.freq_under_load if bench else None
+        if cargada is None:
+            samples = bench.freq_samples if bench else []
+            cargada = statistics.median(samples) if samples else None
+        if cargada:
+            if bench and "nominal" in bench.freq_source:
+                detalle = f"{cargada:.0f} MHz (nominal: este equipo no expone la real)"
+            else:
+                pct = f"  ·  {cargada / base * 100:.0f}% de la base" if base else ""
+                detalle = f"{cargada:.0f} MHz{pct}"
+            out.append(("Frecuencia bajo carga", detalle))
         temps = bench.thermal_samples if bench else []
         if temps:
             source = temperature_source()
@@ -93,7 +101,10 @@ def _component_specs(key: str, si: SystemInfo, bench: Benchmark | None,
             out.append(("Libre al medir", f"{human_bytes(si.ram_available)} "
                                           f"({used_pct:.0f}% en uso)"))
         if si.ram_speed_mhz:
-            out.append(("Velocidad", f"{si.ram_speed_mhz} MT/s"))
+            rated = si.ram_speed_rated_mhz
+            out.append(("Velocidad", f"{si.ram_speed_mhz} MT/s"
+                        + (f"  ·  módulos de {rated} MT/s, perfil XMP/EXPO sin activar"
+                           if rated and rated > si.ram_speed_mhz else "")))
         sticks = [s for s in si.ram_sticks if s["capacity"] > 0]
         if sticks:
             out.append(("Módulos instalados",
@@ -132,7 +143,7 @@ def _component_specs(key: str, si: SystemInfo, bench: Benchmark | None,
 
     elif key == "gpu":
         for g in si.gpus:
-            out.append(("Adaptador", str(g.get("name"))))
+            out.append(("Adaptador", gpu_label(g)))
             age = g.get("driver_age_days")
             out.append(("  Driver", f"{g.get('driver')}  ·  {g.get('driver_date') or 'fecha n/d'}"
                                     + (f"  ({age} días)" if age is not None else "")))
@@ -165,9 +176,17 @@ def _component_specs(key: str, si: SystemInfo, bench: Benchmark | None,
             out.append(("BIOS", si.bios_date))
         out.append(("Tiempo encendido", f"{si.uptime_hours:.1f} h"))
         out.append(("Formato", "portátil" if si.is_laptop else "sobremesa"))
+        arranque = getattr(auditor, "boot_seconds", None)
+        if arranque:
+            out.append(("Duración del arranque", f"{arranque:.0f} s  ·  medido por Windows"))
+        elif getattr(auditor, "boot_report", {}).get("error"):
+            out.append(("Duración del arranque", "no medible (requiere administrador)"))
         startup = getattr(auditor, "startup_items", [])
         if startup:
-            out.append(("Programas de inicio", str(len(startup))))
+            on = sum(1 for i in startup if i.get("enabled"))
+            off = len(startup) - on
+            out.append(("Programas de inicio",
+                        f"{on} activos" + (f"  ·  {off} desactivados" if off else "")))
         top = getattr(auditor, "top_processes", [])
         if top:
             out.append(("Procesos más pesados",

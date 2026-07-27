@@ -1,0 +1,17 @@
+{
+  "_origen": "capturado el 2026-07-27; equipo con una sola gráfica dedicada",
+  "video_controllers": [
+    {
+      "CurrentHorizontalResolution": 1920,
+      "DriverVersion": "32.0.16.1062",
+      "CurrentRefreshRate": 143,
+      "AdapterRAM": 4293918720,
+      "CurrentVerticalResolution": 1080,
+      "Name": "NVIDIA GeForce RTX 3060"
+    }
+  ],
+  "esperado": {
+    "principal": "NVIDIA GeForce RTX 3060",
+    "integrada": false
+  }
+}

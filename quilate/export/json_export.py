@@ -57,5 +57,11 @@ def export_json(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         },
         "top_processes": getattr(auditor, "top_processes", []),
         "startup_items": getattr(auditor, "startup_items", []),
+        # Se vuelca el evento crudo a propósito: si el esquema del log cambia en
+        # una versión de Windows, el diagnóstico está en el informe del usuario.
+        "boot": {
+            "seconds": getattr(auditor, "boot_seconds", None),
+            "report": getattr(auditor, "boot_report", {}),
+        },
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
