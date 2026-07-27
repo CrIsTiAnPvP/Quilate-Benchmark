@@ -21,6 +21,11 @@ class C:
     YELLOW = "\033[93m"
     BLUE = "\033[94m"
     MAGENTA = "\033[95m"
+    # Dorado de la marca: el mismo #e8b33e del logo y del informe HTML. Entre los
+    # 16 colores basicos no hay ningun dorado, asi que se usa color verdadero,
+    # que admiten Windows Terminal y la consola de Windows 10 desde 2017. Si la
+    # terminal no lo entiende, ignora la secuencia en vez de imprimirla.
+    GOLD = "\033[38;2;232;179;62m"
     CYAN = "\033[96m"
     WHITE = "\033[97m"
     GREY = "\033[90m"
@@ -93,7 +98,7 @@ def banner() -> None:
     print(f"{C.CYAN}║{C.RESET}{C.DIM}{sub.center(BOX_W)}{C.RESET}{C.CYAN}║{C.RESET}")
     print(f"{C.CYAN}╠{line}╣{C.RESET}")
     brand = f"{AUTHOR}   ·   {WEBSITE}"
-    print(f"{C.CYAN}║{C.RESET}{C.MAGENTA}{brand.center(BOX_W)}{C.RESET}{C.CYAN}║{C.RESET}")
+    print(f"{C.CYAN}║{C.RESET}{C.GOLD}{brand.center(BOX_W)}{C.RESET}{C.CYAN}║{C.RESET}")
     print(f"{C.CYAN}╚{line}╝{C.RESET}")
 
 
@@ -136,7 +141,7 @@ def human_bytes(n: float) -> str:
 def grade(score: float) -> tuple[str, str]:
     """Devuelve (letra, color) para un score normalizado (100 = referencia)."""
     table = [
-        (140, "S", C.MAGENTA),
+        (140, "S", C.GOLD),
         (115, "A+", C.GREEN),
         (95, "A", C.GREEN),
         (80, "B", C.CYAN),

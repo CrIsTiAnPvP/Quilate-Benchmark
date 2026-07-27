@@ -83,7 +83,7 @@ if (Confirmar "Ejecutar el asistente de Liberador de espacio en disco?") {{ clea
 
 Write-Host ""
 Write-Host "Terminado. Reinicia y vuelve a ejecutar el benchmark para comparar." -ForegroundColor Cyan
-Write-Host "{AUTHOR} - {WEBSITE_URL}" -ForegroundColor Magenta
+Write-Host "{AUTHOR} - {WEBSITE_URL}" -ForegroundColor DarkYellow
 """
 
 # Comandos de remediación automatizables (solo los seguros y reversibles)

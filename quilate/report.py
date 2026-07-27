@@ -297,7 +297,7 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         print(f"  {C.CYAN}▸{C.RESET} {e}")
 
     print(f"\n{C.GREY}{'─' * BOX_W}{C.RESET}")
-    print(f"{C.MAGENTA}{APP_NAME} v{APP_VERSION}{C.RESET}  ·  {AUTHOR}  ·  "
+    print(f"{C.GOLD}{APP_NAME} v{APP_VERSION}{C.RESET}  ·  {AUTHOR}  ·  "
           f"{C.CYAN}{WEBSITE_URL}{C.RESET}")
     print(f"{C.DIM}Informe generado el {datetime.now():%d/%m/%Y %H:%M}{C.RESET}\n")
 
