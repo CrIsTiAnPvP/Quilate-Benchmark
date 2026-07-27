@@ -103,6 +103,44 @@ python pcbench.py --disk-size 2048 --json despues.json --html despues.html
 - **Proyección**: mejora estimada por componente y por área, con rendimientos
   decrecientes, y plan de acción ordenado por retorno dividido por esfuerzo.
 
+## El informe HTML
+
+Un único fichero autocontenido —sin CDN, sin fuentes externas, sin conexión—
+que se puede enviar por correo tal cual:
+
+- Barra de navegación fija con salto a cada sección y resaltado de la sección
+  activa al desplazarte.
+- Secciones plegables, con botón de *colapsar / expandir todo*.
+- Barra lateral fija con la puntuación global, la ficha resumida del equipo,
+  el recuento de hallazgos por severidad y el cuello de botella detectado.
+- Inventario completo: discos físicos con su salud y todos los volúmenes con
+  su ocupación, no solo la unidad de sistema.
+- Las mejoras de cada componente enlazan con el hallazgo detallado.
+- Iconos SVG embebidos, diseño adaptable a móvil y hoja de estilo de impresión.
+
+## Estructura del proyecto
+
+`pcbench.py` es solo el lanzador; la implementación vive en el paquete
+`pcbench/`, dividido por responsabilidades:
+
+| Módulo | Responsabilidad |
+|---|---|
+| `const.py` | Branding y detección de plataforma |
+| `console.py` | Color ANSI, cajas, barras, notas y formato de texto |
+| `platform_utils.py` | Comandos, PowerShell/WMI, registro y privilegios |
+| `workloads.py` | Cargas de trabajo puras del benchmark |
+| `sysinfo.py` | Inventario del equipo |
+| `benchmark.py` | Motor de medición, puntuación y nota global |
+| `audit.py` | Comprobaciones de configuración y hallazgos |
+| `projection.py` | Combinación de ganancias y proyección |
+| `components.py` | Ficha por componente |
+| `report.py` | Informe de consola |
+| `export/` | `json_export` · `html_export` · `plan_export` |
+| `cli.py` | Argumentos y orquestación |
+
+Las dependencias van siempre en un sentido (de `const` hacia `cli`), sin
+importaciones circulares. También funciona como módulo: `python -m pcbench`.
+
 ## Notas importantes
 
 - **El script no modifica nada.** Solo lee. El plan PowerShell se genera aparte,
