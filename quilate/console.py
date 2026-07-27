@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import subprocess
 import sys
 from typing import Any
 
@@ -42,6 +43,42 @@ def enable_ansi() -> None:
             kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
         except Exception:
             C.disable()
+
+
+def configure_output() -> None:
+    """Prepara la salida para el juego de caracteres del informe.
+
+    El informe usa caracteres de dibujo de caja, flechas y acentos. Sin esto, en
+    cuanto la consola hereda una pagina de codigos heredada (cp1252 en Windows en
+    español, que es justo lo que recibe el .exe empaquetado) el primer print del
+    banner revienta con UnicodeEncodeError. `errors="replace"` deja ademas una
+    red de seguridad: antes un caracter raro que una traza.
+    """
+    if IS_WINDOWS:
+        try:
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+def clear_screen() -> None:
+    """Limpia la consola antes de empezar el informe.
+
+    Solo cuando la salida va a un terminal: si esta redirigida a un fichero o a
+    otro proceso, el borrado no tendria efecto visible y ademas ensuciaria el
+    destino con el codigo de control.
+    """
+    if not sys.stdout.isatty():
+        return
+    try:
+        subprocess.run("cls" if IS_WINDOWS else "clear", shell=True, check=False)
+    except OSError:
+        print("\033[2J\033[H", end="")   # respaldo: borrar y volver al origen
 
 
 BOX_W = 78

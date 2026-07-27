@@ -75,6 +75,24 @@ En los ejemplos siguientes, `python` asume el entorno ya activado.
 | `--export-plan` | Genera `plan_optimizacion.ps1` (solo Windows) |
 | `--no-color` | Desactiva colores ANSI |
 
+### Ejecutable (.exe)
+
+Para usarlo en un equipo sin Python, o para pasárselo a alguien:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+Genera `dist\quilate.exe`: un único archivo de ~6 MB, autocontenido, que se
+puede copiar a un pendrive y ejecutar en cualquier Windows de 64 bits. Acepta
+las mismas opciones que el script. Al ejecutarlo con doble clic espera a que
+pulses Enter antes de cerrarse, para que dé tiempo a leer el informe.
+
+Una advertencia sobre las medidas: **el `.exe` puntúa algo más bajo en la prueba
+multihilo** (un 10-20%), porque cada proceso hijo tiene que arrancar el
+intérprete empaquetado. El informe lo avisa cuando se ejecuta así. Compara
+siempre ejecuciones del mismo tipo: `.exe` con `.exe`, script con script.
+
 ### Flujo recomendado
 
 ```powershell

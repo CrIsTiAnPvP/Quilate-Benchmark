@@ -10,3 +10,8 @@ __pycache__/
 *.json
 *.html
 plan_optimizacion.ps1
+
+# Empaquetado
+build/
+dist/
+*.spec

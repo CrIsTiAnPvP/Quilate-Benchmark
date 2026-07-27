@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
 from .audit import Auditor
 from .benchmark import Benchmark
-from .console import (C, banner, enable_ansi, section, spinner_done,
-                      spinner_step)
+from .console import (C, banner, clear_screen, configure_output, enable_ansi,
+                      section, spinner_done, spinner_step)
 from .const import APP_NAME, AUTHOR, IS_WINDOWS, WEBSITE_URL
 from .export import export_html, export_json, export_plan
 from .platform_utils import is_admin
@@ -57,6 +58,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    configure_output()
+    clear_screen()
     enable_ansi()
     if args.no_color:
         C.disable()
@@ -135,6 +138,19 @@ def main() -> int:
     return 0
 
 
+def _wait_before_closing() -> None:
+    """Al ejecutar el .exe con doble clic, la consola se cierra sola en cuanto
+    termina el proceso y no da tiempo a leer nada. Solo aplica al empaquetado y
+    con terminal interactivo: en línea de comandos o redirigido, estorbaría."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        if sys.stdin and sys.stdin.isatty() and sys.stdout.isatty():
+            input(f"\n{C.DIM}Pulsa Enter para cerrar...{C.RESET}")
+    except (EOFError, OSError):
+        pass
+
+
 def run() -> int:
     """Punto de entrada: envuelve main() para salir limpio con Ctrl+C."""
     try:
@@ -142,3 +158,5 @@ def run() -> int:
     except KeyboardInterrupt:
         print(f"\n{C.YELLOW}Cancelado por el usuario.{C.RESET}\n")
         return 130
+    finally:
+        _wait_before_closing()

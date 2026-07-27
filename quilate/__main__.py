@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import sys
 
 try:
@@ -12,4 +13,5 @@ except ImportError:
 
 from .cli import run
 
+multiprocessing.freeze_support()
 sys.exit(run())

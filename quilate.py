@@ -50,6 +50,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import sys
 
 try:
@@ -61,4 +62,9 @@ except ImportError:
 from quilate.cli import run
 
 if __name__ == "__main__":
+    # Obligatorio antes de nada al empaquetar con PyInstaller: en Windows cada
+    # proceso hijo del test multihilo relanza este mismo ejecutable, y sin esto
+    # cada uno volvería a arrancar el programa entero en lugar de hacer su
+    # trabajo. Fuera del .exe no hace nada.
+    multiprocessing.freeze_support()
     sys.exit(run())

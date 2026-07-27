@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import sys
 from datetime import datetime
 from typing import Any
 
@@ -146,7 +147,16 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         note = f"Python {platform.python_version()}"
         if PY_ADJUST != 1.0:
             note += f" · factor de compensación de intérprete ×{PY_ADJUST}"
-        print(f"  {C.DIM}{note}{C.RESET}\n")
+        print(f"  {C.DIM}{note}{C.RESET}")
+        if getattr(sys, "frozen", False):
+            # El test multihilo lanza procesos hijo, y en el ejecutable cada uno
+            # arranca el intérprete empaquetado. Cuesta un 10-20% de la nota
+            # multihilo, así que comparar .exe contra python sería injusto.
+            print(f"  {C.DIM}Ejecutándose desde el .exe: la prueba multihilo pierde algo de "
+                  f"puntuación por el arranque de los procesos hijo.{C.RESET}")
+            print(f"  {C.DIM}Compara siempre ejecuciones del mismo tipo (.exe con .exe)."
+                  f"{C.RESET}")
+        print()
         if getattr(bench, "disk_on_ram", False):
             print(f"  {C.YELLOW}Los resultados de disco se midieron sobre un sistema de "
                   f"ficheros en RAM: ignóralos.{C.RESET}\n")
