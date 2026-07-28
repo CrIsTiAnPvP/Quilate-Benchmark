@@ -23,7 +23,7 @@ import statistics
 import time
 
 from .const import IS_WINDOWS
-from .platform_utils import ps_json, run_cmd_bytes
+from .platform_utils import _sys_exe, ps_json, run_cmd_bytes
 
 # Velocidad teórica del enlace por generación de wifi, en Mbps, con la
 # configuración habitual de un portátil (2 flujos, 80 MHz). Sirve para ver si el
@@ -78,7 +78,8 @@ def wifi_link() -> dict:
     """
     if not IS_WINDOWS:
         return {}
-    texto = _decodificar(run_cmd_bytes(["netsh", "wlan", "show", "interfaces"], timeout=15))
+    texto = _decodificar(run_cmd_bytes([_sys_exe("netsh.exe"), "wlan", "show", "interfaces"],
+                                       timeout=15))
     if not texto or "802.11" not in texto:
         return {}
 

@@ -245,13 +245,19 @@ def _find_nvidia_smi() -> str | None:
     global _nvsmi_path
     if _nvsmi_path is not False:
         return _nvsmi_path  # type: ignore[return-value]
-    candidates = [shutil.which("nvidia-smi")]
+    # En Windows no se busca por PATH: CPython inserta el directorio actual en la
+    # posicion 0 de esa busqueda, asi que un nvidia-smi.exe dejado junto al .exe
+    # ganaria a los dos sitios donde el driver lo instala de verdad — y esto puede
+    # acabar ejecutandose elevado. Solo las rutas absolutas conocidas. En Linux el
+    # PATH no incluye el directorio actual y `which` sigue siendo la via correcta.
     if IS_WINDOWS:
         system_root = os.environ.get("SystemRoot", r"C:\Windows")
-        candidates += [
+        candidates = [
             os.path.join(system_root, "System32", "nvidia-smi.exe"),
             r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
         ]
+    else:
+        candidates = [shutil.which("nvidia-smi")]
     _nvsmi_path = next((c for c in candidates if c and os.path.exists(c)), None)
     return _nvsmi_path  # type: ignore[return-value]
 

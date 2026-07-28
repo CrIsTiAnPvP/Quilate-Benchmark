@@ -17,6 +17,28 @@ else:
     winreg = None
 
 
+# Windows resuelve un ejecutable sin ruta buscando primero en el directorio de la
+# aplicación y, acto seguido, en el **directorio actual** — antes que en System32.
+# Como este programa se ofrece a elevarse por UAC, un `powercfg.exe` cualquiera
+# dejado en la carpeta desde la que se hace doble clic acabaría ejecutándose como
+# Administrador. Los binarios del sistema se piden siempre por ruta absoluta.
+_SYSTEM32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+
+# PowerShell 5.1 es el único que no cuelga directamente de System32.
+_SUBDIR = {"powershell.exe": os.path.join("WindowsPowerShell", "v1.0")}
+
+
+def _sys_exe(name: str) -> str:
+    """Ruta absoluta de un binario de sistema de Windows.
+
+    Fuera de Windows devuelve el nombre tal cual: allí la búsqueda por `PATH` no
+    incluye el directorio actual, y no hay System32 al que apuntar.
+    """
+    if not IS_WINDOWS:
+        return name
+    return os.path.join(_SYSTEM32, _SUBDIR.get(name.lower(), ""), name)
+
+
 def _console_encoding() -> str:
     """Codificación real de la salida de los programas de consola de Windows.
 
@@ -88,7 +110,7 @@ def _ps_raw(command: str, timeout: int = 30) -> tuple[Any, str | None]:
                f"{command}"
                f" }} catch {{ Write-Output ('{_PS_ERROR}' + $_.Exception.Message) }}")
     out = run_cmd(
-        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        [_sys_exe("powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-Command", wrapped],
         timeout=timeout, encoding="utf-8",
     )
@@ -258,7 +280,7 @@ def pending_driver_updates(timeout: int = 90) -> list[str]:
     if not IS_WINDOWS:
         return []
     out = run_cmd(
-        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        [_sys_exe("powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-Command",
          "$ErrorActionPreference='Stop';"
          "try {"

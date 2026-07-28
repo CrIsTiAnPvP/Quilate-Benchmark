@@ -15,7 +15,7 @@ from .sensors import cpu_temperature, gpu_temperature, temperature_report, tempe
 from .storage_scan import ScanResult, candidate_bytes
 from .console import C, human_bytes, section, spinner_done, spinner_step
 from .const import IS_LINUX, IS_WINDOWS
-from .platform_utils import (boot_performance, pending_driver_updates, ps_json,
+from .platform_utils import (_sys_exe, boot_performance, pending_driver_updates, ps_json,
                              reg_key_readable, reg_list_values, reg_read, run_cmd, winreg)
 from .network import WIFI_TECHO, wifi_capability
 from .sysinfo import KIND_LABELS, SystemInfo, local_volumes, primary_gpu
@@ -897,7 +897,7 @@ class Auditor:
 
     # ------------------------------------------------------- solo Windows ----
     def check_power_plan(self) -> str:
-        out = run_cmd(["powercfg", "/getactivescheme"], timeout=15) or ""
+        out = run_cmd([_sys_exe("powercfg.exe"), "/getactivescheme"], timeout=15) or ""
         name = out.split("(", 1)[1].rstrip(")").strip() if "(" in out else out
         if not name.strip():
             # Sin nombre de plan, la comparación contra la lista de nombres
@@ -927,7 +927,8 @@ class Auditor:
     def check_trim(self) -> str:
         if "SSD" not in self.si.system_drive_media:
             raise NoAplica("el disco de sistema no es un SSD")
-        out = run_cmd(["fsutil", "behavior", "query", "DisableDeleteNotify"], timeout=15) or ""
+        out = run_cmd([_sys_exe("fsutil.exe"), "behavior", "query", "DisableDeleteNotify"],
+                      timeout=15) or ""
         if not out.strip():
             raise SinDato("fsutil no ha devuelto el estado de TRIM")
         disabled = any(tok in out for tok in ("= 1", "=1"))
@@ -1192,7 +1193,7 @@ class Auditor:
 
     def check_filesystem_health(self) -> str:
         drive = os.environ.get("SystemDrive", "C:")
-        out = run_cmd(["fsutil", "dirty", "query", drive], timeout=15) or ""
+        out = run_cmd([_sys_exe("fsutil.exe"), "dirty", "query", drive], timeout=15) or ""
         if not out:
             raise SinDato("fsutil no ha respondido (suele requerir administrador)")
         lowered = out.lower()
