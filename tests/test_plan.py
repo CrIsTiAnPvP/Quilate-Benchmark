@@ -16,7 +16,11 @@ import unittest
 from pathlib import Path
 
 from quilate.audit import Auditor, Finding
-from quilate.export.plan_export import PLAN_ACTIONS, _ps_str, export_plan
+from quilate.components import build_component_cards
+from quilate.export.plan_export import (PLAN_ACTIONS, _comentario, _plan_component_summary,
+                                        _plan_large_files, _plan_system_summary, _ps_str,
+                                        export_plan)
+from quilate.storage_scan import ScanResult
 from quilate.sysinfo import SystemInfo
 
 # Los dos únicos bloques que no cambian ningún ajuste: uno enseña una lista y
@@ -83,6 +87,110 @@ class Escapado(unittest.TestCase):
             texto = ruta.read_text(encoding="utf-8-sig")
         self.assertIn('`"X`"', texto)
         self.assertIn("`$100", texto)
+
+
+#: Lo que un disco malicioso intentaría colar. Va con CRLF delante y detrás
+#: porque el ataque no es el texto, es el salto de línea: cierra el comentario y
+#: convierte lo que sigue en una orden que se ejecuta como Administrador.
+CARGA = r"Remove-Item C:\ -Recurse"
+HOSTIL = "SanDisk Ultra\r\n" + CARGA + "\r\n#"
+
+
+class LineasDeComentario(unittest.TestCase):
+    """Ninguna cadena del sistema puede salirse de su línea de comentario.
+
+    El título de `smart_warn`, `disk_wear` y `disk_hot` lleva el FriendlyName
+    que devuelve `Get-PhysicalDisk`, que sale del IDENTIFY DEVICE del disco: lo
+    escribe el firmware del dispositivo, no el usuario ni Windows. Y el fichero
+    que se genera aquí es el que la herramienta le dice al usuario que ejecute
+    como Administrador.
+    """
+
+    def _si_hostil(self) -> SystemInfo:
+        si = SystemInfo()
+        si.hostname = HOSTIL
+        si.cpu_name = HOSTIL
+        si.system_drive_media = HOSTIL
+        si.gpus = [{"name": HOSTIL, "driver": HOSTIL}]
+        return si
+
+    def _scan_hostil(self) -> ScanResult:
+        return ScanResult(
+            min_size=1024, total_large=2048, reclaimable=0,
+            files=[{"size": 2048, "category": HOSTIL, "age_days": 3, "path": HOSTIL}],
+            special=[{"name": HOSTIL, "size": 1024, "note": HOSTIL}])
+
+    def _todo_comentario(self, texto: str, bloque: str):
+        for numero, linea in enumerate(texto.splitlines(), 1):
+            if not linea.strip():
+                continue
+            self.assertTrue(linea.lstrip().startswith("#"),
+                            f"{bloque}, línea {numero}: se ha salido del comentario\n"
+                            f"  {linea!r}")
+
+    def test_el_resumen_del_equipo_es_comentario_entero(self):
+        self._todo_comentario(_plan_system_summary(self._si_hostil(), None),
+                              "resumen del equipo")
+
+    def test_el_resumen_por_componente_es_comentario_entero(self):
+        si = self._si_hostil()
+        auditor = Auditor(si, None)
+        malo = hallazgo("smart_warn")
+        malo.title = HOSTIL
+        auditor.findings = [malo]
+        texto = _plan_component_summary(build_component_cards(si, None, auditor))
+        self._todo_comentario(texto, "resumen por componente")
+
+    def test_el_listado_de_archivos_grandes_es_comentario_entero(self):
+        self._todo_comentario(_plan_large_files(self._scan_hostil()), "archivos grandes")
+
+    def test_las_acciones_manuales_son_comentario_entero(self):
+        auditor = Auditor(SystemInfo(), None)
+        malo = hallazgo("ram_low")           # sin acción automatizable
+        malo.title, malo.steps = HOSTIL, [HOSTIL]
+        auditor.findings = [malo]
+        with tempfile.TemporaryDirectory() as d:
+            ruta = Path(d) / "plan.ps1"
+            export_plan(ruta, SystemInfo(), None, auditor)
+            texto = ruta.read_text(encoding="utf-8-sig")
+        # Desde la línea siguiente al encabezado hasta donde vuelve la plantilla.
+        seccion = texto.split("NO SE PUEDEN AUTOMATIZAR")[1].split("\n", 1)[1]
+        seccion = seccion.split("BLOQUE FINAL")[0]
+        self._todo_comentario(seccion, "acciones manuales")
+
+    def test_la_orden_inyectada_nunca_empieza_una_linea(self):
+        # La criba sobre el fichero completo: da igual por qué campo entre, no
+        # puede acabar en posición de orden.
+        si = self._si_hostil()
+        auditor = Auditor(si, None)
+        malo = hallazgo("sysmain")           # sí tiene bloque automatizado
+        malo.title, malo.steps = HOSTIL, [HOSTIL]
+        auditor.findings = [malo, hallazgo("ram_low")]
+        auditor.scan = self._scan_hostil()
+        with tempfile.TemporaryDirectory() as d:
+            ruta = Path(d) / "plan.ps1"
+            export_plan(ruta, si, None, auditor)
+            texto = ruta.read_text(encoding="utf-8-sig")
+        self.assertIn(CARGA, texto, "el texto hostil ni siquiera ha llegado al fichero: "
+                                    "sin eso este test no comprueba nada")
+        for numero, linea in enumerate(texto.splitlines(), 1):
+            self.assertFalse(linea.lstrip().startswith(CARGA),
+                             f"línea {numero}: la orden inyectada ha quedado suelta")
+
+
+class Comentario(unittest.TestCase):
+    def test_colapsa_saltos_de_linea_y_nulos(self):
+        self.assertEqual(_comentario("a\r\nb\x00c"), "a b c")
+
+    def test_varios_saltos_seguidos_valen_por_uno(self):
+        self.assertEqual(_comentario("a\n\n\n\nb"), "a b")
+
+    def test_recorta_lo_muy_largo(self):
+        self.assertEqual(len(_comentario("x" * 5000)), 300)
+
+    def test_acepta_lo_que_no_es_texto(self):
+        # `f['size']` y compañía llegan como números desde el rastreo.
+        self.assertEqual(_comentario(42), "42")
 
 
 class ScriptGenerado(unittest.TestCase):
