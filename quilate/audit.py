@@ -43,6 +43,11 @@ class NoAplica(Exception):
 
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+# Los identificadores de hallazgo acaban en un `id=` del HTML y en un enlace que
+# apunta a él, sin pasar por `_e()`. Restringirlos aquí convierte esa convención
+# en una garantía: ver `Auditor.add`.
+_ID_VALIDO = re.compile(r"^[a-z0-9_]+$")
 SEVERITY_TEXT = {"critical": "CRÍTICO", "high": "ALTO", "medium": "MEDIO",
                  "low": "BAJO", "info": "INFO"}
 SEVERITY_COLOR = {"critical": "RED", "high": "RED", "medium": "YELLOW",
@@ -144,6 +149,31 @@ class Auditor:
         self.boot_seconds: float | None = None
 
     def add(self, **kwargs) -> None:
+        """Registra un hallazgo, validando antes lo que el HTML no escapa.
+
+        `export_html` interpola `f.severity` y `f.id` sin pasarlos por `_e()`,
+        y hoy es seguro porque los dos salen de constantes escritas en este
+        fichero. Pero es una invariante que nadie ha declarado: el día que una
+        comprobación nueva construya un `id` con el nombre de un disco —cosa
+        que el firmware del dispositivo decide, no nosotros— el escape no está.
+
+        Se valida aquí, en el origen, y no aplicando `_e()` en el HTML, porque
+        así la garantía vale para las cuatro salidas y no solo para una. Falla
+        ruidosamente a propósito: es un error de programación del propio
+        Quilate, no un dato del sistema que haya que tolerar, y el sitio donde
+        tiene que saltar es el del programador y no el informe del usuario.
+        """
+        severity = kwargs.get("severity")
+        if severity not in SEVERITY_ORDER:
+            raise ValueError(
+                f"severidad no declarada: {severity!r}. Las válidas son "
+                f"{', '.join(SEVERITY_ORDER)}")
+        identificador = kwargs.get("id")
+        if not isinstance(identificador, str) or not _ID_VALIDO.match(identificador):
+            raise ValueError(
+                f"identificador de hallazgo no válido: {identificador!r}. Tiene que "
+                f"casar con {_ID_VALIDO.pattern}: se usa como ancla del HTML "
+                f"(«#h-{{id}}») y ahí no se escapa nada")
         self.findings.append(Finding(**kwargs))
 
     # ------------------------------------------------------------------ core --

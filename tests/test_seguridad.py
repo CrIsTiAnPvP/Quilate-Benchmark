@@ -15,7 +15,9 @@ porque el plan promete un retorno que estos hallazgos no dan.
 
 from __future__ import annotations
 
+import inspect
 import io
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -23,8 +25,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from quilate import audit
-from quilate.audit import (SEGURIDAD, Auditor, Finding, NoAplica, SinDato,
-                           _estado_antivirus, security_findings)
+from quilate.audit import (SEGURIDAD, SEVERITY_ORDER, Auditor, Finding, NoAplica,
+                           SinDato, _estado_antivirus, security_findings)
 from quilate.platform_utils import PSResult
 from quilate.export.html_export import export_html
 from quilate.export.plan_export import export_plan
@@ -641,6 +643,65 @@ class ActualizacionesDeSeguridad(unittest.TestCase):
         con_flag = Auditor(SystemInfo(), None, check_updates=True)
         self.assertFalse(sin_flag.check_updates)
         self.assertTrue(con_flag.check_updates)
+
+
+class LoQueElHtmlNoEscapa(unittest.TestCase):
+    """`f.severity` y `f.id` se interpolan en el HTML sin pasar por `_e()`.
+
+    Hoy es seguro porque los dos salen de constantes escritas en `audit.py`,
+    pero era una invariante que nadie había declarado. Validarla en `add()` la
+    convierte en garantía, y encima vale para las cuatro salidas y no solo para
+    el HTML. Ver `Auditor.add`.
+    """
+
+    def _añadir(self, **cambios):
+        a = Auditor(SystemInfo(), None)
+        campos = dict(id="prueba", title="T", severity="high", category="fluidez",
+                      component="system", detail="d", gain=0.0, gain_note="n",
+                      effort="bajo", risk="nulo", steps=[])
+        campos.update(cambios)
+        a.add(**campos)
+        return a
+
+    def test_un_hallazgo_normal_pasa(self):
+        self.assertEqual(len(self._añadir().findings), 1)
+
+    def test_todas_las_severidades_declaradas_valen(self):
+        for severidad in SEVERITY_ORDER:
+            with self.subTest(severidad=severidad):
+                self._añadir(severity=severidad)
+
+    def test_una_severidad_inventada_no_pasa(self):
+        for severidad in ("grave", "HIGH", "", None, 1, "high "):
+            with self.subTest(severidad=severidad):
+                with self.assertRaises(ValueError):
+                    self._añadir(severity=severidad)
+
+    def test_un_id_con_html_no_pasa(self):
+        # El caso que esto viene a impedir: un `id` construido con el nombre de
+        # un disco, que lo decide el firmware del dispositivo y no nosotros.
+        hostiles = ['"><script>alert(1)</script>', "SanDisk Ultra", "id con espacios",
+                    "id-con-guion", "Mayúsculas", "", None, 42, "acentuado_ñ"]
+        for identificador in hostiles:
+            with self.subTest(id=identificador):
+                with self.assertRaises(ValueError):
+                    self._añadir(id=identificador)
+
+    def test_el_mensaje_dice_que_hay_que_arreglar(self):
+        with self.assertRaises(ValueError) as caso:
+            self._añadir(id="Disco SanDisk")
+        self.assertIn("a-z0-9_", str(caso.exception))
+
+    def test_todos_los_hallazgos_del_auditor_cumplen(self):
+        # Sobre el código, no sobre lo que los tests ejerciten: una comprobación
+        # que solo salta en un equipo concreto no puede reventar allí.
+        fuente = inspect.getsource(audit)
+        for identificador in re.findall(r'id="([^"]+)"', fuente):
+            with self.subTest(id=identificador):
+                self.assertRegex(identificador, r"^[a-z0-9_]+$")
+        for severidad in set(re.findall(r'severity="([^"]+)"', fuente)):
+            with self.subTest(severidad=severidad):
+                self.assertIn(severidad, SEVERITY_ORDER)
 
 
 class Decodificador(unittest.TestCase):
