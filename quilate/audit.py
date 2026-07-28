@@ -69,6 +69,34 @@ def security_findings(findings: list[Finding]) -> list[Finding]:
                   key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.title))
 
 
+# `productState` es un entero de 32 bits que el Centro de seguridad de Windows
+# no documenta en ninguna parte oficial, pero cuyo reparto es estable desde
+# Vista: 0xAABBCC, donde BB dice si el motor está vigilando (0x10 u 0x11) y CC
+# si las firmas están al día (0x00) o caducadas (0x10). AA es el tipo de
+# producto y aquí no interesa.
+#
+# Precisamente por no estar documentado, un valor que no encaje en ninguno de
+# los dos juegos conocidos no se interpreta: se calla. Es la misma decisión que
+# toma `check_filesystem_health` cuando no reconoce la respuesta de fsutil.
+_AV_MOTOR = {0x00: False, 0x01: False, 0x10: True, 0x11: True}   # {byte: vigilando}
+_AV_FIRMAS = {0x00: True, 0x10: False}                           # {byte: al día}
+
+
+def _estado_antivirus(state) -> tuple[bool, bool] | None:
+    """(vigilando, firmas al día), o None si el entero no se reconoce.
+
+    Los dos bytes se traducen por tabla y no por comparación: así, un valor
+    nuevo que Microsoft empiece a devolver algún día cae por su propio peso en
+    «no lo reconozco» en vez de colarse como uno de los conocidos.
+    """
+    if isinstance(state, bool) or not isinstance(state, int):
+        return None
+    motor, firmas = (state >> 8) & 0xFF, state & 0xFF
+    if motor not in _AV_MOTOR or firmas not in _AV_FIRMAS:
+        return None
+    return _AV_MOTOR[motor], _AV_FIRMAS[firmas]
+
+
 def sev_label(severity: str) -> str:
     """Se resuelve en tiempo de ejecución: si los colores están desactivados
     (--no-color o salida redirigida) no se cuelan códigos ANSI en el informe."""
@@ -1258,6 +1286,7 @@ class Auditor:
             # Windows registra siempre Defender aquí; una lista vacía significa
             # que el Centro de seguridad no ha contestado, no que no haya nada.
             raise SinDato("el Centro de seguridad no ha devuelto ningún producto")
+        self._check_proteccion_activa(rows)
         third_party = [n for n in names if "defender" not in n.lower()]
         if len(third_party) >= 2:
             self.add(
@@ -1316,6 +1345,67 @@ class Auditor:
                    "Actualiza con el equipo enchufado a la corriente y sin apagarlo a medias",
                    "Si no hay ninguna posterior, no hay nada que hacer: no fuerces una igual"])
         return f"{self.si.bios_date} ({años:.0f} años)"
+
+    def _check_proteccion_activa(self, rows) -> None:
+        """Si queda alguien vigilando, y con las firmas al día.
+
+        Se mira el conjunto y no producto a producto por una razón concreta:
+        cuando se instala un antivirus de terceros, **Defender se desactiva
+        solo**, y esa es la configuración correcta. Avisar de cada producto
+        apagado convertiría el caso más normal de todos en un hallazgo crítico
+        falso. Lo que sí es un problema es que no quede ninguno activo.
+
+        Igual con las firmas: unas firmas caducadas en un motor que está apagado
+        a propósito no le importan a nadie.
+        """
+        estados = []
+        for fila in rows:
+            nombre = str(fila.get("displayName") or "").strip()
+            estado = _estado_antivirus(fila.get("productState"))
+            if nombre and estado is not None:
+                estados.append((nombre,) + estado)
+        if not estados:
+            # `productState` no viene, o no encaja en el reparto conocido. No se
+            # interpreta: acusar a alguien de tener el antivirus apagado por
+            # haber leído mal un entero es peor que no decir nada.
+            return
+
+        activos = [(n, al_dia) for n, activo, al_dia in estados if activo]
+        if not activos:
+            self.add(
+                id="av_tiempo_real_off",
+                title="Ningún antivirus con la protección en tiempo real activa",
+                severity="critical", category=SEGURIDAD, component="system",
+                detail="El Centro de seguridad de Windows tiene registrados "
+                       f"{', '.join(n for n, _, _ in estados)}, pero ninguno está vigilando "
+                       "ahora mismo. Sin protección en tiempo real, un archivo malicioso solo "
+                       "se detecta si alguien lanza un análisis a mano, es decir, después. "
+                       "Suele pasar tras desinstalar un antivirus de pago sin reactivar "
+                       "Defender, o porque algo lo apagó.",
+                gain=0.0, gain_note="no es una optimización: es exposición a malware",
+                effort="bajo", risk="nulo",
+                steps=["Abre Seguridad de Windows → Protección antivirus y contra amenazas",
+                       "Activa «Protección en tiempo real»",
+                       "Si sigue apagándose sola, desinstala los restos del antivirus "
+                       "anterior con la herramienta de limpieza de su fabricante"])
+            return
+
+        caducados = [n for n, al_dia in activos if not al_dia]
+        if caducados:
+            self.add(
+                id="av_desactualizado",
+                title=f"Firmas de antivirus caducadas ({', '.join(caducados)})",
+                severity="high", category=SEGURIDAD, component="system",
+                detail="El motor está activo pero sus definiciones no están al día, así que "
+                       "no reconoce nada de lo aparecido desde la última actualización. Es la "
+                       "situación más engañosa de todas: el icono dice que estás protegido y "
+                       "técnicamente lo estás, pero contra las amenazas del mes pasado.",
+                gain=0.0, gain_note="no es una optimización: es exposición a malware",
+                effort="bajo", risk="nulo",
+                steps=["Abre Seguridad de Windows → Protección antivirus y contra amenazas "
+                       "→ Buscar actualizaciones",
+                       "Si falla, comprueba que Windows Update no esté pausado",
+                       "Sin conexión desde hace tiempo, basta con conectarlo a internet"])
 
     def check_defrag(self) -> str:
         if "HDD" not in self.si.system_drive_media:

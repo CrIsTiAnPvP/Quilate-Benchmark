@@ -22,11 +22,15 @@ from contextlib import redirect_stdout
 from datetime import date, timedelta
 from pathlib import Path
 
-from quilate.audit import SEGURIDAD, Auditor, Finding, SinDato, security_findings
+from quilate import audit
+from quilate.audit import (SEGURIDAD, Auditor, Finding, SinDato, _estado_antivirus,
+                           security_findings)
+from quilate.platform_utils import PSResult
 from quilate.export.html_export import export_html
 from quilate.export.plan_export import export_plan
 from quilate.projection import project_improvement, priority_rank
 from quilate.sysinfo import SystemInfo
+from tests.support import patched
 
 
 def riesgo(id_: str, severity: str = "high", title: str = "") -> Finding:
@@ -235,6 +239,106 @@ class BiosAntigua(unittest.TestCase):
         fecha = self._hace(6)
         a, _ = self._auditar(fecha)
         self.assertIn(fecha[:4], a.findings[0].title)
+
+
+class ProteccionEnTiempoReal(unittest.TestCase):
+    """`check_antivirus` leía `productState` y no lo decodificaba.
+
+    El reparto del entero (0xAABBCC) no está documentado por Microsoft, así que
+    lo que no se reconozca no se interpreta. Y la trampa que hay que esquivar:
+    cuando se instala un antivirus de terceros, Defender se apaga solo, y esa es
+    la configuración correcta.
+    """
+
+    # Valores reales del Centro de seguridad.
+    ACTIVO_AL_DIA = 0x061100
+    ACTIVO_CADUCADO = 0x061110
+    APAGADO = 0x060100
+
+    def _auditar(self, productos: list[dict]):
+        a = Auditor(SystemInfo(), None)
+        with patched(audit, wmi=PSResult(productos)):
+            a.check_antivirus()
+        return a
+
+    def _ids(self, a: Auditor) -> list[str]:
+        return [f.id for f in a.findings]
+
+    def test_defender_solo_y_bien(self):
+        a = self._auditar([{"displayName": "Windows Defender",
+                            "productState": self.ACTIVO_AL_DIA}])
+        self.assertEqual(a.findings, [])
+
+    def test_ninguno_vigilando(self):
+        a = self._auditar([{"displayName": "Windows Defender",
+                            "productState": self.APAGADO}])
+        self.assertEqual(self._ids(a), ["av_tiempo_real_off"])
+        f = a.findings[0]
+        self.assertEqual(f.severity, "critical")
+        self.assertEqual(f.category, SEGURIDAD)
+        self.assertEqual(f.gain, 0.0)
+
+    def test_defender_apagado_por_un_antivirus_de_terceros_es_correcto(self):
+        # El caso más normal de todos. Avisar aquí sería un crítico falso en
+        # cualquier equipo con antivirus de pago.
+        a = self._auditar([
+            {"displayName": "Windows Defender", "productState": self.APAGADO},
+            {"displayName": "Kaspersky", "productState": self.ACTIVO_AL_DIA},
+        ])
+        self.assertNotIn("av_tiempo_real_off", self._ids(a))
+        self.assertNotIn("av_desactualizado", self._ids(a))
+
+    def test_firmas_caducadas_con_el_motor_activo(self):
+        a = self._auditar([{"displayName": "Windows Defender",
+                            "productState": self.ACTIVO_CADUCADO}])
+        self.assertEqual(self._ids(a), ["av_desactualizado"])
+        self.assertEqual(a.findings[0].severity, "high")
+
+    def test_firmas_caducadas_de_un_motor_apagado_no_importan(self):
+        # A nadie le importan las firmas de un antivirus que no está vigilando.
+        a = self._auditar([
+            {"displayName": "Norton", "productState": 0x060110},
+            {"displayName": "Windows Defender", "productState": self.ACTIVO_AL_DIA},
+        ])
+        self.assertEqual(a.findings, [])
+
+    def test_un_entero_que_no_se_reconoce_no_se_interpreta(self):
+        for valor in (None, "0x061100", True, 0x06FF00, 0x0611FF):
+            with self.subTest(valor=valor):
+                a = self._auditar([{"displayName": "Raro", "productState": valor}])
+                self.assertEqual(a.findings, [], f"ha opinado sobre {valor!r}")
+
+    def test_el_solapamiento_de_antivirus_sigue_funcionando(self):
+        # El hallazgo que ya existía no puede haberse roto por el camino, y ese
+        # sí es de fluidez y sí tiene ganancia.
+        a = self._auditar([
+            {"displayName": "Norton", "productState": self.ACTIVO_AL_DIA},
+            {"displayName": "Kaspersky", "productState": self.ACTIVO_AL_DIA},
+        ])
+        self.assertIn("av_stack", self._ids(a))
+        stack = next(f for f in a.findings if f.id == "av_stack")
+        self.assertEqual(stack.category, "fluidez")
+        self.assertGreater(stack.gain, 0)
+
+    def test_sin_respuesta_del_centro_de_seguridad(self):
+        a = Auditor(SystemInfo(), None)
+        with patched(audit, wmi=PSResult((), ok=False, error="acceso denegado")):
+            with self.assertRaises(SinDato):
+                a.check_antivirus()
+
+
+class Decodificador(unittest.TestCase):
+    def test_los_dos_bytes_que_importan(self):
+        self.assertEqual(_estado_antivirus(0x061100), (True, True))
+        self.assertEqual(_estado_antivirus(0x061110), (True, False))
+        self.assertEqual(_estado_antivirus(0x060100), (False, True))
+        # 0x11 también significa vigilando: lo usan algunos productos.
+        self.assertEqual(_estado_antivirus(0x061000), (True, True))
+
+    def test_el_tipo_de_producto_no_altera_la_lectura(self):
+        for tipo in (0x00, 0x04, 0x06, 0xFF):
+            with self.subTest(tipo=hex(tipo)):
+                self.assertEqual(_estado_antivirus((tipo << 16) | 0x1100), (True, True))
 
 
 if __name__ == "__main__":
