@@ -400,6 +400,85 @@ class CifradoDelDisco(unittest.TestCase):
             self._auditar(PSResult([self.volumen(proteccion="Vete a saber", estado=None)]))
 
 
+class ArranqueSeguro(unittest.TestCase):
+    def _auditar(self, filas):
+        a = Auditor(SystemInfo(), None)
+        with patched(audit, wmi=filas):
+            return a, a.check_secure_boot()
+
+    def test_activo(self):
+        a, resumen = self._auditar(PSResult([{"firmware": "UEFI", "activo": True}]))
+        self.assertEqual(a.findings, [])
+        self.assertEqual(resumen, "activo")
+
+    def test_desactivado(self):
+        a, _ = self._auditar(PSResult([{"firmware": "UEFI", "activo": False}]))
+        self.assertEqual([f.id for f in a.findings], ["secureboot_off"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("medium", SEGURIDAD, 0.0))
+
+    def test_explica_lo_de_windows_11(self):
+        a, _ = self._auditar(PSResult([{"firmware": "UEFI", "activo": False}]))
+        self.assertIn("Windows 11", a.findings[0].detail)
+
+    def test_con_bios_heredada_no_aplica(self):
+        # No tiene arranque seguro que activar: no es un dato que falte.
+        with self.assertRaises(NoAplica):
+            self._auditar(PSResult([{"firmware": "Legacy", "activo": None}]))
+
+    def test_sin_privilegios_es_sin_dato(self):
+        # Verificado en un equipo real: sin administrador el cmdlet contesta
+        # «No se pudieron establecer privilegios adecuados» y aquí llega None.
+        # Eso no es «desactivado».
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult([{"firmware": "UEFI", "activo": None}]))
+
+
+class ChipTpm(unittest.TestCase):
+    def _auditar(self, filas):
+        a = Auditor(SystemInfo(), None)
+        with patched(audit, wmi=filas):
+            return a, a.check_tpm()
+
+    def fila(self, **campos) -> dict:
+        base = {"disponible": True, "TpmPresent": True, "TpmReady": True, "TpmEnabled": True}
+        base.update(campos)
+        return base
+
+    def test_presente_y_activo(self):
+        a, resumen = self._auditar(PSResult([self.fila()]))
+        self.assertEqual(a.findings, [])
+        self.assertIn("activo", resumen)
+
+    def test_sin_chip(self):
+        a, _ = self._auditar(PSResult([self.fila(TpmPresent=False, TpmEnabled=False)]))
+        self.assertEqual([f.id for f in a.findings], ["sin_tpm"])
+        self.assertEqual(a.findings[0].gain, 0.0)
+
+    def test_presente_pero_apagado(self):
+        a, _ = self._auditar(PSResult([self.fila(TpmEnabled=False)]))
+        self.assertEqual([f.id for f in a.findings], ["tpm_desactivado"])
+
+    def test_menciona_los_nombres_de_fabricante(self):
+        # Casi siempre está y solo hay que encenderlo, pero se llama de otra cosa.
+        a, _ = self._auditar(PSResult([self.fila(TpmPresent=False)]))
+        detalle = a.findings[0].detail
+        self.assertIn("fTPM", detalle)
+        self.assertIn("PTT", detalle)
+
+    def test_sin_privilegios_no_se_inventa_que_no_hay_chip(self):
+        # Verificado en un equipo real: sin administrador `Get-Tpm` NO falla,
+        # devuelve los campos a null. Darlos por «no hay TPM» habría acusado de
+        # faltarle el chip a casi cualquier equipo.
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult([self.fila(TpmPresent=None, TpmReady=None,
+                                              TpmEnabled=None)]))
+
+    def test_sin_el_cmdlet_no_aplica(self):
+        with self.assertRaises(NoAplica):
+            self._auditar(PSResult([{"disponible": False}]))
+
+
 class Decodificador(unittest.TestCase):
     def test_los_dos_bytes_que_importan(self):
         self.assertEqual(_estado_antivirus(0x061100), (True, True))

@@ -179,6 +179,8 @@ class Auditor:
                 ("Salud SMART de los discos", self.check_smart),
                 ("Antigüedad de la BIOS", self.check_bios_age),
                 ("Cifrado del disco (BitLocker)", self.check_disk_encryption),
+                ("Arranque seguro (Secure Boot)", self.check_secure_boot),
+                ("Chip TPM", self.check_tpm),
             ]
         elif IS_LINUX:
             checks += [
@@ -1418,6 +1420,96 @@ class Auditor:
                    "El cifrado inicial tarda y conviene hacerlo con el portátil enchufado",
                    "Si tu edición de Windows no lo incluye, VeraCrypt hace lo mismo"])
         return f"{unidad} SIN cifrar"
+
+    def check_secure_boot(self) -> str:
+        # El tipo de firmware sale de `$env:firmware_type`, que Windows rellena
+        # con «UEFI» o «Legacy» y no está traducido. La alternativa era mirar el
+        # texto de la excepción que lanza `Confirm-SecureBootUEFI` en un equipo
+        # sin UEFI, y ese sí viene en el idioma del sistema.
+        rows = ps_json("$( [PSCustomObject]@{ firmware = $env:firmware_type;"
+                       "   activo = $( try { Confirm-SecureBootUEFI } catch { $null } ) } )")
+        if not rows.ok:
+            raise SinDato(f"no se ha podido consultar el arranque seguro ({rows.error})")
+        if not rows:
+            raise SinDato("el sistema no ha informado del tipo de firmware")
+        firmware = str(rows[0].get("firmware") or "").strip().lower()
+        if firmware and firmware != "uefi":
+            raise NoAplica("este equipo arranca con BIOS heredada, que no tiene arranque seguro")
+        activo = rows[0].get("activo")
+        if not isinstance(activo, bool):
+            # Sin privilegios el cmdlet contesta «Acceso denegado» y aquí llega
+            # como None. Eso no es «desactivado».
+            raise SinDato("el estado del arranque seguro requiere administrador")
+        if activo:
+            return "activo"
+        self.add(
+            id="secureboot_off", title="Arranque seguro (Secure Boot) desactivado",
+            severity="medium", category=SEGURIDAD, component="system",
+            detail="Con el arranque seguro apagado, el firmware no comprueba la firma de lo que "
+                   "carga antes que Windows, así que un bootkit —malware que se instala por "
+                   "debajo del sistema operativo— puede arrancar antes que el antivirus y "
+                   "volverse invisible para él. Es además uno de los requisitos de Windows 11, "
+                   "así que tenerlo apagado puede ser por lo que este equipo no da el salto.",
+            gain=0.0, gain_note="no es una optimización: es integridad del arranque",
+            effort="medio", risk="medio",
+            steps=["Entra en la UEFI al encender (suele ser Supr, F2 o F10)",
+                   "Busca «Secure Boot» y actívalo; puede exigir poner el modo de arranque "
+                   "en UEFI puro y quitar CSM/Legacy",
+                   "Si el disco usa MBR habrá que convertirlo a GPT antes, con `mbr2gpt`: "
+                   "haz copia de seguridad primero",
+                   "Si arrancas Linux en el mismo equipo, comprueba que tu distribución "
+                   "esté firmada antes de activarlo"])
+        return "desactivado"
+
+    def check_tpm(self) -> str:
+        rows = ps_json(
+            "$( if (-not (Get-Command Get-Tpm -ErrorAction SilentlyContinue)) {"
+            "     [PSCustomObject]@{ disponible = $false } } else {"
+            "     Get-Tpm | Select-Object @{n='disponible';e={$true}},"
+            "       TpmPresent,TpmReady,TpmEnabled } )")
+        if not rows.ok:
+            raise SinDato(f"no se ha podido consultar el TPM ({rows.error})")
+        if not rows:
+            raise SinDato("Get-Tpm no ha devuelto nada")
+        if not rows[0].get("disponible"):
+            raise NoAplica("esta edición de Windows no trae la consulta del TPM")
+        presente = rows[0].get("TpmPresent")
+        if not isinstance(presente, bool):
+            # Verificado: sin privilegios `Get-Tpm` no falla, devuelve los campos
+            # a null. Darlos por «no hay TPM» acusaría de faltarle el chip a casi
+            # cualquier equipo, que es peor que no decir nada.
+            raise SinDato("el estado del TPM requiere administrador")
+        if not presente:
+            self.add(
+                id="sin_tpm", title="El equipo no tiene TPM",
+                severity="medium", category=SEGURIDAD, component="system",
+                detail="El TPM es el chip donde se guardan las claves de cifrado de forma que no "
+                       "se puedan copiar. Sin él, BitLocker necesita que escribas una contraseña "
+                       "en cada arranque, y este equipo no cumple los requisitos de Windows 11. "
+                       "Muchas placas lo traen desactivado de fábrica bajo otro nombre: fTPM en "
+                       "AMD, PTT en Intel.",
+                gain=0.0, gain_note="no es una optimización: es dónde viven tus claves",
+                effort="medio", risk="bajo",
+                steps=["Entra en la UEFI y busca «fTPM» (AMD) o «Intel PTT»: suele estar ahí, "
+                       "solo que apagado",
+                       "Si no aparece ninguno, este equipo no lo tiene y no se le puede añadir",
+                       "Comprueba después con `tpm.msc`"])
+            return "no hay TPM"
+        if rows[0].get("TpmEnabled") is False:
+            self.add(
+                id="tpm_desactivado", title="El equipo tiene TPM pero está desactivado",
+                severity="medium", category=SEGURIDAD, component="system",
+                detail="El chip está presente y apagado desde la UEFI, así que ni BitLocker "
+                       "puede usarlo ni cuenta para los requisitos de Windows 11. Activarlo es "
+                       "cambiar un ajuste, no comprar nada.",
+                gain=0.0, gain_note="no es una optimización: es dónde viven tus claves",
+                effort="bajo", risk="bajo",
+                steps=["Entra en la UEFI y activa «fTPM» (AMD) o «Intel PTT»",
+                       "Si ya usabas BitLocker, ten a mano la clave de recuperación: tocar el "
+                       "TPM puede pedirla en el siguiente arranque",
+                       "Comprueba después con `tpm.msc`"])
+            return "presente pero desactivado"
+        return "presente y activo"
 
     def _check_proteccion_activa(self, rows) -> None:
         """Si queda alguien vigilando, y con las firmas al día.
