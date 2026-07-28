@@ -56,20 +56,81 @@ def _console_encoding() -> str:
         return "cp850"
 
 
-def run_cmd(args: list[str], timeout: int = 25, encoding: str | None = None) -> str | None:
-    """Ejecuta un comando y devuelve stdout, o None si falla."""
+class CmdResult(str):
+    """Salida de un comando, con memoria de por qué no la hay.
+
+    El mismo criterio que `PSResult`, aplicado a los programas de consola:
+    devolver nada cuando el binario no existe, cuando el sistema no deja
+    ejecutarlo, cuando el propio programa sale con código de error y cuando
+    responde sin decir nada hace que las cuatro cosas se lean igual. Y no son lo
+    mismo: un `fsutil.exe` sustituido que devuelve basura era indistinguible de
+    un `fsutil` ausente, y `check_power_plan` no podía decirle al usuario *por
+    qué* no había podido leer su plan de energía.
+
+    Hereda de `str` para que quien solo quiera el texto no se entere. Sin
+    `__slots__` —a diferencia de `PSResult`— porque Python no los admite en
+    subclases de `str`.
+    """
+
+    def __new__(cls, salida: str = "", ok: bool = True, error: str | None = None):
+        obj = super().__new__(cls, salida)
+        obj.ok = ok
+        obj.error = error
+        return obj
+
+
+class CmdBytes(bytes):
+    """Lo mismo que `CmdResult`, para la salida sin decodificar."""
+
+    def __new__(cls, salida: bytes = b"", ok: bool = True, error: str | None = None):
+        obj = super().__new__(cls, salida)
+        obj.ok = ok
+        obj.error = error
+        return obj
+
+
+def _nombre(args: list[str]) -> str:
+    """El binario, sin la ruta: el motivo lo lee un usuario, no un programador."""
+    return os.path.basename(args[0]) if args else "el comando"
+
+
+def _ejecutar(args: list[str], timeout: int):
+    """Lanza el proceso y traduce el fallo a un motivo en castellano.
+
+    Devuelve `(resultado, None)` o `(None, motivo)`. Los cuatro fallos que se
+    distinguen no significan lo mismo para quien lee el informe: que el binario
+    no esté es un sistema distinto al esperado; que el sistema no lo deje
+    ejecutar es una política o un antivirus; y que no responda a tiempo es un
+    equipo saturado o un disco que no contesta.
+    """
     try:
-        res = subprocess.run(
-            args,
-            capture_output=True,
-            timeout=timeout,
-            creationflags=CREATE_NO_WINDOW,
-        )
-        if res.returncode != 0:
-            return None
-        return res.stdout.decode(encoding or _console_encoding(), errors="replace").strip()
-    except Exception:
-        return None
+        return subprocess.run(args, capture_output=True, timeout=timeout,
+                              creationflags=CREATE_NO_WINDOW), None
+    except FileNotFoundError:
+        return None, f"{_nombre(args)} no está en este sistema"
+    except PermissionError:
+        return None, f"el sistema no permite ejecutar {_nombre(args)}"
+    except subprocess.TimeoutExpired:
+        return None, f"{_nombre(args)} no ha respondido en {timeout} s"
+    except OSError as exc:
+        return None, f"no se ha podido ejecutar {_nombre(args)}: {exc}"
+
+
+def run_cmd(args: list[str], timeout: int = 25, encoding: str | None = None) -> CmdResult:
+    """Ejecuta un comando y devuelve su salida, o el motivo por el que no la hay."""
+    res, error = _ejecutar(args, timeout)
+    if res is None:
+        return CmdResult(ok=False, error=error)
+    codec = encoding or _console_encoding()
+    if res.returncode != 0:
+        # La salida no se devuelve: un programa que ha fallado puede haber
+        # escrito medio resultado, y medio resultado es peor que ninguno.
+        # El stderr sí va en el motivo, recortado, porque suele decir qué pasó.
+        detalle = res.stderr.decode(codec, errors="replace").strip()[:120]
+        return CmdResult(ok=False,
+                         error=f"{_nombre(args)} ha terminado con código {res.returncode}"
+                               + (f": {detalle}" if detalle else ""))
+    return CmdResult(res.stdout.decode(codec, errors="replace").strip())
 
 
 class PSResult(list):
@@ -114,8 +175,8 @@ def _ps_raw(command: str, timeout: int = 30) -> tuple[Any, str | None]:
          "-Command", wrapped],
         timeout=timeout, encoding="utf-8",
     )
-    if out is None:
-        return None, "powershell no respondió"
+    if not out.ok:
+        return None, out.error
     if out.startswith(_PS_ERROR):
         return None, out[len(_PS_ERROR):].strip()[:120] or "error sin descripción"
     if not out:
@@ -126,19 +187,22 @@ def _ps_raw(command: str, timeout: int = 30) -> tuple[Any, str | None]:
         return out, None
 
 
-def run_cmd_bytes(args: list[str], timeout: int = 25) -> bytes | None:
+def run_cmd_bytes(args: list[str], timeout: int = 25) -> CmdBytes:
     """Igual que `run_cmd` pero sin decodificar.
 
     No todos los programas de consola de Windows usan la misma codificación:
     `fsutil` responde en la página OEM y `netsh wlan` en UTF-8. Cuando hay que
     probar varias, decodificar aquí obligaría a ejecutar el comando dos veces.
     """
-    try:
-        res = subprocess.run(args, capture_output=True, timeout=timeout,
-                             creationflags=CREATE_NO_WINDOW)
-        return res.stdout if res.returncode == 0 else None
-    except Exception:
-        return None
+    res, error = _ejecutar(args, timeout)
+    if res is None:
+        return CmdBytes(ok=False, error=error)
+    if res.returncode != 0:
+        detalle = res.stderr.decode(_console_encoding(), errors="replace").strip()[:120]
+        return CmdBytes(ok=False,
+                        error=f"{_nombre(args)} ha terminado con código {res.returncode}"
+                              + (f": {detalle}" if detalle else ""))
+    return CmdBytes(res.stdout)
 
 
 def ps(command: str, timeout: int = 30) -> Any:
@@ -290,7 +354,11 @@ def pending_driver_updates(timeout: int = 90) -> list[str]:
          "} catch { }"],
         timeout=timeout,
     )
-    return [line.strip() for line in (out or "").splitlines() if line.strip()]
+    # Aquí no se distingue «no hay drivers pendientes» de «no se pudo preguntar»:
+    # el `catch { }` del propio script se traga el fallo de la búsqueda y sale
+    # con código 0, así que `out.ok` no lo sabría. Quien lo arregle tiene que
+    # empezar por ahí, no por aquí.
+    return [line.strip() for line in out.splitlines() if line.strip()]
 
 
 def is_admin() -> bool:

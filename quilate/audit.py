@@ -897,8 +897,10 @@ class Auditor:
 
     # ------------------------------------------------------- solo Windows ----
     def check_power_plan(self) -> str:
-        out = run_cmd([_sys_exe("powercfg.exe"), "/getactivescheme"], timeout=15) or ""
-        name = out.split("(", 1)[1].rstrip(")").strip() if "(" in out else out
+        out = run_cmd([_sys_exe("powercfg.exe"), "/getactivescheme"], timeout=15)
+        if not out.ok:
+            raise SinDato(f"no se ha podido preguntar el plan de energía: {out.error}")
+        name = out.split("(", 1)[1].rstrip(")").strip() if "(" in out else str(out)
         if not name.strip():
             # Sin nombre de plan, la comparación contra la lista de nombres
             # «buenos» siempre fallaba y el hallazgo se emitía con el plan
@@ -928,7 +930,9 @@ class Auditor:
         if "SSD" not in self.si.system_drive_media:
             raise NoAplica("el disco de sistema no es un SSD")
         out = run_cmd([_sys_exe("fsutil.exe"), "behavior", "query", "DisableDeleteNotify"],
-                      timeout=15) or ""
+                      timeout=15)
+        if not out.ok:
+            raise SinDato(f"no se ha podido leer el estado de TRIM: {out.error}")
         if not out.strip():
             raise SinDato("fsutil no ha devuelto el estado de TRIM")
         disabled = any(tok in out for tok in ("= 1", "=1"))
@@ -1193,9 +1197,16 @@ class Auditor:
 
     def check_filesystem_health(self) -> str:
         drive = os.environ.get("SystemDrive", "C:")
-        out = run_cmd([_sys_exe("fsutil.exe"), "dirty", "query", drive], timeout=15) or ""
+        out = run_cmd([_sys_exe("fsutil.exe"), "dirty", "query", drive], timeout=15)
+        if not out.ok:
+            # Sin privilegios `fsutil dirty query` sale con código de error, así
+            # que hasta ahora esto era «no ha respondido» a secas. Decir cuál de
+            # los dos motivos fue es la diferencia entre «prueba como
+            # administrador» y «este Windows no trae fsutil».
+            raise SinDato(f"no se ha podido consultar el volumen: {out.error} "
+                          f"(suele requerir administrador)")
         if not out:
-            raise SinDato("fsutil no ha respondido (suele requerir administrador)")
+            raise SinDato("fsutil no ha respondido")
         lowered = out.lower()
         if set(re.split(r"[^\w]+", lowered)) & self._NEGACIONES:
             return "limpio"
@@ -1395,9 +1406,12 @@ class Auditor:
         out = run_cmd(["systemctl", "is-enabled", "fstrim.timer"], timeout=10)
         if not out:
             # `systemctl` devuelve código distinto de cero cuando la unidad no
-            # existe o está deshabilitada, y run_cmd traduce eso a None: sin
-            # esto, «no hay TRIM periódico» y «no hay systemd» eran lo mismo.
-            raise SinDato("systemctl no ha informado del estado de fstrim.timer")
+            # existe o está deshabilitada, y run_cmd no da salida en ese caso:
+            # sin esto, «no hay TRIM periódico» y «no hay systemd» eran lo mismo.
+            # Se sigue sin poder separarlos, pero ahora al menos se dice cuál de
+            # los dos fallos ha ocurrido en vez de callarlo.
+            raise SinDato(f"systemctl no ha informado del estado de fstrim.timer"
+                          + (f": {out.error}" if out.error else ""))
         if "enabled" not in out:
             self.add(
                 id="linux_trim", title="fstrim.timer no está activado",

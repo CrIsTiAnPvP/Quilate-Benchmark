@@ -10,6 +10,7 @@ localizado deja de encontrarlo y empieza a informar de problemas inexistentes.
 import unittest
 
 from quilate import audit
+from quilate.platform_utils import CmdResult
 from tests.support import FixtureCase, patched
 
 # Bytes reales de `powercfg /getactivescheme` en un Windows 11 en español.
@@ -25,7 +26,7 @@ class Decodificacion(unittest.TestCase):
 
     def test_el_plan_de_energia_se_reconoce(self):
         from quilate.sysinfo import SystemInfo
-        with patched(audit, run_cmd=lambda *a, **k: POWERCFG_ES.decode("cp850")):
+        with patched(audit, run_cmd=lambda *a, **k: CmdResult(POWERCFG_ES.decode("cp850"))):
             a = audit.Auditor(SystemInfo(), None)
             resumen = a.check_power_plan()
         self.assertEqual([f for f in a.findings if f.id == "power_plan"], [])
@@ -36,7 +37,7 @@ class VolumenSucio(FixtureCase):
     """Un falso positivo aquí manda al usuario a un chkdsk /r de horas."""
 
     def _auditar(self, salida):
-        with patched(audit, run_cmd=lambda *a, **k: salida):
+        with patched(audit, run_cmd=lambda *a, **k: CmdResult(salida)):
             a = self.auditor()
             return a, a.check_filesystem_health()
 
@@ -62,19 +63,31 @@ class VolumenSucio(FixtureCase):
         self.assertEqual(a.findings, [])
 
     def test_respuesta_irreconocible(self):
-        with patched(audit, run_cmd=lambda *a, **k: "respuesta inesperada del sistema"):
+        with patched(audit, run_cmd=lambda *a, **k: CmdResult("respuesta inesperada del sistema")):
             a = self.auditor()
             with self.assertRaises(audit.SinDato):
                 a.check_filesystem_health()
         self.assertEqual(a.findings, [])
 
     def test_sin_salida_no_hay_hallazgo(self):
-        # Sin privilegios, fsutil devuelve «Acceso denegado» y run_cmd da None.
-        # Eso no es «limpio»: es que no se ha podido mirar.
-        with patched(audit, run_cmd=lambda *a, **k: ""):
+        # Responder sin decir nada no es «limpio»: es que no se ha podido mirar.
+        with patched(audit, run_cmd=lambda *a, **k: CmdResult("")):
             a = self.auditor()
             with self.assertRaises(audit.SinDato):
                 a.check_filesystem_health()
+        self.assertEqual(a.findings, [])
+
+    def test_el_motivo_del_fallo_llega_al_informe(self):
+        # Sin privilegios `fsutil dirty query` sale con código de error. Antes
+        # eso era «no ha respondido» a secas, indistinguible de un Windows sin
+        # fsutil; el usuario merece saber cuál de los dos le ha pasado.
+        fallo = CmdResult(ok=False, error="fsutil.exe ha terminado con código 1: "
+                                          "Acceso denegado")
+        with patched(audit, run_cmd=lambda *a, **k: fallo):
+            a = self.auditor()
+            with self.assertRaises(audit.SinDato) as caso:
+                a.check_filesystem_health()
+        self.assertIn("Acceso denegado", str(caso.exception))
         self.assertEqual(a.findings, [])
 
     def test_el_caso_que_fallaba(self):

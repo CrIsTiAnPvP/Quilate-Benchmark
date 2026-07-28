@@ -16,7 +16,7 @@ import unittest
 
 from quilate import audit
 from quilate.audit import Auditor, NoAplica, SinDato
-from quilate.platform_utils import PSResult
+from quilate.platform_utils import CmdResult, PSResult
 from quilate.sysinfo import SystemInfo
 from tests.support import patched
 
@@ -46,7 +46,7 @@ class SistemaMudo(unittest.TestCase):
             reg_list_values=lambda *a, **k: {},
             reg_key_readable=lambda *a, **k: False,
             ps_json=lambda *a, **k: PSResult((), ok=False, error="sin respuesta"),
-            run_cmd=lambda *a, **k: None,
+            run_cmd=lambda *a, **k: CmdResult(ok=False, error="sin respuesta"),
             boot_performance=lambda *a, **k: {"error": "sin acceso", "boots": [], "delays": []},
             pending_driver_updates=lambda *a, **k: [],
             cpu_temperature=lambda *a, **k: None,

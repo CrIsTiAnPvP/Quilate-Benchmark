@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from quilate.const import IS_WINDOWS
-from quilate.platform_utils import _SYSTEM32, _sys_exe, run_cmd
+from quilate.platform_utils import _SYSTEM32, _sys_exe, run_cmd, run_cmd_bytes
 from quilate import sensors
 
 
@@ -97,6 +98,75 @@ class RutaAbsoluta(_EnDirectorioTrampa):
         run_cmd([_sys_exe("powercfg.exe"), "/c", "echo.>marcador.txt"], timeout=15)
         self.assertFalse(marcador.exists(),
                          "se ha ejecutado el binario del directorio actual")
+
+
+class MotivoDeLaSalidaVacia(unittest.TestCase):
+    """«No hay dato» y «no he podido preguntarlo» no son lo mismo.
+
+    Es la misma disciplina que `PSResult.ok` aplicada a los programas de
+    consola: un `fsutil.exe` sustituido que devuelve basura era indistinguible
+    de un `fsutil` ausente, y `check_power_plan` no podía decir por qué no había
+    leído el plan de energía.
+    """
+
+    def test_lo_que_va_bien_no_lleva_motivo(self):
+        res = run_cmd([sys.executable, "-c", "print('hola')"], timeout=30)
+        self.assertTrue(res.ok)
+        self.assertIsNone(res.error)
+        self.assertEqual(res, "hola")
+
+    def test_un_binario_que_no_existe(self):
+        res = run_cmd(["quilate_esto_no_existe_12345"], timeout=10)
+        self.assertFalse(res.ok)
+        self.assertIn("no está en este sistema", res.error)
+        self.assertIn("quilate_esto_no_existe_12345", res.error)
+
+    def test_el_sistema_no_deja_ejecutarlo(self):
+        # Un directorio existe y no se puede ejecutar: es el camino más portátil
+        # para provocar el mismo error que una política o un antivirus.
+        with tempfile.TemporaryDirectory() as d:
+            res = run_cmd([d], timeout=10)
+        self.assertFalse(res.ok)
+        self.assertIn("no permite ejecutar", res.error)
+
+    def test_codigo_de_salida_distinto_de_cero(self):
+        res = run_cmd([sys.executable, "-c",
+                       "import sys; sys.stderr.write('el disco no responde'); sys.exit(3)"],
+                      timeout=30)
+        self.assertFalse(res.ok)
+        self.assertIn("código 3", res.error)
+        self.assertIn("el disco no responde", res.error, "se ha perdido el stderr")
+
+    def test_el_stderr_va_recortado(self):
+        res = run_cmd([sys.executable, "-c",
+                       "import sys; sys.stderr.write('x' * 5000); sys.exit(1)"], timeout=30)
+        self.assertFalse(res.ok)
+        self.assertLess(len(res.error), 200, "un motivo así no cabe en el informe")
+
+    def test_el_que_no_responde_a_tiempo(self):
+        res = run_cmd([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
+        self.assertFalse(res.ok)
+        self.assertIn("no ha respondido en 1 s", res.error)
+
+    def test_un_fallo_no_devuelve_media_salida(self):
+        # Medio resultado es peor que ninguno: quien busque una palabra en la
+        # respuesta la encontraría en un texto que el programa no llegó a acabar.
+        res = run_cmd([sys.executable, "-c",
+                       "print('no esta sucio'); raise SystemExit(1)"], timeout=30)
+        self.assertEqual(res, "")
+
+    def test_sigue_siendo_una_cadena_normal(self):
+        # Quien solo quiera el texto no tiene por qué enterarse de nada de esto.
+        res = run_cmd([sys.executable, "-c", "print('  Máximo rendimiento  ')"], timeout=30)
+        self.assertIn("rendimiento", res.lower())
+        self.assertEqual(res.strip(), str(res))
+
+    def test_sin_decodificar_el_criterio_es_el_mismo(self):
+        self.assertTrue(run_cmd_bytes([sys.executable, "-c", "print('ok')"], timeout=30).ok)
+        fallido = run_cmd_bytes(["quilate_esto_no_existe_12345"], timeout=10)
+        self.assertFalse(fallido.ok)
+        self.assertIn("no está en este sistema", fallido.error)
+        self.assertEqual(fallido, b"")
 
 
 class NvidiaSmi(_EnDirectorioTrampa):
