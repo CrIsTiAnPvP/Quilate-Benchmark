@@ -311,48 +311,24 @@ _BOOT_LOG = "Microsoft-Windows-Diagnostics-Performance/Operational"
 _BOOT_EVENTS = (100, 101, 102, 103)
 
 
-def boot_performance(max_boots: int = 30, max_delays: int = 200, timeout: int = 40) -> dict:
+def boot_performance(res) -> dict:
     """Arranques medidos por el propio Windows, en milisegundos.
 
-    Requiere privilegios de administrador: el log tiene una ACL que se los pide
-    incluso para leer. Sin ellos devuelve `{"error": ...}` y quien llame debe
-    tratarlo como «no medido», no como «arranque rápido».
+    Ya no consulta nada: recibe los eventos que trae el lote con permisos, que
+    es lo que puede leer ese log —tiene una ACL que pide privilegios hasta para
+    leerlo—. Sin ellos devuelve `{"error": ...}` y quien llame debe tratarlo
+    como «no medido», no como «arranque rápido».
 
     Los nombres de los campos se devuelven tal cual vienen del XML del evento,
     sin normalizar, para que un esquema distinto al esperado se pueda diagnosticar
     desde el JSON exportado en vez de perderse.
     """
-    if not IS_WINDOWS:
-        return {"error": "solo Windows", "boots": [], "delays": []}
-
-    # Los eventos de duración (100) y los de culpables (101-103) se piden por
-    # separado: en un equipo con muchos retrasos, un único -MaxEvents sobre los
-    # cuatro identificadores puede no llegar a devolver ni un solo arranque.
-    retrasos = ",".join(str(i) for i in _BOOT_EVENTS if i != 100)
-    command = (
-        "$leer = {"
-        "  param($ids, $max)"
-        f"  Get-WinEvent -FilterHashtable @{{LogName='{_BOOT_LOG}'; Id=$ids}}"
-        "    -MaxEvents $max -ErrorAction Stop | ForEach-Object {"
-        "      $d = @{};"
-        "      foreach ($n in ([xml]$_.ToXml()).Event.EventData.Data) { $d[$n.Name] = $n.'#text' };"
-        "      [PSCustomObject]@{ Id = $_.Id; Time = $_.TimeCreated.ToString('s'); Data = $d } } };"
-        "try {"
-        f"  $arranques = @(& $leer @(100) {max_boots});"
-        # Que no haya retrasos anotados es un resultado válido, no un fallo.
-        f"  $retrasos = @(); try {{ $retrasos = @(& $leer @({retrasos}) {max_delays}) }} catch {{ }};"
-        "  @{ ok = $true; events = @($arranques + $retrasos) } | ConvertTo-Json -Depth 6 -Compress"
-        "} catch {"
-        "  @{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress }"
-    )
-    data = ps(command, timeout=timeout)
-    if not isinstance(data, dict):
-        return {"error": "no se pudo leer el registro de arranque", "boots": [], "delays": []}
-    if not data.get("ok"):
-        return {"error": str(data.get("error") or "acceso denegado"), "boots": [], "delays": []}
+    if not getattr(res, "ok", True):
+        return {"error": str(getattr(res, "error", None) or "acceso denegado"),
+                "boots": [], "delays": []}
 
     boots, delays = [], []
-    for event in data.get("events") or []:
+    for event in res or ():
         fields = event.get("Data") or {}
         if not isinstance(fields, dict):
             continue
@@ -360,7 +336,8 @@ def boot_performance(max_boots: int = 30, max_delays: int = 200, timeout: int = 
         if event.get("Id") == 100:
             boots.append(entry)
         else:
-            entry["kind"] = {101: "aplicación", 102: "driver", 103: "servicio"}.get(event.get("Id"))
+            entry["kind"] = {101: "aplicación", 102: "driver",
+                             103: "servicio"}.get(event.get("Id"))
             delays.append(entry)
     return {"error": None, "boots": boots, "delays": delays}
 

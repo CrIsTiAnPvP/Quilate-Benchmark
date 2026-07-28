@@ -58,6 +58,56 @@ _CONSULTAS_ELEVADAS: dict[str, str] = {
     "smart": "Get-CimInstance -Namespace root\\wmi "
              "-ClassName MSStorageDriver_FailurePredictData | "
              "Select-Object InstanceName,VendorSpecific",
+
+    # --- para la auditoría (audit.Auditor) ---
+    # La disponibilidad se resuelve con `Get-Command` y no leyendo el texto del
+    # error: en Windows Home el cmdlet no existe y el mensaje viene traducido.
+    "bitlocker": "$( if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) {"
+                 "     [PSCustomObject]@{ disponible = $false } } else {"
+                 "     Get-BitLockerVolume | Select-Object @{n='disponible';e={$true}},"
+                 "       MountPoint,VolumeStatus,ProtectionStatus } )",
+    "secureboot": "$( [PSCustomObject]@{ firmware = $env:firmware_type;"
+                  "   activo = $( try { Confirm-SecureBootUEFI } catch { $null } ) } )",
+    "tpm": "$( if (-not (Get-Command Get-Tpm -ErrorAction SilentlyContinue)) {"
+           "     [PSCustomObject]@{ disponible = $false } } else {"
+           "     Get-Tpm | Select-Object @{n='disponible';e={$true}},"
+           "       TpmPresent,TpmReady,TpmEnabled } )",
+    "smb1": "$( if (-not (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue)) {"
+            "     [PSCustomObject]@{ disponible = $false } } else {"
+            "     Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol |"
+            "       Select-Object @{n='disponible';e={$true}},State } )",
+    # El log de arranque tiene una ACL propia que pide permisos hasta para leer.
+    # Los eventos de duración (100) y los de culpables (101-103) se piden por
+    # separado: con muchos retrasos, un único -MaxEvents sobre los cuatro
+    # identificadores puede no llegar a devolver ni un solo arranque.
+    "arranque": "$leer = { param($ids, $max) "
+                "  Get-WinEvent -FilterHashtable @{"
+                "      LogName='Microsoft-Windows-Diagnostics-Performance/Operational';"
+                "      Id=$ids} -MaxEvents $max -ErrorAction Stop | ForEach-Object {"
+                "    $d = @{};"
+                "    foreach ($n in ([xml]$_.ToXml()).Event.EventData.Data) { $d[$n.Name] = $n.'#text' };"
+                "    [PSCustomObject]@{ Id = $_.Id; Time = $_.TimeCreated.ToString('s'); Data = $d } } };"
+                "$arranques = @(& $leer @(100) 30);"
+                # Que no haya retrasos anotados es un resultado válido, no un fallo.
+                "$retrasos = @(); try { $retrasos = @(& $leer @(101,102,103) 200) } catch { };"
+                "@($arranques + $retrasos)",
+    # La única que no es PowerShell. La ruta sale de `[Environment]::SystemDirectory`
+    # y no de `$env:SystemRoot` por lo mismo que `_sys_exe` usa GetSystemDirectoryW:
+    # aquí se está eligiendo qué binario corre elevado. `dirty query` solo lee;
+    # quien lo cambie por `dirty set` estará marcando el volumen a mano.
+    # Aquí no se toca `[Console]::OutputEncoding`, y no es un olvido. En 1.9 hizo
+    # falta elegir la página OEM a mano porque `run_cmd` lee los bytes crudos del
+    # proceso y tiene que decidir con qué códec descifrarlos. Aquí decodifica
+    # PowerShell, que ya sabe en qué página escribe su consola. Comprobado
+    # ejecutándolo: la ayuda de `fsutil` vuelve con sus 25 líneas acentuadas
+    # intactas con y sin la línea. Y ponerla sería peor, no mejor: en una consola
+    # puesta en UTF-8 con `chcp 65001` forzaría cp850 y rompería justo lo que
+    # pretendía arreglar.
+    "fsdirty": "$sys = [Environment]::SystemDirectory;"
+               "$u = $sys.Substring(0, 2);"
+               "$t = & \"$sys\\fsutil.exe\" dirty query $u;"
+               "[PSCustomObject]@{ unidad = $u;"
+               "  salida = [string]::Join([char]10, @($t)); codigo = $LASTEXITCODE }",
 }
 
 _recogido: dict[str, PSResult] | None = None

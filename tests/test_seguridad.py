@@ -342,7 +342,7 @@ class CifradoDelDisco(unittest.TestCase):
         si = SystemInfo()
         si.system_drive = drive
         a = Auditor(si, None)
-        with patched(audit, wmi=filas):
+        with patched(audit, elevado={"bitlocker": filas}):
             return a, a.check_disk_encryption()
 
     def volumen(self, mount="C:", proteccion=1, estado=1) -> dict:
@@ -405,7 +405,7 @@ class CifradoDelDisco(unittest.TestCase):
 class ArranqueSeguro(unittest.TestCase):
     def _auditar(self, filas):
         a = Auditor(SystemInfo(), None)
-        with patched(audit, wmi=filas):
+        with patched(audit, elevado={"secureboot": filas}):
             return a, a.check_secure_boot()
 
     def test_activo(self):
@@ -439,7 +439,7 @@ class ArranqueSeguro(unittest.TestCase):
 class ChipTpm(unittest.TestCase):
     def _auditar(self, filas):
         a = Auditor(SystemInfo(), None)
-        with patched(audit, wmi=filas):
+        with patched(audit, elevado={"tpm": filas}):
             return a, a.check_tpm()
 
     def fila(self, **campos) -> dict:
@@ -484,7 +484,7 @@ class ChipTpm(unittest.TestCase):
 class ProtocoloSmb1(unittest.TestCase):
     def _auditar(self, filas):
         a = Auditor(SystemInfo(), None)
-        with patched(audit, wmi=filas):
+        with patched(audit, elevado={"smb1": filas}):
             return a, a.check_smb1()
 
     def test_desactivado(self):

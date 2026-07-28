@@ -16,6 +16,7 @@ from .sensors import cpu_temperature, gpu_temperature, temperature_report, tempe
 from .storage_scan import ScanResult, candidate_bytes
 from .console import C, human_bytes, section, spinner_done, spinner_step
 from .const import IS_LINUX, IS_WINDOWS
+from . import elevacion
 from .platform_utils import (_sys_exe, boot_performance, pending_driver_updates,
                              pending_security_updates, ps_json, reg_key_readable,
                              reg_list_values, reg_read, run_cmd, winreg)
@@ -1409,10 +1410,10 @@ class Auditor:
         Es la única fuente que convierte «tienes muchos programas de inicio» en
         una cifra: el propio sistema apunta cuánto tardó y qué lo retrasó.
         """
-        if not self.si.is_admin:
-            self.boot_report = {"error": "requiere administrador", "boots": [], "delays": []}
-            raise SinDato("el registro de arranque exige administrador para leerse")
-        data = boot_performance()
+        # Ya no se mira `si.is_admin`: este proceso no se eleva nunca, así que
+        # eso diría siempre «no» aunque el lote con permisos haya contestado.
+        # Lo que decide es si el dato está, que es la pregunta de verdad.
+        data = boot_performance(elevacion.recoger()["arranque"])
         self.boot_report = data
         if data.get("error"):
             # El log tiene una ACL propia, y con -FilterHashtable el error que
@@ -1489,14 +1490,19 @@ class Auditor:
     _SUCIO = ("dirty", "sucio", "sujo", "verschmutzt", "sporco", "vuil")
 
     def check_filesystem_health(self) -> str:
-        drive = os.environ.get("SystemDrive", "C:")
-        out = run_cmd([_sys_exe("fsutil.exe"), "dirty", "query", drive], timeout=15)
-        if not out.ok:
-            # Sin privilegios `fsutil dirty query` sale con código de error, así
-            # que hasta ahora esto era «no ha respondido» a secas. Decir cuál de
-            # los dos motivos fue es la diferencia entre «prueba como
-            # administrador» y «este Windows no trae fsutil».
-            raise SinDato(f"no se ha podido consultar el volumen: {out.error} "
+        rows = elevacion.recoger()["fsdirty"]
+        if not rows.ok:
+            raise SinDato(f"no se ha podido consultar el volumen ({rows.error})")
+        if not rows:
+            raise SinDato("fsutil no ha respondido")
+        drive = str(rows[0].get("unidad") or "C:")
+        codigo = rows[0].get("codigo")
+        out = str(rows[0].get("salida") or "")
+        if codigo:
+            # `fsutil dirty query` sale con código de error cuando no puede
+            # mirar. Decirlo es la diferencia entre «prueba con permisos» y
+            # «este Windows no trae fsutil».
+            raise SinDato(f"fsutil ha terminado con código {codigo} "
                           f"(suele requerir administrador)")
         if not out:
             raise SinDato("fsutil no ha respondido")
@@ -1613,11 +1619,7 @@ class Auditor:
         # del error: en Windows Home el cmdlet no existe y el mensaje viene
         # traducido, así que buscarlo por su texto es exactamente el fallo que
         # `check_filesystem_health` documenta y evita.
-        rows = ps_json(
-            "$( if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) {"
-            "     [PSCustomObject]@{ disponible = $false } } else {"
-            "     Get-BitLockerVolume | Select-Object @{n='disponible';e={$true}},"
-            "       MountPoint,VolumeStatus,ProtectionStatus } )")
+        rows = elevacion.recoger()["bitlocker"]
         if not rows.ok:
             # Sin privilegios el cmdlet existe pero rechaza contestar. No es «no
             # aplica»: es que no se ha podido mirar.
@@ -1665,8 +1667,7 @@ class Auditor:
         # con «UEFI» o «Legacy» y no está traducido. La alternativa era mirar el
         # texto de la excepción que lanza `Confirm-SecureBootUEFI` en un equipo
         # sin UEFI, y ese sí viene en el idioma del sistema.
-        rows = ps_json("$( [PSCustomObject]@{ firmware = $env:firmware_type;"
-                       "   activo = $( try { Confirm-SecureBootUEFI } catch { $null } ) } )")
+        rows = elevacion.recoger()["secureboot"]
         if not rows.ok:
             raise SinDato(f"no se ha podido consultar el arranque seguro ({rows.error})")
         if not rows:
@@ -1701,11 +1702,7 @@ class Auditor:
         return "desactivado"
 
     def check_tpm(self) -> str:
-        rows = ps_json(
-            "$( if (-not (Get-Command Get-Tpm -ErrorAction SilentlyContinue)) {"
-            "     [PSCustomObject]@{ disponible = $false } } else {"
-            "     Get-Tpm | Select-Object @{n='disponible';e={$true}},"
-            "       TpmPresent,TpmReady,TpmEnabled } )")
+        rows = elevacion.recoger()["tpm"]
         if not rows.ok:
             raise SinDato(f"no se ha podido consultar el TPM ({rows.error})")
         if not rows:
@@ -1758,11 +1755,7 @@ class Auditor:
     _SMB1_INACTIVO = {2, "disabled", "disabledwithpayloadremoved"}
 
     def check_smb1(self) -> str:
-        rows = ps_json(
-            "$( if (-not (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue)) {"
-            "     [PSCustomObject]@{ disponible = $false } } else {"
-            "     Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol |"
-            "       Select-Object @{n='disponible';e={$true}},State } )")
+        rows = elevacion.recoger()["smb1"]
         if not rows.ok:
             raise SinDato(f"no se ha podido consultar SMB1 ({rows.error})")
         if not rows:

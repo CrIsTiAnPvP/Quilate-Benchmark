@@ -13,6 +13,8 @@ import pathlib
 import unittest
 from contextlib import contextmanager
 
+from quilate.platform_utils import PSResult
+
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
 # Las mismas constantes que winreg, para no depender de tenerlo.
@@ -60,14 +62,33 @@ class _FakeWinreg:
     HKEY_LOCAL_MACHINE = HKLM
 
 
+def lote_elevado(bloques: dict | None) -> dict:
+    """El lote con permisos ya recogido, para los tests que lo necesitan.
+
+    Las claves que no se den salen como «no se pidieron permisos», que es lo que
+    contesta de verdad un proceso sin elevar. Así un test que solo habla del TPM
+    no tiene que saber nada del resto del lote, y ninguna comprobación se
+    encuentra un `KeyError` por una clave que nadie mencionó.
+    """
+    from quilate.elevacion import NO_PEDIDOS, _CONSULTAS_ELEVADAS
+    lote = {clave: PSResult((), ok=False, error=NO_PEDIDOS)
+            for clave in _CONSULTAS_ELEVADAS}
+    for clave, valor in (bloques or {}).items():
+        lote[clave] = valor if isinstance(valor, PSResult) else PSResult(valor)
+    return lote
+
+
 @contextmanager
-def patched(module, registry: FakeRegistry | None = None, wmi=None, **overrides):
+def patched(module, registry: FakeRegistry | None = None, wmi=None, elevado=None,
+            **overrides):
     """Sustituye el acceso al sistema dentro de un módulo y lo restaura al salir.
 
     `wmi` reemplaza a `ps_json`; puede ser una lista (misma respuesta siempre) o
-    un invocable que reciba la consulta. `overrides` sustituye cualquier otro
-    nombre del módulo: `patched(audit, boot_performance=lambda: {...})`.
+    un invocable que reciba la consulta. `elevado` es lo que habría devuelto el
+    proceso con permisos, por clave del lote. `overrides` sustituye cualquier
+    otro nombre del módulo: `patched(audit, boot_performance=lambda: {...})`.
     """
+    from quilate import elevacion
     nombres = ("reg_read", "reg_list_values", "reg_key_readable", "ps_json",
                "winreg", "IS_WINDOWS")
     original = {name: getattr(module, name, None)
@@ -81,10 +102,15 @@ def patched(module, registry: FakeRegistry | None = None, wmi=None, **overrides)
             module.ps_json = wmi if callable(wmi) else (lambda *a, **k: wmi)
         for name, value in overrides.items():
             setattr(module, name, value if callable(value) else (lambda *a, **k: value))
+        # Siempre, aunque no se pida: sin esto, una comprobación que ahora lee
+        # del lote elevado se pondría a hablar con Windows de verdad en mitad de
+        # la suite, y en un equipo elevado hasta a lanzar PowerShell.
+        elevacion._recogido = lote_elevado(elevado)
         module.winreg = _FakeWinreg
         module.IS_WINDOWS = True
         yield
     finally:
+        elevacion.olvidar()
         for name, value in original.items():
             if value is None and not hasattr(module, name):
                 continue

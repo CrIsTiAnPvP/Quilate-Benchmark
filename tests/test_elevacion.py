@@ -130,10 +130,57 @@ class ElLoteQueSeEjecutaConPermisos(unittest.TestCase):
                 with self.subTest(consulta=clave, prohibido=prohibido):
                     self.assertNotIn(prohibido, consulta)
 
-    def test_todas_empiezan_por_una_lectura(self):
-        for clave, consulta in _CONSULTAS_ELEVADAS.items():
+    # Lo que cada consulta tiene permitido hacer con los permisos concedidos.
+    # No es una lista de comodidad: añadir una consulta al lote obliga a pasar
+    # por aquí, que es justo lo que se quiere. Nada se ejecuta con privilegios
+    # sin que alguien lo haya escrito dos veces.
+    LECTURAS = {
+        "reliability": "Get-PhysicalDisk",
+        "smart": "Get-CimInstance",
+        "bitlocker": "Get-BitLockerVolume",
+        "secureboot": "Confirm-SecureBootUEFI",
+        "tpm": "Get-Tpm",
+        "smb1": "Get-WindowsOptionalFeature",
+        "arranque": "Get-WinEvent",
+        "fsdirty": "dirty query",
+    }
+
+    def test_cada_consulta_hace_lo_que_dice_y_nada_mas(self):
+        self.assertEqual(set(self.LECTURAS), set(_CONSULTAS_ELEVADAS),
+                         "hay una consulta elevada que nadie ha revisado")
+        for clave, lectura in self.LECTURAS.items():
             with self.subTest(consulta=clave):
-                self.assertTrue(consulta.startswith("Get-"), consulta[:40])
+                self.assertIn(lectura, _CONSULTAS_ELEVADAS[clave])
+
+    def test_fsutil_solo_pregunta(self):
+        # Es el único que no es PowerShell, y el mismo binario con `dirty set`
+        # marcaría el volumen a mano y programaría un chkdsk en el siguiente
+        # arranque. Aquí solo se le pregunta.
+        for clave, consulta in _CONSULTAS_ELEVADAS.items():
+            if "fsutil" not in consulta:
+                continue
+            with self.subTest(consulta=clave):
+                self.assertIn("dirty query", consulta)
+                self.assertNotIn("dirty set", consulta)
+
+    def test_el_entorno_no_elige_que_se_ejecuta(self):
+        """Lo que corre elevado no puede salir de una variable de entorno.
+
+        El proceso hijo hereda el entorno del padre, que no está elevado. Si la
+        ruta de un binario saliera de ahí, quien pudiera cambiar `SystemRoot`
+        elegiría qué se ejecuta como administrador. Por eso las rutas salen de
+        `[Environment]::SystemDirectory`, que lo pregunta al sistema.
+
+        La única variable que se lee es `firmware_type`, y solo decide si la
+        pregunta del arranque seguro procede o no: manipularla daría un informe
+        equivocado, no privilegios.
+        """
+        for clave, consulta in _CONSULTAS_ELEVADAS.items():
+            for variable in ("$env:SystemRoot", "$env:Path", "$env:TEMP",
+                             "$env:LOCALAPPDATA", "$env:SystemDrive",
+                             "$env:USERPROFILE", "$env:ComSpec"):
+                with self.subTest(consulta=clave, variable=variable):
+                    self.assertNotIn(variable, consulta)
 
 
 class RecogerUnaSolaVez(unittest.TestCase):

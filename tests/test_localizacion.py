@@ -10,7 +10,7 @@ localizado deja de encontrarlo y empieza a informar de problemas inexistentes.
 import unittest
 
 from quilate import audit
-from quilate.platform_utils import CmdResult
+from quilate.platform_utils import CmdResult, PSResult
 from tests.support import FixtureCase, patched
 
 # Bytes reales de `powercfg /getactivescheme` en un Windows 11 en español.
@@ -36,8 +36,12 @@ class Decodificacion(unittest.TestCase):
 class VolumenSucio(FixtureCase):
     """Un falso positivo aquí manda al usuario a un chkdsk /r de horas."""
 
-    def _auditar(self, salida):
-        with patched(audit, run_cmd=lambda *a, **k: CmdResult(salida)):
+    def _auditar(self, salida, codigo=0):
+        # `fsutil` lo ejecuta ahora el proceso con permisos y su salida llega
+        # dentro del lote, pero lo que se prueba aquí es lo mismo: qué se
+        # concluye de un texto que viene traducido al idioma del sistema.
+        with patched(audit, elevado={"fsdirty": [{"unidad": "C:", "salida": salida,
+                                                  "codigo": codigo}]}):
             a = self.auditor()
             return a, a.check_filesystem_health()
 
@@ -63,27 +67,31 @@ class VolumenSucio(FixtureCase):
         self.assertEqual(a.findings, [])
 
     def test_respuesta_irreconocible(self):
-        with patched(audit, run_cmd=lambda *a, **k: CmdResult("respuesta inesperada del sistema")):
-            a = self.auditor()
-            with self.assertRaises(audit.SinDato):
-                a.check_filesystem_health()
+        a = self.auditor()
+        with self.assertRaises(audit.SinDato):
+            a, _ = self._auditar("respuesta inesperada del sistema")
         self.assertEqual(a.findings, [])
 
     def test_sin_salida_no_hay_hallazgo(self):
         # Responder sin decir nada no es «limpio»: es que no se ha podido mirar.
-        with patched(audit, run_cmd=lambda *a, **k: CmdResult("")):
-            a = self.auditor()
-            with self.assertRaises(audit.SinDato):
-                a.check_filesystem_health()
+        a = self.auditor()
+        with self.assertRaises(audit.SinDato):
+            a, _ = self._auditar("")
         self.assertEqual(a.findings, [])
 
+    def test_el_codigo_de_error_no_pasa_por_limpio(self):
+        # `fsutil dirty query` sale con código distinto de cero cuando no puede
+        # mirar. Su salida en ese caso puede ser cualquier cosa, incluso una que
+        # contenga la palabra que se busca: manda el código.
+        with self.assertRaises(audit.SinDato) as caso:
+            self._auditar("El volumen - C: no está sucio", codigo=1)
+        self.assertIn("código 1", str(caso.exception))
+
     def test_el_motivo_del_fallo_llega_al_informe(self):
-        # Sin privilegios `fsutil dirty query` sale con código de error. Antes
-        # eso era «no ha respondido» a secas, indistinguible de un Windows sin
-        # fsutil; el usuario merece saber cuál de los dos le ha pasado.
-        fallo = CmdResult(ok=False, error="fsutil.exe ha terminado con código 1: "
-                                          "Acceso denegado")
-        with patched(audit, run_cmd=lambda *a, **k: fallo):
+        # Que no se haya podido preguntar tiene que llegar al informe con su
+        # motivo, no como un «no ha respondido» a secas.
+        with patched(audit, elevado={"fsdirty": PSResult(
+                (), ok=False, error="Acceso denegado")}):
             a = self.auditor()
             with self.assertRaises(audit.SinDato) as caso:
                 a.check_filesystem_health()

@@ -12,6 +12,7 @@ privilegios de administrador.
 import unittest
 
 from quilate import audit
+from quilate.platform_utils import PSResult
 from quilate.sysinfo import SystemInfo
 from tests.support import FixtureCase, patched
 
@@ -35,31 +36,41 @@ def informe(boots, delays=()):
 
 
 class SinPrivilegios(FixtureCase):
-    def test_no_se_confunde_con_arranque_limpio(self):
+    def test_sin_permisos_no_se_confunde_con_arranque_limpio(self):
         # PowerShell devuelve «no se encontraron eventos» cuando en realidad es
         # que la ACL del log no deja leerlo. Decir «0 s» sería mentir.
-        si = SystemInfo()
-        si.is_admin = False
-        fallo = {"error": "No se encontraron eventos que coincidan...",
-                 "boots": [], "delays": []}
-        with patched(audit, boot_performance=lambda *a, **k: fallo):
-            a = self.auditor(si)
+        #
+        # Ya no se mira `si.is_admin`: el proceso no se eleva nunca, así que eso
+        # diría «no» aunque el lote con permisos hubiera contestado. Lo que
+        # decide es si el dato está.
+        with patched(audit, elevado={"arranque": PSResult(
+                (), ok=False, error="no se pidieron permisos de administrador")}):
+            a = self.auditor(SystemInfo())
             with self.assertRaises(audit.SinDato) as ctx:
                 a.check_boot_time()
-        self.assertIn("administrador", str(ctx.exception))
+        self.assertIn("permisos", str(ctx.exception))
         self.assertEqual(a.findings, [])
         self.assertEqual(a.boot_seconds, None)
 
-    def test_con_privilegios_se_reporta_el_error_real(self):
-        si = SystemInfo()
-        si.is_admin = True
+    def test_estando_elevado_se_reporta_el_error_real(self):
         with patched(audit, boot_performance=lambda *a, **k: {
                 "error": "el log está deshabilitado", "boots": [], "delays": []}):
-            a = self.auditor(si)
+            a = self.auditor(SystemInfo())
             with self.assertRaises(audit.SinDato) as ctx:
                 a.check_boot_time()
         self.assertIn("el log está deshabilitado", str(ctx.exception))
         self.assertEqual(a.findings, [])
+
+    def test_un_log_vacio_tampoco_es_un_arranque_de_cero_segundos(self):
+        # `Get-WinEvent` lanza excepción cuando no encuentra eventos, así que un
+        # log vacío llega como bloque fallido. Da igual el motivo: sin arranques
+        # medidos no hay veredicto.
+        with patched(audit, elevado={"arranque": PSResult(
+                (), ok=False, error="No se encontraron eventos que coincidan")}):
+            a = self.auditor(SystemInfo())
+            with self.assertRaises(audit.SinDato):
+                a.check_boot_time()
+        self.assertEqual(a.boot_seconds, None)
 
 
 class Umbrales(FixtureCase):
