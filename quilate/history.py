@@ -183,7 +183,12 @@ def load(path: Path | None = None) -> list[dict]:
             dato = json.loads(linea)
         except json.JSONDecodeError:
             continue
-        if isinstance(dato, dict) and dato.get("at"):
+        # El tipo, no solo la presencia: la ordenación de abajo compara los `at`
+        # entre sí, y un `at` numérico —de una línea editada a mano, que es un
+        # uso previsto de este fichero— dejaba `--history` inservible para
+        # siempre con un TypeError, justo lo contrario de lo que promete el
+        # docstring de esta función.
+        if isinstance(dato, dict) and isinstance(dato.get("at"), str):
             entradas.append(dato)
     entradas.sort(key=lambda e: e["at"])
     return entradas

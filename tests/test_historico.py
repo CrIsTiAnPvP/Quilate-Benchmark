@@ -87,6 +87,15 @@ class FicheroDelHistorico(unittest.TestCase):
         append(ejecucion(overall=95.0), self.ruta)
         self.assertEqual([e["overall"] for e in load(self.ruta)], [90.0, 95.0])
 
+    def test_una_fecha_que_no_es_texto_tampoco(self):
+        # El fichero es «un fichero de texto que el usuario puede leer, copiar o
+        # borrar»: editarlo a mano es un uso previsto, y un `at` numérico dejaba
+        # `--history` inservible para siempre con un TypeError al ordenar.
+        with self.ruta.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"at": 20260101, "overall": 50.0}) + "\n")
+        append(ejecucion(overall=95.0), self.ruta)
+        self.assertEqual([e["overall"] for e in load(self.ruta)], [95.0])
+
     def test_fichero_inexistente_no_es_un_error(self):
         self.assertEqual(load(Path(self.dir.name) / "no_existe.jsonl"), [])
 
