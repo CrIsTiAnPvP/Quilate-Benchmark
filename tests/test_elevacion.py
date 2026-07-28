@@ -369,12 +369,16 @@ class ElCanalDeVerdad(unittest.TestCase):
         self.assertTrue(res["vacia"].ok)
         self.assertEqual(len(res["vacia"]), 0)
 
-    def test_una_denegada_lo_dice(self):
-        # Sin elevar, esta es exactamente la que va a fallar en un equipo real.
-        res = self._consultar({
-            "smart": "Get-CimInstance -Namespace root\\wmi "
-                     "-ClassName MSStorageDriver_FailurePredictData"})
-        self.assertFalse(res["smart"].ok)
+    # Aquí había un test que consultaba el blob SMART sin elevar y exigía que
+    # fallara con «Acceso denegado», que es lo que hace en un equipo recién
+    # arrancado. Se ha quitado porque no era un test: era una afirmación sobre
+    # el estado de la máquina. Comprobado ejecutándolo, después de que un
+    # proceso elevado lea esa clase una vez, el mismo `Get-CimInstance` empieza
+    # a contestar sin permisos, y el test pasaba o fallaba según lo que se
+    # hubiera ejecutado antes en ese Windows. Que una consulta denegada se
+    # cuente como denegada ya lo prueban `CuandoNoHayPermisos` y
+    # `test_una_consulta_rota_no_se_lleva_a_las_demas`, que no dependen de nada
+    # de fuera.
 
     def test_un_hijo_que_no_contesta_no_deja_esperando(self):
         # Con una tubería bloqueante, un UAC rechazado o un PowerShell que muere
