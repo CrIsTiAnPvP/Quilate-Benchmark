@@ -84,18 +84,27 @@ class GranularidadPorConsulta(unittest.TestCase):
         finally:
             sysinfo._ps_raw = original
 
-    def test_estan_las_once_claves(self):
+    def test_estan_las_nueve_claves(self):
         inventario = self._inventario(respuesta())
         self.assertEqual(set(inventario), set(_CONSULTAS_INVENTARIO))
-        self.assertEqual(len(inventario), 11)
+        self.assertEqual(len(inventario), 9)
+
+    def test_aqui_no_queda_ninguna_que_pida_permisos(self):
+        # Las dos que los necesitan se fueron al lote elevado. Volver a meter
+        # una aquí no daría error: devolvería «Acceso denegado» en silencio.
+        for consulta in _CONSULTAS_INVENTARIO.values():
+            with self.subTest(consulta=consulta[:40]):
+                self.assertNotIn("StorageReliabilityCounter", consulta)
+                self.assertNotIn("root\\wmi", consulta)
 
     def test_el_que_falla_no_arrastra_a_los_demas(self):
-        # El caso real: `Get-StorageReliabilityCounter` necesita administrador.
+        # El caso real: `Get-Partition` en un equipo con un volumen que el
+        # servicio de disco virtual no sabe describir.
         inventario = self._inventario(respuesta(
-            reliability={"ok": False, "error": "Acceso denegado"},
+            partitions={"ok": False, "error": "El servicio no responde"},
             bios={"ok": True, "filas": [{"ReleaseDate": "/Date(0)/"}]}))
-        self.assertFalse(inventario["reliability"].ok)
-        self.assertEqual(inventario["reliability"].error, "Acceso denegado")
+        self.assertFalse(inventario["partitions"].ok)
+        self.assertEqual(inventario["partitions"].error, "El servicio no responde")
         self.assertTrue(inventario["bios"].ok)
         self.assertEqual(len(inventario["bios"]), 1)
 

@@ -12,6 +12,7 @@ from typing import Any
 
 import psutil
 
+from . import elevacion
 from .const import IS_LINUX, IS_WINDOWS
 from .platform_utils import (PSResult, _bloque, _ps_raw, guion_de_bloques, is_admin,
                              reg_read, trocear, winreg)
@@ -108,7 +109,8 @@ def collect_system_info() -> SystemInfo:
     return si
 
 
-# Las once consultas del inventario, en un solo PowerShell.
+# Las nueve consultas del inventario que no necesitan permisos, en un solo
+# PowerShell.
 #
 # Cada `ps_json` levanta un powershell.exe entero, y arrancar PowerShell 5.1
 # cuesta entre 200 y 500 ms ANTES de ejecutar nada. Diez de ellas eran, con
@@ -142,25 +144,15 @@ _CONSULTAS_INVENTARIO = {
                   "Select-Object DriveLetter,DiskNumber",
     "physical": "Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,"
                 "BusType,Size,HealthStatus,SpindleSpeed",
-    # La única que necesita administrador. Va aquí igual: si falla, lo dice en
-    # su propio `error` y las otras nueve siguen valiendo.
-    "reliability": "Get-PhysicalDisk | ForEach-Object { $d = $_; "
-                   "$c = $d | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue; "
-                   "if ($c) { [PSCustomObject]@{ DeviceId = $d.DeviceId; Wear = $c.Wear; "
-                   "Temperature = $c.Temperature; PowerOnHours = $c.PowerOnHours; "
-                   "ReadErrorsUncorrected = $c.ReadErrorsUncorrected; "
-                   "WriteErrorsUncorrected = $c.WriteErrorsUncorrected } } }",
-    # El blob SMART crudo. También necesita administrador, y además solo lo
-    # publican los discos ATA/SATA: el driver NVMe no expone esta clase y los
-    # puentes USB no dejan pasar el comando. Que falte no es un fallo.
-    "smart": "Get-CimInstance -Namespace root\\wmi "
-             "-ClassName MSStorageDriver_FailurePredictData | "
-             "Select-Object InstanceName,VendorSpecific",
 }
+# Las dos que necesitan administrador —`reliability` y `smart`— no están aquí:
+# viven en `elevacion._CONSULTAS_ELEVADAS` y llegan por su propio canal. Este
+# proceso no se eleva, así que preguntarlas aquí solo devolvería «Acceso
+# denegado» once veces de cada doce.
 
 
 def _inventario_windows(timeout: int = 70) -> dict[str, PSResult]:
-    """Las once consultas del inventario en un único proceso de PowerShell.
+    """Las consultas sin privilegios del inventario, en un solo PowerShell.
 
     Devuelve un `PSResult` por clave, con el mismo significado que si cada una
     se hubiera lanzado por separado. Si el proceso entero falla —PowerShell
@@ -176,7 +168,11 @@ def _inventario_windows(timeout: int = 70) -> dict[str, PSResult]:
 
 
 def _collect_windows_info(si: SystemInfo) -> None:
+    # Lo que se puede leer sin permisos y lo que no llegan por caminos distintos
+    # y se juntan aquí. Cada clave conserva su propio `ok`, así que un lote
+    # elevado que no se llegó a pedir se distingue de uno que se pidió y falló.
     inventario = _inventario_windows()
+    inventario.update(elevacion.recoger())
     osinfo = inventario["os"]
     if osinfo:
         d = osinfo[0]

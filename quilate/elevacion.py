@@ -33,9 +33,80 @@ import time
 from typing import Any
 
 from .const import IS_WINDOWS
-from .platform_utils import PSResult, _sys_exe, guion_de_bloques, trocear
+from .platform_utils import (PSResult, _ps_raw, _sys_exe, guion_de_bloques, is_admin,
+                             trocear)
 
 SIN_PERMISOS = "no se han concedido permisos de administrador"
+NO_PEDIDOS = "no se pidieron permisos de administrador"
+
+# Todo lo que Quilate ejecuta con privilegios está aquí y en ningún otro sitio.
+# Tenerlo en una sola lista es la única forma de que alguien pueda leer de una
+# sentada qué hace este programa cuando le das permisos de administrador, que en
+# una herramienta que precisamente audita seguridad no es un detalle.
+#
+# Las once son de lectura: ninguna cambia nada del sistema.
+_CONSULTAS_ELEVADAS: dict[str, str] = {
+    # --- para el inventario (sysinfo._map_storage) ---
+    "reliability": "Get-PhysicalDisk | ForEach-Object { $d = $_; "
+                   "$c = $d | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue; "
+                   "if ($c) { [PSCustomObject]@{ DeviceId = $d.DeviceId; Wear = $c.Wear; "
+                   "Temperature = $c.Temperature; PowerOnHours = $c.PowerOnHours; "
+                   "ReadErrorsUncorrected = $c.ReadErrorsUncorrected; "
+                   "WriteErrorsUncorrected = $c.WriteErrorsUncorrected } } }",
+    # Solo lo publican los ATA/SATA: el driver NVMe no expone esta clase y los
+    # puentes USB no dejan pasar el comando. Que falte no es un fallo.
+    "smart": "Get-CimInstance -Namespace root\\wmi "
+             "-ClassName MSStorageDriver_FailurePredictData | "
+             "Select-Object InstanceName,VendorSpecific",
+}
+
+_recogido: dict[str, PSResult] | None = None
+_pedir = False
+
+
+def permitir_uac(activo: bool = True) -> None:
+    """Autoriza a enseñar el aviso de UAC.
+
+    Está apagado por defecto a propósito: importar Quilate como biblioteca, o
+    correr sus tests, no puede sacarle a nadie un diálogo de Windows por
+    sorpresa. Solo la interfaz de órdenes lo enciende, y solo cuando hay alguien
+    delante que pueda contestar.
+    """
+    global _pedir
+    _pedir = activo
+
+
+def olvidar() -> None:
+    """Tira lo recogido. Existe para los tests, que necesitan empezar limpios."""
+    global _recogido
+    _recogido = None
+
+
+def recoger() -> dict[str, PSResult]:
+    """El lote entero, preguntado una sola vez por ejecución.
+
+    Una sola vez porque cada llamada sería otro aviso de UAC, y encadenar tres
+    diálogos para una auditoría es la forma más rápida de enseñarle a alguien a
+    darle a «Sí» sin leer.
+    """
+    global _recogido
+    if _recogido is not None:
+        return _recogido
+    if not _CONSULTAS_ELEVADAS or not IS_WINDOWS:
+        _recogido = trocear(None, _CONSULTAS_ELEVADAS, "solo Windows")
+    elif is_admin():
+        # Ya estamos elevados: montar un proceso aparte y un aviso para leer lo
+        # que este mismo puede leer no tendría ningún sentido.
+        datos, error = _ps_raw(
+            guion_de_bloques(_CONSULTAS_ELEVADAS)
+            + "$r | ConvertTo-Json -Depth 8 -Compress", timeout=60)
+        _recogido = trocear(datos, _CONSULTAS_ELEVADAS,
+                            error or "el lote con permisos no ha devuelto nada legible")
+    elif _pedir:
+        _recogido = consulta_elevada(_CONSULTAS_ELEVADAS)
+    else:
+        _recogido = trocear(None, _CONSULTAS_ELEVADAS, NO_PEDIDOS)
+    return _recogido
 
 if IS_WINDOWS:
     from ctypes import wintypes

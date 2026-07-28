@@ -21,7 +21,8 @@ import unittest
 
 from quilate import elevacion
 from quilate.const import IS_WINDOWS
-from quilate.elevacion import SIN_PERMISOS, _guion, _nombre_de_tuberia, consulta_elevada
+from quilate.elevacion import (NO_PEDIDOS, SIN_PERMISOS, _CONSULTAS_ELEVADAS, _guion,
+                               _nombre_de_tuberia, consulta_elevada)
 from quilate.platform_utils import _sys_exe
 
 CONSULTAS = {"os": "Get-CimInstance Win32_OperatingSystem | Select-Object Caption"}
@@ -113,6 +114,81 @@ class CuandoNoHayPermisos(unittest.TestCase):
         finally:
             elevacion._lanzar_elevado = original
         self.assertEqual(llamadas, [])
+
+
+class ElLoteQueSeEjecutaConPermisos(unittest.TestCase):
+    """Lo que Quilate hace cuando le das permisos, en una sola lista legible."""
+
+    def test_ninguna_consulta_cambia_nada(self):
+        # Es la promesa que hace el README: todo lo que se ejecuta elevado es de
+        # lectura. Aquí deja de ser una promesa.
+        prohibidos = ("Set-", "Remove-", "New-Item", "Stop-", "Start-", "Disable-",
+                      "Enable-", "Clear-", "Restart-", "Invoke-", "Add-", "Format-",
+                      "Out-File", "reg ", "cmd ", "&{")
+        for clave, consulta in _CONSULTAS_ELEVADAS.items():
+            for prohibido in prohibidos:
+                with self.subTest(consulta=clave, prohibido=prohibido):
+                    self.assertNotIn(prohibido, consulta)
+
+    def test_todas_empiezan_por_una_lectura(self):
+        for clave, consulta in _CONSULTAS_ELEVADAS.items():
+            with self.subTest(consulta=clave):
+                self.assertTrue(consulta.startswith("Get-"), consulta[:40])
+
+
+class RecogerUnaSolaVez(unittest.TestCase):
+    def setUp(self):
+        elevacion.olvidar()
+        self.pedir = elevacion._pedir
+        self.lanzar = elevacion._lanzar_elevado
+        self.admin = elevacion.is_admin
+        elevacion.is_admin = lambda: False
+
+    def tearDown(self):
+        elevacion.olvidar()
+        elevacion._pedir = self.pedir
+        elevacion._lanzar_elevado = self.lanzar
+        elevacion.is_admin = self.admin
+
+    def test_sin_permiso_para_preguntar_no_se_pregunta(self):
+        # Importar Quilate como biblioteca, o correr sus tests, no puede
+        # sacarle a nadie un diálogo de Windows por sorpresa.
+        llamadas = []
+        elevacion._lanzar_elevado = lambda *a: llamadas.append(a) or True
+        elevacion.permitir_uac(False)
+        lote = elevacion.recoger()
+        self.assertEqual(llamadas, [])
+        self.assertEqual(set(lote), set(_CONSULTAS_ELEVADAS))
+        self.assertTrue(all(not v.ok for v in lote.values()))
+        self.assertTrue(all(v.error == NO_PEDIDOS for v in lote.values()))
+
+    def test_no_pedidos_y_denegados_no_son_lo_mismo(self):
+        # El informe tiene que poder distinguir «no te lo pedí» de «dijiste que
+        # no»: son dos frases distintas para quien lo lee.
+        self.assertNotEqual(NO_PEDIDOS, SIN_PERMISOS)
+
+    def test_solo_se_pide_una_vez(self):
+        # Cada llamada sería otro aviso de UAC, y encadenar diálogos es la forma
+        # más rápida de enseñarle a alguien a darle a «Sí» sin leer.
+        llamadas = []
+        elevacion._lanzar_elevado = lambda *a: llamadas.append(a) or False
+        elevacion.permitir_uac(True)
+        primero = elevacion.recoger()
+        segundo = elevacion.recoger()
+        self.assertEqual(len(llamadas), 1)
+        self.assertIs(primero, segundo)
+
+    @unittest.skipUnless(IS_WINDOWS, "el atajo de estar ya elevado es de Windows")
+    def test_estando_ya_elevado_no_se_monta_ningun_canal(self):
+        # Montar un proceso aparte y un aviso para leer lo que este mismo puede
+        # leer no tendría ningún sentido.
+        llamadas = []
+        elevacion.is_admin = lambda: True
+        elevacion._lanzar_elevado = lambda *a: llamadas.append(a) or True
+        elevacion.permitir_uac(True)
+        lote = elevacion.recoger()
+        self.assertEqual(llamadas, [])
+        self.assertEqual(set(lote), set(_CONSULTAS_ELEVADAS))
 
 
 @unittest.skipUnless(IS_WINDOWS, "la tubería con nombre es de Windows")
