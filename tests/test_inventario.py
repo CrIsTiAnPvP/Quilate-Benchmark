@@ -1,8 +1,9 @@
-"""Las diez consultas del inventario, fusionadas sin perder la honestidad.
+"""Las consultas del inventario, fusionadas sin perder la honestidad.
 
 Cada `ps_json` levantaba un powershell.exe entero, y arrancar PowerShell 5.1
 cuesta entre 200 y 500 ms antes de ejecutar nada. Diez de ellas eran el mayor
-coste fijo de la herramienta.
+coste fijo de la herramienta, y hoy son once: la del blob SMART entró aquí en
+vez de abrir su propio proceso.
 
 Lo que no se podía perder al meterlas en un solo proceso es la granularidad de
 `PSResult.ok`: hoy el informe distingue «esta consulta falló» de «se ejecutó y
@@ -83,10 +84,10 @@ class GranularidadPorConsulta(unittest.TestCase):
         finally:
             sysinfo._ps_raw = original
 
-    def test_estan_las_diez_claves(self):
+    def test_estan_las_once_claves(self):
         inventario = self._inventario(respuesta())
         self.assertEqual(set(inventario), set(_CONSULTAS_INVENTARIO))
-        self.assertEqual(len(inventario), 10)
+        self.assertEqual(len(inventario), 11)
 
     def test_el_que_falla_no_arrastra_a_los_demas(self):
         # El caso real: `Get-StorageReliabilityCounter` necesita administrador.

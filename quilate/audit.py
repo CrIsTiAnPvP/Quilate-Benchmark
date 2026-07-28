@@ -1988,16 +1988,29 @@ class Auditor:
         que deja de funcionar. Sin privilegios estos contadores no se leen, y
         entonces no se afirma nada: ausencia de dato no es ausencia de problema.
         """
-        gastados, con_errores, calientes = [], [], []
+        gastados, con_errores, calientes, con_sectores = [], [], [], []
         medidos = 0
         for disk in self.si.physical_disks:
             nombre = str(disk.get("name") or "disco")
             desgaste = disk.get("wear")
             errores = (disk.get("read_errors") or 0) + (disk.get("write_errors") or 0)
             grados = disk.get("temperature")
-            if desgaste is None and grados is None and disk.get("power_on_hours") is None:
+            # Los sectores solo los publican los ATA/SATA, así que un NVMe llega
+            # con desgaste y sin ellos, y un HDD al revés si el contador de
+            # fiabilidad no contestó. Cualquiera de los dos cuenta como medido.
+            sectores = {campo: disk.get(campo)
+                        for campo in ("reallocated", "pending", "uncorrectable")
+                        if disk.get(campo) is not None}
+            if (desgaste is None and grados is None and not sectores
+                    and disk.get("power_on_hours") is None):
                 continue
             medidos += 1
+            # Los pendientes son sectores que el disco ya no consigue leer y aún
+            # no ha sustituido: son los que más avisan y los que peor van a más.
+            if sectores.get("pending") or sectores.get("uncorrectable"):
+                con_sectores.append((nombre, sectores, True))
+            elif sectores.get("reallocated"):
+                con_sectores.append((nombre, sectores, False))
             # El desgaste es un contador de ciclos de escritura: en un disco
             # mecánico no significa nada, y los HDD lo devuelven igualmente a 0.
             es_ssd = "SSD" in str(disk.get("media") or "").upper()
@@ -2022,6 +2035,40 @@ class Auditor:
                 steps=["Copia de seguridad inmediata, antes de cualquier otra cosa",
                        "Comprueba los atributos completos con CrystalDiskInfo o smartctl",
                        "Sustituye el disco: los errores no corregidos no se arreglan"])
+
+        if con_sectores:
+            urgente = any(grave for _, _, grave in con_sectores)
+
+            def cuenta(datos: dict) -> str:
+                partes = []
+                if datos.get("pending"):
+                    partes.append(f"{datos['pending']} pendientes")
+                if datos.get("reallocated"):
+                    partes.append(f"{datos['reallocated']} reasignados")
+                if datos.get("uncorrectable"):
+                    partes.append(f"{datos['uncorrectable']} irrecuperables")
+                return ", ".join(partes)
+
+            lista = "; ".join(f"{n} ({cuenta(d)})" for n, d, _ in con_sectores)
+            self.add(
+                id="disk_sectores", title=f"Sectores defectuosos en el disco ({lista})",
+                severity="high" if urgente else "medium",
+                category="almacenamiento", component="disk",
+                detail="Un sector reasignado es un trozo del disco que se estropeó y que el "
+                       "firmware sustituyó por uno de repuesto, sin que Windows se entere: el "
+                       "disco sigue diciendo «Healthy» y la reserva de repuestos es limitada. "
+                       "Los pendientes son peores, porque son sectores que ya no se leen y que "
+                       "todavía no se han sustituido: si ahí había un archivo, ese archivo ya "
+                       "no está entero. Es el aviso más temprano que da un disco mecánico, y "
+                       "llega meses antes de que falle nada visible.",
+                gain=0.0, gain_note="no es una optimización: es un disco empezando a fallar",
+                effort="medio", risk="alto" if urgente else "medio",
+                steps=["Copia de seguridad de lo que haya ahí, hoy y no la semana que viene",
+                       "Vigila la cuenta con CrystalDiskInfo: lo que importa no es el número, "
+                       "es si sube. Estable durante meses puede convivir; subiendo, no",
+                       "`chkdsk /r` obliga al disco a releerlo todo y a sustituir lo que no "
+                       "pueda leer: tarda horas y conviene hacerlo con la copia ya hecha",
+                       "Si la cuenta sube, sustituye el disco antes de que se lleve algo"])
 
         if gastados:
             peor = max(gastados, key=lambda x: x[1])
