@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .const import APP_VERSION, IS_WINDOWS
+from .platform_utils import is_admin
 
 # Ejecuciones mínimas para que hablar de tendencia signifique algo. Con dos
 # puntos siempre se puede trazar una recta, y no dice nada. Son seis y no cuatro
@@ -58,14 +59,40 @@ MENOS_ES_MEJOR = {"boot_seconds", "cpu_temp"}
 DERIVA_MINIMA_PCT = 8.0
 
 
+def _base_valida(base: Path) -> bool:
+    """Si se puede escribir el histórico colgando de esa carpeta.
+
+    La base sale de una variable de entorno, y el proceso que eleva por UAC
+    hereda el entorno del que no estaba elevado. Quien pueda cambiar
+    `LOCALAPPDATA` —una tarea programada del propio usuario, un `.bat` previo, un
+    `setx`— conseguiría que Quilate creara árboles de directorios y añadiera
+    líneas a un fichero **como Administrador** donde le apeteciera. No hay
+    traversal clásico, porque al nombre no se le concatena nada del usuario: solo
+    se sustituye la base. Pero crear carpetas en zonas protegidas ya es de más.
+
+    Con privilegios se exige además que caiga dentro del perfil: es lo único que
+    garantiza que el histórico no acabe en un sitio donde el usuario no podría
+    haberlo puesto por sí mismo.
+    """
+    if not base.is_absolute() or not base.is_dir():
+        return False
+    if is_admin():
+        try:
+            base.resolve().relative_to(Path.home().resolve())
+        except (ValueError, OSError):
+            return False
+    return True
+
+
 def history_path() -> Path:
     """Fichero del histórico, en el sitio que cada sistema reserva para datos
-    de aplicación."""
+    de aplicación. Si ese sitio no es de fiar, el perfil del usuario."""
     if IS_WINDOWS:
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+        base, respaldo = Path(os.environ.get("LOCALAPPDATA") or ""), Path.home()
     else:
-        base = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
-    return base / "Quilate" / "historico.jsonl"
+        base = Path(os.environ.get("XDG_DATA_HOME") or "")
+        respaldo = Path.home() / ".local" / "share"
+    return (base if _base_valida(base) else respaldo) / "Quilate" / "historico.jsonl"
 
 
 def _resumen(payload: dict) -> dict[str, Any]:

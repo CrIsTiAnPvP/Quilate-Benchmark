@@ -10,6 +10,7 @@ medidas cualesquiera.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,8 +18,9 @@ from pathlib import Path
 from quilate.benchmark import (REFERENCE, REFERENCE_DATE, REFERENCE_ORIGIN,
                                REFERENCE_STALE_MONTHS, reference_age_months,
                                reference_is_stale)
+from quilate import history
 from quilate.history import (DERIVA_MINIMA_PCT, MAX_ENTRADAS, MINIMO_PARA_TENDENCIA,
-                             _resumen, append, deriva, load, report, serie)
+                             _resumen, append, deriva, history_path, load, report, serie)
 from datetime import date
 
 
@@ -100,6 +102,77 @@ class FicheroDelHistorico(unittest.TestCase):
         # El análisis ya está hecho: que el histórico falle no puede perderlo.
         imposible = Path(self.dir.name) / "no" / "existe" / "\0" / "h.jsonl"
         self.assertIsNone(append(ejecucion(), imposible))
+
+
+class UbicacionDelFichero(unittest.TestCase):
+    """La base sale del entorno, y el proceso elevado hereda el del que no lo está."""
+
+    VARIABLE = "LOCALAPPDATA" if history.IS_WINDOWS else "XDG_DATA_HOME"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.entorno = dict(os.environ)
+        self.admin_original = history.is_admin
+        history.is_admin = lambda: False
+        # Donde tiene que acabar el fichero cuando la base no es de fiar.
+        raiz = Path.home() if history.IS_WINDOWS else Path.home() / ".local" / "share"
+        self.respaldo = raiz / "Quilate" / "historico.jsonl"
+
+    def tearDown(self):
+        history.is_admin = self.admin_original
+        os.environ.clear()
+        os.environ.update(self.entorno)
+        self.dir.cleanup()
+
+    def _con(self, valor: str | None) -> Path:
+        if valor is None:
+            os.environ.pop(self.VARIABLE, None)
+        else:
+            os.environ[self.VARIABLE] = valor
+        return history_path()
+
+    def test_una_base_normal_se_respeta(self):
+        self.assertEqual(self._con(self.dir.name),
+                         Path(self.dir.name) / "Quilate" / "historico.jsonl")
+
+    def test_una_base_relativa_no_vale(self):
+        # Relativa quiere decir «donde el proceso esté trabajando ahora».
+        self.assertEqual(self._con(os.path.join("datos", "quilate")), self.respaldo)
+
+    def test_una_base_que_no_existe_no_vale(self):
+        self.assertEqual(self._con(str(Path(self.dir.name) / "no" / "existe")),
+                         self.respaldo)
+
+    def test_una_base_vacia_no_vale(self):
+        self.assertEqual(self._con(""), self.respaldo)
+
+    def test_sin_la_variable_se_usa_el_perfil(self):
+        self.assertEqual(self._con(None), self.respaldo)
+
+    def test_con_privilegios_solo_se_escribe_dentro_del_perfil(self):
+        # Escribir como Administrador donde diga una variable de entorno que el
+        # usuario controla es cómo se crean directorios en zonas protegidas.
+        # La raíz del volumen existe y es absoluta —pasa las dos primeras
+        # comprobaciones— pero no cuelga del perfil de nadie.
+        history.is_admin = lambda: True
+        self.assertEqual(self._con(Path.home().anchor), self.respaldo)
+
+    def test_sin_privilegios_esa_misma_base_se_acepta(self):
+        # La restricción extra es por la elevación, no por desconfiar del
+        # usuario: sin privilegios no puede escribir donde no le dejen igualmente.
+        raiz = Path.home().anchor
+        self.assertEqual(self._con(raiz), Path(raiz) / "Quilate" / "historico.jsonl")
+
+    def test_con_privilegios_una_base_del_perfil_sigue_valiendo(self):
+        # La comprobación es «dentro del perfil», no «solo el perfil»: en un
+        # equipo normal LOCALAPPDATA es una subcarpeta y tiene que seguir yendo ahí.
+        try:
+            Path(self.dir.name).resolve().relative_to(Path.home().resolve())
+        except ValueError:
+            self.skipTest("el directorio temporal de este sistema no cuelga del perfil")
+        history.is_admin = lambda: True
+        self.assertEqual(self._con(self.dir.name),
+                         Path(self.dir.name) / "Quilate" / "historico.jsonl")
 
 
 class Deriva(unittest.TestCase):
