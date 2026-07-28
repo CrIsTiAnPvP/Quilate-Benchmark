@@ -103,6 +103,36 @@ def _estado_antivirus(state) -> tuple[bool, bool] | None:
     return _AV_MOTOR[motor], _AV_FIRMAS[firmas]
 
 
+# El «código de problema» del Administrador de dispositivos: el número que hay
+# detrás del signo de exclamación amarillo, que Windows enseña en una ventana que
+# nadie abre. `ConfigManagerErrorCode` lo expone tal cual, y estos son los que
+# significan que el dispositivo no está haciendo su trabajo.
+_PNP_PROBLEMA = {
+    1: "Windows no tiene su configuración",
+    3: "su driver está dañado, o falta memoria",
+    10: "no puede arrancar",
+    12: "no hay recursos libres suficientes para él",
+    14: "necesita que reinicies para terminar de configurarse",
+    18: "hay que reinstalar sus drivers",
+    19: "su configuración en el registro está dañada",
+    21: "Windows lo está quitando",
+    24: "no está presente, o no funciona bien",
+    28: "no tiene drivers instalados",
+    31: "Windows no puede cargar los drivers que necesita",
+    35: "la BIOS no le ha reservado recursos",
+    37: "su driver ha fallado al inicializarlo",
+    39: "su driver falta o está dañado",
+    43: "Windows lo ha parado porque el propio dispositivo avisó de un fallo",
+    48: "su software está bloqueado por incompatible",
+    52: "no se puede verificar la firma de su driver",
+}
+
+# Estos códigos también son distintos de cero y ninguno es una avería: los tres
+# primeros los provoca quien usa el equipo y el último es un estado de paso. Van
+# aparte para no acusar de estropeado a lo que alguien apagó a propósito.
+_PNP_DELIBERADO = frozenset({22, 32, 45, 47})
+
+
 def sev_label(severity: str) -> str:
     """Se resuelve en tiempo de ejecución: si los colores están desactivados
     (--no-color o salida redirigida) no se cuelan códigos ANSI en el informe."""
@@ -115,7 +145,7 @@ class Finding:
     id: str
     title: str
     severity: str
-    category: str            # arranque | fluidez | almacenamiento | térmico | memoria | cpu | seguridad
+    category: str            # arranque | fluidez | almacenamiento | térmico | memoria | cpu | dispositivos | seguridad
     component: str           # cpu_single | cpu_multi | memory | disk | system
     detail: str
     gain: float              # mejora estimada (fracción, 0.10 = 10%)
@@ -209,6 +239,7 @@ class Auditor:
                 ("Antivirus y solapamientos", self.check_antivirus),
                 ("Fragmentación / optimización", self.check_defrag),
                 ("Salud SMART de los discos", self.check_smart),
+                ("Dispositivos con problema", self.check_device_problems),
                 ("Antigüedad de la BIOS", self.check_bios_age),
                 ("Cifrado del disco (BitLocker)", self.check_disk_encryption),
                 ("Arranque seguro (Secure Boot)", self.check_secure_boot),
@@ -835,6 +866,70 @@ class Auditor:
                                           "gráfic", "graphics")):
                 return title
         return None
+
+    def check_device_problems(self) -> str:
+        """Los dispositivos con el signo de exclamación amarillo.
+
+        Se pregunta a `Win32_PnPEntity` filtrando en la propia consulta, y no a
+        `Get-PnpDevice -Status Error,Degraded` como parecería natural: verificado
+        ejecutándolo, ese cmdlet lanza excepción cuando NO hay ninguno («No
+        Win32_PnPEntity objects found with property 'Status' equal to 'Error'»).
+        Con él, un equipo sano y una consulta que falla llegan aquí iguales, y el
+        equipo sano acabaría contado como «Sin comprobar». El filtro WQL devuelve
+        lista vacía, que es la respuesta correcta y además cuesta 0,26 s.
+        """
+        rows = ps_json("Get-CimInstance Win32_PnPEntity "
+                       "-Filter 'ConfigManagerErrorCode <> 0' | "
+                       "Select-Object Name,PNPClass,ConfigManagerErrorCode")
+        if not rows.ok:
+            raise SinDato("no se ha podido consultar el estado de los dispositivos"
+                          f" ({rows.error})")
+
+        averiados: list[tuple[str, str]] = []
+        deliberados = 0
+        for row in rows:
+            codigo = row.get("ConfigManagerErrorCode")
+            # `isinstance(True, int)` es cierto en Python, y un booleano aquí
+            # significaría que la consulta devolvió otra cosa, no un código.
+            if isinstance(codigo, bool) or not isinstance(codigo, int) or codigo == 0:
+                continue
+            if codigo in _PNP_DELIBERADO:
+                deliberados += 1
+                continue
+            nombre = str(row.get("Name") or row.get("PNPClass") or "dispositivo sin nombre")
+            # Un código que no está en la tabla sigue siendo un problema: lo que
+            # no se sabe es cuál, y decir el número permite buscarlo.
+            averiados.append((nombre, _PNP_PROBLEMA.get(
+                codigo, f"Windows le ha asignado el código de problema {codigo}")))
+
+        cola = f", {deliberados} apagado(s) a propósito" if deliberados else ""
+        if not averiados:
+            return f"ninguno con problema{cola}"
+
+        # Con muchos dispositivos rotos la lista completa no cabe en un título ni
+        # ayuda: los primeros bastan para reconocer de qué se está hablando.
+        visibles = averiados[:4]
+        detalle = ". ".join(f"«{n}»: {m}" for n, m in visibles)
+        if len(averiados) > len(visibles):
+            detalle += f". Y {len(averiados) - len(visibles)} más"
+        titulo = (f"«{averiados[0][0]}» no está funcionando" if len(averiados) == 1
+                  else f"{len(averiados)} dispositivos no están funcionando")
+        self.add(
+            id="dispositivo_con_error", title=titulo,
+            severity="medium", category="dispositivos", component="system",
+            detail=f"{detalle}. Es el signo de exclamación amarillo del Administrador de "
+                   "dispositivos: hardware que está montado en el equipo y que Windows ha "
+                   "dado por imposible. No se nota como lentitud, se nota como algo que "
+                   "sencillamente no va —un lector de tarjetas, el Bluetooth, un puerto— y "
+                   "que casi nadie relaciona con un driver porque nadie abre esa ventana.",
+            gain=0.0, gain_note="no es una optimización: es hardware que no funciona",
+            effort="bajo", risk="bajo",
+            steps=["Abre el Administrador de dispositivos (`devmgmt.msc`) y busca el aviso amarillo",
+                   "Botón derecho → Actualizar controlador → Buscar automáticamente",
+                   "Si no lo encuentra, busca el modelo en la web del fabricante de la placa "
+                   "o del portátil: ahí están los drivers que Windows Update no trae",
+                   "Si el dispositivo ya no está conectado, botón derecho → Desinstalar"])
+        return f"{len(averiados)} con problema{cola}"
 
     def check_network_link(self) -> str:
         """Lo que el enlace está haciendo frente a lo que la tarjeta sabe hacer.
