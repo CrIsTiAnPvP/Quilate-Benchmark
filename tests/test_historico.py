@@ -113,6 +113,86 @@ class FicheroDelHistorico(unittest.TestCase):
         self.assertIsNone(append(ejecucion(), imposible))
 
 
+class PrivacidadDelHistorico(unittest.TestCase):
+    """El histórico se acumula para siempre: aquí no puede acabar nada personal.
+
+    `_resumen()` escribe solo cifras y fechas, y eso está bien hoy. Pero es la
+    clase de garantía que se rompe añadiendo un campo con buena intención: basta
+    con que alguien meta `hostname` para «poder distinguir los equipos» y lo que
+    era un fichero de números pasa a ser un registro de a quién pertenece.
+
+    El payload se construye con el `build_payload()` de verdad y no a mano, para
+    que un campo nuevo quede cubierto por este test el día que se añada, sin que
+    nadie tenga que acordarse de venir aquí.
+    """
+
+    def _payload(self) -> dict:
+        # El andamiaje de test_paridad planta cadenas testigo únicas en cada
+        # fuente de datos: si una aparece en el histórico, solo puede venir de
+        # donde se plantó.
+        from tests.test_paridad import T, _auditoria, _benchmark, _sistema
+        from quilate.export.json_export import build_payload
+        from quilate.projection import project_improvement
+        si, bench = _sistema(), _benchmark()
+        auditor = _auditoria(si, bench)
+        return T, build_payload(si, bench, auditor,
+                                project_improvement(bench, auditor.findings))
+
+    # Los testigos que identifican a alguien o dicen qué tiene instalado. Del
+    # resto —el motivo por el que no hay GPU, el título de un hallazgo— no va
+    # esta prueba: no son datos personales.
+    PERSONALES = ("host", "cpu", "proceso", "ambiente", "inicio", "adaptador", "fichero")
+
+    def test_ningun_testigo_llega_al_historico(self):
+        testigos, payload = self._payload()
+        with tempfile.TemporaryDirectory() as d:
+            ruta = Path(d) / "historico.jsonl"
+            self.assertIsNotNone(append(payload, ruta))
+            linea = ruta.read_text(encoding="utf-8")
+
+        completo = json.dumps(payload, default=str)
+        for etiqueta in self.PERSONALES:
+            valor = testigos[etiqueta]
+            # Que el payload lo trae de verdad: sin esto el test pasaría en
+            # verde aunque el andamiaje se hubiera quedado vacío.
+            self.assertIn(valor, completo,
+                          f"el testigo «{etiqueta}» no está ni en el payload: "
+                          f"este test no comprueba nada")
+            self.assertNotIn(valor, linea,
+                             f"se ha colado «{etiqueta}» ({valor}) en el histórico")
+
+    def test_no_se_escribe_ninguna_ruta(self):
+        _, payload = self._payload()
+        linea = json.dumps(_resumen(payload), ensure_ascii=False)
+        for pista in ("C:\\", "C:/", "\\Users", "/home/", ".exe", ".dmp"):
+            self.assertNotIn(pista, linea, f"parece una ruta: «{pista}»")
+
+    def test_solo_cifras_fechas_y_banderas(self):
+        # La garantía en su forma más fuerte: nada de lo que se escribe puede
+        # ser texto libre, salvo la fecha y la versión, que son las dos claves
+        # que el histórico necesita para ordenarse y para saber con qué se midió.
+        _, payload = self._payload()
+        entrada = _resumen(payload)
+        for clave, valor in entrada.items():
+            with self.subTest(clave=clave):
+                if clave in ("at", "version"):
+                    self.assertIsInstance(valor, str)
+                    continue
+                self.assertIsInstance(valor, (int, float, bool),
+                                      f"«{clave}» no es una cifra: {valor!r}")
+
+    def test_las_claves_estan_declaradas(self):
+        # Un campo nuevo tiene que pasar por aquí a propósito, no colarse.
+        _, payload = self._payload()
+        permitidas = {"at", "version", "overall", "findings", "quick",
+                      "cpu_single", "cpu_multi", "memory", "disk", "gpu",
+                      "boot_seconds", "cpu_temp", "max_spread_pct", "busy_pct"}
+        nuevas = set(_resumen(payload)) - permitidas
+        self.assertEqual(nuevas, set(),
+                         "hay claves nuevas en el histórico: compruébalas una a una "
+                         "y añádelas aquí si de verdad no llevan nada personal")
+
+
 class UbicacionDelFichero(unittest.TestCase):
     """La base sale del entorno, y el proceso elevado hereda el del que no lo está."""
 
