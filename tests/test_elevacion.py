@@ -16,10 +16,13 @@ distinción entre una consulta que falla y una que no devuelve nada.
 
 from __future__ import annotations
 
+import argparse
+import io
 import subprocess
 import unittest
+from contextlib import redirect_stdout
 
-from quilate import elevacion
+from quilate import cli, elevacion
 from quilate.const import IS_WINDOWS
 from quilate.elevacion import (NO_PEDIDOS, SIN_PERMISOS, _CONSULTAS_ELEVADAS, _guion,
                                _nombre_de_tuberia, consulta_elevada)
@@ -236,6 +239,82 @@ class RecogerUnaSolaVez(unittest.TestCase):
         lote = elevacion.recoger()
         self.assertEqual(llamadas, [])
         self.assertEqual(set(lote), set(_CONSULTAS_ELEVADAS))
+
+
+class CuandoSePideYCuandoNo(unittest.TestCase):
+    """El aviso de UAC ya no relanza nada: es la pregunta en sí.
+
+    Antes había que preguntar en la consola antes de sacarlo, porque aceptar
+    mandaba el análisis a una ventana nueva y esta se quedaba mirando. Ahora el
+    análisis ocurre aquí y lo único que se va es un proceso de dos segundos, así
+    que el propio diálogo de Windows es la pregunta y no hace falta otra.
+    """
+
+    def setUp(self):
+        elevacion.olvidar()
+        self.pedir, self.admin = elevacion._pedir, elevacion.is_admin
+        self.interactivo, self.lanzar = cli._interactive, elevacion._lanzar_elevado
+        elevacion.is_admin = cli.is_admin = lambda: False
+        elevacion.permitir_uac(False)
+        self.pedido = []
+        elevacion._lanzar_elevado = lambda *a: self.pedido.append(a) or False
+
+    def tearDown(self):
+        elevacion.olvidar()
+        elevacion._pedir, elevacion.is_admin = self.pedir, self.admin
+        cli.is_admin, cli._interactive = self.admin, self.interactivo
+        elevacion._lanzar_elevado = self.lanzar
+
+    def _correr(self, interactivo=True, no_elevate=False, elevate=False) -> str:
+        cli._interactive = lambda: interactivo
+        salida = io.StringIO()
+        with redirect_stdout(salida):
+            cli._pedir_permisos(argparse.Namespace(no_elevate=no_elevate,
+                                                   elevate=elevate))
+        return salida.getvalue()
+
+    def test_con_alguien_delante_se_pide(self):
+        texto = self._correr(interactivo=True)
+        self.assertEqual(len(self.pedido), 1)
+        self.assertIn("solo leyendo", texto)
+
+    def test_se_dice_para_que_antes_de_pedirlo(self):
+        # Pedir permisos sin decir para qué es lo que enseña a aceptar cualquier
+        # aviso sin leerlo.
+        texto = self._correr(interactivo=True)
+        self.assertIn("cifrado", texto)
+        self.assertIn("SMB1", texto)
+        self.assertIn("sin comprobar", texto)
+
+    def test_sin_nadie_delante_no_se_saca_el_dialogo(self):
+        # Un UAC en una tarea programada se queda parado hasta que alguien lo
+        # cierre, y mientras no avanza nada.
+        texto = self._correr(interactivo=False)
+        self.assertEqual(self.pedido, [])
+        self.assertIn("nadie delante", texto)
+
+    def test_pero_con_elevate_se_pide_igualmente(self):
+        self._correr(interactivo=False, elevate=True)
+        self.assertEqual(len(self.pedido), 1)
+
+    def test_no_elevate_no_pregunta_nada(self):
+        texto = self._correr(interactivo=True, no_elevate=True)
+        self.assertEqual(self.pedido, [])
+        self.assertIn("--no-elevate", texto)
+
+    def test_estando_ya_elevado_no_se_pregunta(self):
+        cli.is_admin = elevacion.is_admin = lambda: True
+        self.assertEqual(self._correr(interactivo=True), "")
+        self.assertEqual(self.pedido, [])
+
+    def test_decir_que_no_se_cuenta_y_se_sigue(self):
+        self.assertIn("se continúa sin ellos", self._correr(interactivo=True))
+
+    def test_ya_no_hay_pregunta_previa_en_la_consola(self):
+        # `_ask_elevate` existía porque aceptar el UAC abría otra ventana. Ese
+        # motivo ya no existe, y dejar dos preguntas seguidas sobraba.
+        self.assertFalse(hasattr(cli, "_ask_elevate"))
+        self.assertFalse(hasattr(cli, "_try_elevate"))
 
 
 @unittest.skipUnless(IS_WINDOWS, "la tubería con nombre es de Windows")

@@ -449,32 +449,16 @@ def is_admin() -> bool:
         return False
 
 
-def owns_console() -> bool:
-    """True si somos el unico proceso de esta consola: es decir, doble clic.
-
-    Windows no dice "me han abierto con doble clic", pero al hacerlo se crea una
-    consola nueva cuya lista de procesos solo nos contiene a nosotros; lanzado
-    desde cmd o PowerShell, el interprete tambien esta en la lista. Sirve para
-    distinguir cuando podemos relanzarnos en una ventana nueva sin robarle la
-    sesion a nadie.
-    """
-    if not IS_WINDOWS:
-        return False
-    try:
-        buf = (ctypes.c_uint * 8)()
-        n = ctypes.windll.kernel32.GetConsoleProcessList(buf, 8)
-        return n == 1
-    except Exception:
-        return False
-
-
 if IS_WINDOWS:
     from ctypes import wintypes
 
     class _ShellExecuteInfo(ctypes.Structure):
-        """SHELLEXECUTEINFOW. Se usa la variante "Ex" de ShellExecute porque es
-        la unica que devuelve el handle del proceso creado, y sin handle no se
-        puede esperar al hijo ni recoger su codigo de salida."""
+        """SHELLEXECUTEINFOW, que es como se pide una elevacion en Windows.
+
+        Lo usa `elevacion` para lanzar el proceso corto que lee lo que necesita
+        permisos. Se usa la variante "Ex" de ShellExecute porque es la unica que
+        devuelve el handle del proceso creado; que no admita `STARTUPINFO` es
+        justo el motivo de que el resultado tenga que volver por una tuberia."""
 
         _fields_ = [
             ("cbSize", wintypes.DWORD),
@@ -495,47 +479,6 @@ if IS_WINDOWS:
         ]
 
 
-SEE_MASK_NOCLOSEPROCESS = 0x00000040
 SEE_MASK_NOASYNC = 0x00000100
-ERROR_CANCELLED = 1223
 
 
-def relaunch_as_admin(extra_args: list[str] | None = None,
-                      wait: bool = False) -> int | None:
-    """Vuelve a lanzarse pidiendo elevacion por UAC.
-
-    Devuelve None si el proceso elevado no llego a arrancar —UAC rechazado o
-    politica del equipo—; en otro caso quien llama debe terminar, porque el
-    trabajo continua en la ventana nueva. Con `wait` espera a que el hijo acabe y
-    devuelve su codigo de salida, para que en una terminal el codigo de salida
-    siga significando algo; sin el, devuelve 0 en cuanto arranca.
-
-    No se puede elevar un proceso ya en marcha: hay que crear otro, y el unico
-    camino soportado es el verbo "runas". Se le pasa el directorio actual para
-    que los informes se generen donde el usuario espera y no en system32, que es
-    a donde va a parar un proceso elevado por defecto.
-    """
-    if not IS_WINDOWS:
-        return None
-    try:
-        info = _ShellExecuteInfo()
-        info.cbSize = ctypes.sizeof(info)
-        info.fMask = SEE_MASK_NOASYNC | (SEE_MASK_NOCLOSEPROCESS if wait else 0)
-        info.lpVerb = "runas"
-        info.lpFile = sys.executable
-        info.lpParameters = subprocess.list2cmdline(
-            list(sys.argv[1:]) + list(extra_args or []))
-        info.lpDirectory = os.getcwd()
-        info.nShow = 1   # SW_SHOWNORMAL
-        if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)):
-            return None  # ERROR_CANCELLED (1223) si el usuario dijo que no
-        if not wait or not info.hProcess:
-            return 0
-        kernel32 = ctypes.windll.kernel32
-        kernel32.WaitForSingleObject(info.hProcess, 0xFFFFFFFF)
-        code = wintypes.DWORD()
-        kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
-        kernel32.CloseHandle(info.hProcess)
-        return int(code.value)
-    except Exception:
-        return None

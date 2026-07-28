@@ -16,7 +16,8 @@ from .console import (C, banner, clear_screen, configure_output, enable_ansi,
                       read_key, section, spinner_done, spinner_step)
 from .const import APP_NAME, AUTHOR, IS_WINDOWS, WEBSITE_URL
 from .export import build_payload, export_html, export_json, export_plan
-from .platform_utils import is_admin, owns_console, relaunch_as_admin
+from . import elevacion
+from .platform_utils import is_admin
 from .projection import project_improvement
 from .report import print_report
 from .storage_scan import ScanResult, default_roots, scan_large_files
@@ -78,14 +79,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--export-plan", metavar="FICHERO", nargs="?", const="plan_optimizacion.ps1",
                    help="generar script PowerShell de optimización (solo Windows)")
     p.add_argument("--elevate", action="store_true",
-                   help="pedir permisos de administrador aunque se lance desde una terminal")
+                   help="pedir permisos aunque no haya nadie delante para aceptarlos "
+                        "(salida redirigida, tarea programada)")
     p.add_argument("--no-elevate", action="store_true",
-                   help="no pedir permisos de administrador en ningún caso")
+                   help="no pedir permisos en ningún caso; las comprobaciones que los "
+                        "necesitan saldrán como «sin comprobar»")
     p.add_argument("--no-color", action="store_true", help="desactivar colores ANSI")
     return p.parse_args()
-
-
-_relaunched = False   # lo consulta _wait_before_closing(): ver su docstring
 
 
 def _interactive() -> bool:
@@ -96,69 +96,58 @@ def _interactive() -> bool:
         return False
 
 
-def _ask_elevate() -> bool:
-    """Pregunta antes de relanzarse desde una terminal ya abierta.
+# Lo que se pierde diciendo que no, en el orden en que se echa de menos. No es
+# una lista decorativa: pedir permisos sin decir para qué es lo que enseña a
+# aceptar cualquier aviso sin leerlo.
+_LO_QUE_NECESITA_PERMISOS = (
+    "si el disco está cifrado y si el arranque seguro y el TPM están puestos",
+    "si sigue activo SMB1, el protocolo de red que usó WannaCry",
+    "cuánto tarda de verdad en arrancar y qué lo retrasa",
+    "la salud fina de los discos: desgaste, horas y sectores defectuosos",
+)
 
-    Aquí el aviso de UAC no basta como pregunta: aunque se acepte, el análisis
-    se va a una ventana nueva y esta terminal se queda mirando. Conviene
-    decirlo antes, no después.
+
+def _pedir_permisos(args: argparse.Namespace) -> None:
+    """Pide una vez los permisos con los que se lee el lote, o dice por qué no.
+
+    Quilate ya no se eleva entero. Antes pedía UAC al arrancar y a partir de ahí
+    todo —el banco de pruebas, el rastreo de archivos, la escritura del informe—
+    corría como administrador, que era mucho más de lo que hacía falta y dejaba
+    los informes con propietario Administrador. Ahora el aviso sirve para un
+    proceso aparte que lee ocho cosas y muere; ver `elevacion`.
+
+    Se pide aquí, antes del inventario, y no cuando hagan falta: un diálogo de
+    Windows a los dos minutos, cuando quien lo lanzó ya se ha ido a otra cosa,
+    se queda esperando a nadie y tira por tierra media auditoría.
     """
-    print(f"  {C.BOLD}¿Pedirlos ahora?{C.RESET} {C.DIM}El análisis se abrirá en una "
-          f"ventana nueva.{C.RESET}")
-    print(f"    {C.GOLD}[Enter]{C.RESET} Sí, pedirlos    "
-          f"{C.GOLD}[N]{C.RESET} No, seguir sin permisos    ", end="", flush=True)
-    try:
-        key = read_key()
-    except KeyboardInterrupt:
-        key = "n"
-    print()
-    return key not in ("n", "\x1b")
+    if not IS_WINDOWS or is_admin():
+        return
+    if args.no_elevate:
+        print(f"  {C.DIM}Sin pedir permisos (--no-elevate): unas comprobaciones "
+              f"quedarán sin respuesta.{C.RESET}")
+        return
+    if not _interactive() and not args.elevate:
+        # Un aviso de UAC en una tarea programada o con la salida redirigida se
+        # queda ahí parado hasta que alguien lo cierre. Mejor no sacarlo.
+        print(f"  {C.DIM}Sin pedir permisos: no hay nadie delante que pueda "
+              f"aceptarlos. Con --elevate se piden igualmente.{C.RESET}")
+        return
 
+    print(f"\n  {C.CYAN}▸{C.RESET} Windows va a pedirte permiso. Es para mirar, "
+          f"{C.BOLD}solo leyendo{C.RESET}, cuatro cosas que de otro modo no se ven:")
+    for cosa in _LO_QUE_NECESITA_PERMISOS:
+        print(f"      {C.DIM}·{C.RESET} {cosa}")
+    print(f"    {C.DIM}Si dices que no, el análisis sigue igual y esas salen "
+          f"como «sin comprobar».{C.RESET}")
 
-def _try_elevate(args: argparse.Namespace) -> int | None:
-    """Ofrece relanzarse como administrador.
-
-    Devuelve None para continuar aquí sin permisos, o el código de salida con el
-    que terminar si el trabajo se ha ido a la ventana elevada.
-
-    Sin elevación se cae media auditoría (SMART, TRIM, servicios) sin que el
-    usuario sepa por qué, y con doble clic no hay forma de pedirla salvo el menú
-    contextual, que nadie usa. Se pide en los dos modos, pero de distinta manera:
-
-    - Doble clic: somos los únicos de la consola, así que se va directo al aviso
-      de UAC. Aceptar sustituye esta ventana por la elevada.
-    - Terminal: se pregunta primero, porque relanzarse abre otra ventana.
-    - Salida redirigida a un fichero o a una tubería: no se pide nada. Ahí no hay
-      quien conteste, y la ventana nueva dejaría el destino vacío.
-
-    Solo se espera al proceso elevado cuando no hay nadie delante, es decir con
-    `--elevate` desde un script: allí el código de salida es lo único que le
-    queda a quien nos invocó. Con un usuario delante, esperar dejaría dos
-    ventanas abiertas —una trabajando y otra mirando— durante todo el análisis,
-    que además termina en un menú interactivo. Mejor ceder el turno y salir.
-    """
-    global _relaunched
-    if args.no_elevate or not IS_WINDOWS or not getattr(sys, "frozen", False):
-        return None
-    double_click = owns_console()
-    if not double_click and not args.elevate:
-        if not _interactive() or not _ask_elevate():
-            return None
-
-    print(f"  {C.CYAN}▸{C.RESET} Pidiendo permisos a Windows... "
-          f"{C.DIM}acepta el aviso para el análisis completo.{C.RESET}")
-    wait = not double_click and not _interactive()
-    code = relaunch_as_admin(["--no-elevate"], wait=wait)
-    if code is None:
-        print(f"  {C.DIM}Permisos denegados; se continúa sin ellos.{C.RESET}")
-        return None
-    _relaunched = True
-    if not double_click:
-        print(f"  {C.GREEN}✓{C.RESET} "
-              + ("Análisis completado en la ventana con permisos." if wait else
-                 "El análisis continúa en la ventana con permisos; "
-                 "esta ya puede cerrarse.\n"))
-    return code
+    elevacion.permitir_uac(True)
+    lote = elevacion.recoger()
+    contestadas = sum(1 for res in lote.values() if res.ok)
+    if not contestadas:
+        print(f"  {C.DIM}Sin permisos; se continúa sin ellos.{C.RESET}")
+    else:
+        print(f"  {C.GREEN}✓{C.RESET} Permisos concedidos "
+              f"{C.DIM}(el proceso con permisos ya ha terminado).{C.RESET}")
 
 
 # Lo que le pasa al programa, dicho para quien no programa. El resto del informe
@@ -237,13 +226,7 @@ def main() -> int:
         return _run_comparison(args.compare)
 
     banner()
-    if not is_admin():
-        print(f"\n  {C.YELLOW}⚠ Sin permisos de administrador: algunas comprobaciones "
-              f"(SMART, TRIM, servicios) pueden no estar disponibles.{C.RESET}")
-        code = _try_elevate(args)
-        if code is not None:
-            return code
-        print(f"  {C.DIM}Para un análisis completo, abre la terminal como administrador.{C.RESET}")
+    _pedir_permisos(args)
 
     section("Recopilando información del sistema")
     spinner_step("Inventario de hardware y SO".ljust(38))
@@ -474,10 +457,12 @@ def _wait_before_closing() -> None:
     con terminal interactivo: en línea de comandos o redirigido, estorbaría.
 
     Si el menú final llegó a mostrarse, la pausa ya la puso él y salir de allí es
-    un acto deliberado del usuario: encadenar otro "pulsa Enter" sobraría. Y si
-    nos hemos relanzado con permisos, esta ventana ya no pinta nada: el informe
-    sale en la otra y esta debe cerrarse sola."""
-    if _menu_shown or _relaunched or not getattr(sys, "frozen", False):
+    un acto deliberado del usuario: encadenar otro "pulsa Enter" sobraría.
+
+    Ya no hay caso de «nos hemos relanzado elevados y esta ventana sobra»: el
+    análisis entero ocurre aquí, y lo único que se va a otro proceso es el lote
+    de consultas con permisos, que dura dos segundos y no imprime nada."""
+    if _menu_shown or not getattr(sys, "frozen", False):
         return
     try:
         if _interactive():
