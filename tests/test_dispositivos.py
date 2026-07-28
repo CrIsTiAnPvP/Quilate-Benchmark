@@ -22,8 +22,11 @@ from __future__ import annotations
 
 import unittest
 
+from datetime import datetime, timedelta
+
 from quilate import audit
-from quilate.audit import Auditor, SinDato, _PNP_DELIBERADO, _PNP_PROBLEMA
+from quilate.audit import (Auditor, SinDato, _DRIVER_VIEJO_DIAS, _PNP_DELIBERADO,
+                           _PNP_PROBLEMA)
 from quilate.platform_utils import PSResult
 from quilate.sysinfo import SystemInfo
 from tests.support import patched
@@ -192,6 +195,164 @@ class LasDosTablas(unittest.TestCase):
                 # Cada texto se encadena con «: » detrás del nombre y con «. »
                 # delante del siguiente, así que no puede traer su propio punto.
                 self.assertFalse(texto.endswith("."))
+
+
+def driver(nombre="Realtek Audio", años=1.0, proveedor="Realtek", clase="MEDIA") -> dict:
+    fecha = datetime.now() - timedelta(days=round(años * 365.25))
+    return {"DeviceName": nombre, "DriverDate": fecha.strftime("%Y-%m-%d"),
+            "DriverProviderName": proveedor, "DeviceClass": clase}
+
+
+def auditar_drivers(filas):
+    a = Auditor(SystemInfo(), None)
+    respuesta = filas if isinstance(filas, PSResult) else PSResult(filas)
+    with patched(audit, wmi=respuesta):
+        return a, a.check_old_drivers()
+
+
+class DriversSinTocar(unittest.TestCase):
+    """La regla del informe («anteriores a la instalación del SO») no valía.
+
+    Medido en el equipo de referencia: la cumplían 209 de 239 drivers, porque
+    Microsoft fecha los suyos en 21/06/2006 a propósito para que cualquier
+    driver del fabricante gane la resolución de PnP. La señal está en los de
+    terceros, que allí eran 39.
+    """
+
+    def test_los_recientes_no_son_un_hallazgo(self):
+        a, resumen = auditar_drivers([driver(años=1), driver("Otro", años=3)])
+        self.assertEqual(a.findings, [])
+        self.assertIn("2", resumen)
+
+    def test_uno_muy_viejo_sale_con_su_edad(self):
+        a, _ = auditar_drivers([driver("Razer BlackWidow", años=9)])
+        self.assertEqual([f.id for f in a.findings], ["driver_viejo"])
+        self.assertIn("Razer BlackWidow", a.findings[0].title)
+        self.assertIn("9 años", a.findings[0].title)
+
+    def test_varios_se_cuentan(self):
+        a, _ = auditar_drivers([driver(f"Cacharro {n}", años=6) for n in range(3)])
+        self.assertIn("3 dispositivos", a.findings[0].title)
+
+    def test_el_umbral_son_cinco_anios(self):
+        limite = _DRIVER_VIEJO_DIAS / 365.25
+        a, _ = auditar_drivers([driver(años=limite - 0.1)])
+        self.assertEqual(a.findings, [])
+        a, _ = auditar_drivers([driver(años=limite + 0.1)])
+        self.assertEqual([f.id for f in a.findings], ["driver_viejo"])
+
+    def test_van_del_mas_viejo_al_menos(self):
+        a, _ = auditar_drivers([driver("Medio", años=7), driver("Viejo", años=12),
+                                driver("Nuevo", años=6)])
+        detalle = a.findings[0].detail
+        self.assertLess(detalle.index("Viejo"), detalle.index("Medio"))
+        self.assertLess(detalle.index("Medio"), detalle.index("Nuevo"))
+
+    def test_la_lista_larga_se_recorta(self):
+        a, _ = auditar_drivers([driver(f"Cacharro {n}", años=6 + n) for n in range(7)])
+        self.assertIn("y 3 más", a.findings[0].detail)
+
+    def test_no_promete_velocidad(self):
+        a, _ = auditar_drivers([driver(años=9)])
+        f = a.findings[0]
+        self.assertEqual(f.gain, 0.0)
+        self.assertEqual(f.severity, "low")
+        self.assertEqual(f.category, "dispositivos")
+
+    def test_dice_que_no_corre_prisa(self):
+        # Un driver de hace años que funciona bien puede quedarse. Presentarlo
+        # como urgente empujaría a tocar lo que no está roto.
+        a, _ = auditar_drivers([driver(años=9)])
+        self.assertIn("no corre prisa", " ".join(a.findings[0].steps))
+
+
+class LoQueNoCuentaComoDriverViejo(unittest.TestCase):
+    def test_la_grafica_la_audita_otra_comprobacion(self):
+        # `check_gpu_drivers` ya avisa de la GPU, con su fecha y su ganancia.
+        # Repetirla aquí sería el mismo aviso dos veces en el mismo informe.
+        a, resumen = auditar_drivers([driver("GeForce RTX 3060", años=9, clase="DISPLAY")])
+        self.assertEqual(a.findings, [])
+        self.assertIn("no hay drivers", resumen)
+
+    def test_una_fecha_en_el_futuro_no_es_vieja(self):
+        # Verificado: los hay. No es error del fabricante sino de la máquina
+        # que firmó el paquete.
+        a, _ = auditar_drivers([driver(años=-0.3)])
+        self.assertEqual(a.findings, [])
+
+    def test_el_mismo_dispositivo_solo_cuenta_una_vez(self):
+        # Un teclado aparece una vez por función que expone: HID, teclado,
+        # ratón, control de consumo. Es un solo cacharro.
+        a, resumen = auditar_drivers([
+            driver("Teclado", años=9, clase="HIDCLASS"),
+            driver("Teclado", años=6, clase="KEYBOARD"),
+            driver("Teclado", años=6, clase="MOUSE")])
+        self.assertIn("Teclado (9 años)", a.findings[0].detail)
+        self.assertEqual(a.findings[0].title.count("Teclado"), 1)
+        self.assertIn("de 1 de terceros", resumen)
+
+    def test_se_queda_con_la_fecha_mas_antigua(self):
+        # La más vieja es la que dice desde cuándo no se toca ese dispositivo.
+        a, _ = auditar_drivers([driver("Teclado", años=1), driver("Teclado", años=9)])
+        self.assertIn("9 años", a.findings[0].title)
+
+    def test_un_driver_sin_nombre_no_se_puede_leer(self):
+        # Sin nombre no hay nada que enseñarle a nadie, así que se descarta;
+        # pero descartarlo es no haber podido leerlo, no haberlo excluido con
+        # motivo, y el veredicto tiene que notar la diferencia.
+        with self.assertRaises(SinDato):
+            auditar_drivers([{"DeviceName": "", "DriverDate": "2010-01-01",
+                              "DeviceClass": "NET"}])
+
+
+class CuandoNoSePuedePreguntar(unittest.TestCase):
+    def test_la_consulta_fallida_no_da_por_buenos_los_drivers(self):
+        with self.assertRaises(SinDato):
+            auditar_drivers(PSResult((), ok=False, error="acceso denegado"))
+
+    def test_sin_drivers_de_terceros_no_falta_ningun_dato(self):
+        # Un Windows recién instalado en hardware corriente funciona entero con
+        # drivers de caja. Es la respuesta, no una ausencia de respuesta.
+        a, resumen = auditar_drivers([])
+        self.assertEqual(a.findings, [])
+        self.assertIn("no hay drivers de terceros", resumen)
+
+    def test_fechas_ilegibles_no_se_dan_por_recientes(self):
+        with self.assertRaises(SinDato):
+            auditar_drivers([{"DeviceName": "Cacharro", "DriverDate": "vete a saber",
+                              "DeviceClass": "NET"}])
+
+    def test_una_fecha_ilegible_entre_varias_buenas_no_arrastra(self):
+        a, resumen = auditar_drivers([
+            {"DeviceName": "Roto", "DriverDate": None, "DeviceClass": "NET"},
+            driver("Bueno", años=9)])
+        self.assertEqual([f.id for f in a.findings], ["driver_viejo"])
+        self.assertIn("de 1 de terceros", resumen)
+
+
+class LaConsultaDeDrivers(unittest.TestCase):
+    def _consulta(self) -> str:
+        capturada = {}
+
+        def espia(select, *a, **k):
+            capturada["select"] = select
+            return PSResult(())
+
+        with patched(audit, wmi=espia):
+            Auditor(SystemInfo(), None).check_old_drivers()
+        return capturada["select"]
+
+    def test_microsoft_se_descarta_en_la_consulta(self):
+        # Traerse los 239 para quedarse con 39 cuesta lo mismo que traerse 39,
+        # pero el filtro deja escrito en la propia consulta cuál es la regla.
+        self.assertIn("NOT DriverProviderName LIKE 'Microsoft%'", self._consulta())
+
+    def test_el_filtro_es_por_prefijo_y_no_por_igualdad(self):
+        # «Microsoft», «Microsoft Windows» y «Microsoft Corporation» conviven en
+        # el mismo equipo: comparar por igualdad dejaría pasar dos de tres.
+        consulta = self._consulta()
+        self.assertNotIn("DriverProviderName <> 'Microsoft'", consulta)
+        self.assertIn("Win32_PnPSignedDriver", consulta)
 
 
 if __name__ == "__main__":

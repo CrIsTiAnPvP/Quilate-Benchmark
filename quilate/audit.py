@@ -20,7 +20,8 @@ from .platform_utils import (_sys_exe, boot_performance, pending_driver_updates,
                              pending_security_updates, ps_json, reg_key_readable,
                              reg_list_values, reg_read, run_cmd, winreg)
 from .network import WIFI_TECHO, wifi_capability
-from .sysinfo import KIND_LABELS, SystemInfo, local_volumes, primary_gpu
+from .sysinfo import (KIND_LABELS, SystemInfo, _parse_cim_date, local_volumes,
+                      primary_gpu)
 
 
 class SinDato(Exception):
@@ -132,6 +133,10 @@ _PNP_PROBLEMA = {
 # aparte para no acusar de estropeado a lo que alguien apagó a propósito.
 _PNP_DELIBERADO = frozenset({22, 32, 45, 47})
 
+# Cinco años. Por debajo hay demasiado driver que sencillamente está terminado y
+# no necesita más versiones: un lector de tarjetas de 2022 funciona igual hoy.
+_DRIVER_VIEJO_DIAS = round(5 * 365.25)
+
 
 def sev_label(severity: str) -> str:
     """Se resuelve en tiempo de ejecución: si los colores están desactivados
@@ -240,6 +245,7 @@ class Auditor:
                 ("Fragmentación / optimización", self.check_defrag),
                 ("Salud SMART de los discos", self.check_smart),
                 ("Dispositivos con problema", self.check_device_problems),
+                ("Antigüedad de los drivers", self.check_old_drivers),
                 ("Antigüedad de la BIOS", self.check_bios_age),
                 ("Cifrado del disco (BitLocker)", self.check_disk_encryption),
                 ("Arranque seguro (Secure Boot)", self.check_secure_boot),
@@ -930,6 +936,104 @@ class Auditor:
                    "o del portátil: ahí están los drivers que Windows Update no trae",
                    "Si el dispositivo ya no está conectado, botón derecho → Desinstalar"])
         return f"{len(averiados)} con problema{cola}"
+
+    def check_old_drivers(self) -> str:
+        """Drivers de terceros que nadie ha vuelto a tocar.
+
+        La regla que parecería natural —«driver anterior a la instalación del
+        SO»— es inservible, y está medido: en este equipo la cumplen 209 de 239
+        drivers. Microsoft fecha a propósito los suyos en 21/06/2006 para que
+        cualquier driver del fabricante gane siempre la resolución de PnP, así
+        que `WAN Miniport (IP)` y compañía son de 2006 y están perfectos. La
+        señal aparece al quedarse solo con los de terceros: 39 de esos 239.
+
+        La fecha también está en el registro (`Control\\Class\\{clase}\\NNNN`),
+        y leerla de ahí cuesta 0,02 s frente a los 2,5 s de WMI. Se descartó
+        porque el registro conserva los drivers de dispositivos que ya no están
+        conectados —aquí saca uno de Apple de 2013, resto de un iTunes— y este
+        hallazgo dice «actualiza esto», que sobre algo desenchufado no se puede
+        hacer. WMI enumera dispositivos presentes, que es justo lo que afirma.
+
+        Se paga: `Win32_PnPSignedDriver` comprueba la firma de cada driver, y eso
+        cuesta 2 s con la caché caliente y hasta 11 s en frío, medido aquí. Es la
+        comprobación más cara de las 34, y está asumido a cambio de no acusar a
+        nadie de tener viejo el driver de algo que ya no tiene enchufado.
+        """
+        rows = ps_json("Get-CimInstance Win32_PnPSignedDriver "
+                       "-Filter \"NOT DriverProviderName LIKE 'Microsoft%'\" | "
+                       "Select-Object DeviceName,DriverDate,DriverProviderName,DeviceClass")
+        if not rows.ok:
+            raise SinDato(f"no se han podido consultar los drivers ({rows.error})")
+        if not rows:
+            # Un Windows recién instalado en hardware corriente funciona entero
+            # con drivers de caja. No hay nada que auditar, y eso no es un dato
+            # que falte: es la respuesta.
+            return "no hay drivers de terceros"
+
+        hoy = datetime.now()
+        # Un mismo teclado aparece una vez por cada función que expone (HID,
+        # ratón, teclado…), a veces con drivers de fechas distintas. Se queda la
+        # más antigua: es la que dice desde cuándo no se toca ese dispositivo.
+        por_dispositivo: dict[str, int] = {}
+        ilegibles = 0
+        for row in rows:
+            # La gráfica ya la audita `check_gpu_drivers`, con su fecha y su
+            # ganancia. Repetirla aquí sería el mismo aviso dos veces.
+            if str(row.get("DeviceClass") or "").upper() == "DISPLAY":
+                continue
+            fecha = _parse_cim_date(row.get("DriverDate"))
+            nombre = str(row.get("DeviceName") or "").strip()
+            if fecha is None or not nombre:
+                ilegibles += 1
+                continue
+            dias = (hoy - fecha).days
+            # Hay drivers fechados en el futuro, y no es un error del fabricante
+            # sino de la máquina que los firmó. Uno así no es viejo.
+            if dias < 0:
+                continue
+            por_dispositivo[nombre] = max(por_dispositivo.get(nombre, 0), dias)
+
+        if not por_dispositivo:
+            # Quedarse sin ninguno no significa siempre lo mismo. Si es porque
+            # nadie dijo su fecha, falta el dato y hay que decirlo. Si es porque
+            # los que había estaban excluidos con motivo —la gráfica, que audita
+            # otra comprobación; una fecha futura—, la respuesta es que no hay
+            # nada que auditar, y eso sí es una respuesta.
+            if ilegibles:
+                raise SinDato("ningún driver de terceros ha informado de su fecha")
+            return "no hay drivers de terceros que auditar"
+        viejos = sorted(((n, d) for n, d in por_dispositivo.items()
+                         if d > _DRIVER_VIEJO_DIAS), key=lambda x: -x[1])
+        if not viejos:
+            return f"{len(por_dispositivo)} de terceros, ninguno de más de 5 años"
+
+        def años(dias: int) -> int:
+            return round(dias / 365.25)
+
+        visibles = viejos[:4]
+        lista = ", ".join(f"{n} ({años(d)} años)" for n, d in visibles)
+        if len(viejos) > len(visibles):
+            lista += f" y {len(viejos) - len(visibles)} más"
+        titulo = (f"{viejos[0][0]}: driver de hace {años(viejos[0][1])} años"
+                  if len(viejos) == 1
+                  else f"{len(viejos)} dispositivos con drivers de más de 5 años")
+        self.add(
+            id="driver_viejo", title=titulo,
+            severity="low", category="dispositivos", component="system",
+            detail=f"{lista}. Son drivers del fabricante del dispositivo, no de Windows: "
+                   "Windows Update casi nunca los renueva y quedan como estaban el día que "
+                   "se instalaron. Pasados unos años eso significa fallos conocidos sin "
+                   "corregir y, en los que manejan datos —red, audio, almacenamiento—, "
+                   "también agujeros de seguridad que ya tienen parche publicado. No es "
+                   "urgente y no va a acelerar el equipo; es mantenimiento pendiente.",
+            gain=0.0, gain_note="no es una optimización: es mantenimiento",
+            effort="bajo", risk="bajo",
+            steps=["Busca el modelo del equipo o de la placa en la web del fabricante y "
+                   "mira su sección de soporte: ahí está lo que Windows Update no trae",
+                   "Actualiza primero los que manejan datos: red, audio y almacenamiento",
+                   "Un driver de hace años que funciona bien puede quedarse: si el "
+                   "dispositivo no da problemas, esto no corre prisa"])
+        return f"{len(viejos)} de más de 5 años, de {len(por_dispositivo)} de terceros"
 
     def check_network_link(self) -> str:
         """Lo que el enlace está haciendo frente a lo que la tarjeta sabe hacer.
