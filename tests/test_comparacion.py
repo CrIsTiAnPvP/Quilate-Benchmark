@@ -18,7 +18,9 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from quilate.benchmark import PY_ADJUST
-from quilate.cli import _run_comparison
+from quilate import cli
+from quilate.cli import _motivo, _run_comparison
+from quilate.console import C
 from quilate.compare import (MARGEN_DESCONOCIDO_PCT, RunLoadError, _ajuste_python,
                              calibracion, comparabilidad, comparar_hallazgos,
                              comparar_pruebas, compare_runs, load_run)
@@ -195,6 +197,77 @@ class ElMensajeQueVeElUsuario(unittest.TestCase):
     def test_siempre_se_explica_como_generarlos(self):
         _, salida = self._comparar({"cualquier": "cosa"}, ejecucion())
         self.assertIn("--json", salida)
+
+
+class MensajesParaQuienNoPrograma(unittest.TestCase):
+    """Lo que falla se dice en castellano, no con el nombre de la excepción.
+
+    El resto del informe se ha escrito con ese criterio —los `detail` de cada
+    hallazgo explican el porqué y no solo el qué— así que no hay motivo para que
+    la única palabra en inglés y en CamelCase de toda la ejecución sea la que
+    aparece justo cuando algo se ha torcido.
+    """
+
+    def test_los_fallos_habituales_estan_traducidos(self):
+        esperado = {
+            PermissionError(13, "denegado"): "permisos insuficientes",
+            FileNotFoundError(2, "no existe"): "la ruta no existe",
+            NotADirectoryError(20, "no es carpeta"): "la ruta no es una carpeta",
+            TimeoutError(): "ha tardado demasiado",
+            MemoryError(): "no hay memoria suficiente",
+        }
+        for excepcion, texto in esperado.items():
+            with self.subTest(excepcion=type(excepcion).__name__):
+                self.assertEqual(_motivo(excepcion), texto)
+
+    def test_las_subclases_ganan_al_generico(self):
+        # `PermissionError` es subclase de `OSError`: si el orden del recorrido
+        # se invirtiera, todos los fallos de permisos dirían lo genérico.
+        self.assertNotEqual(_motivo(PermissionError()), _motivo(OSError()))
+
+    def test_lo_no_previsto_tambien_se_dice_en_castellano(self):
+        motivo = _motivo(ValueError("algo raro"))
+        self.assertNotIn("ValueError", motivo)
+        self.assertNotIn("Error", motivo)
+
+    def test_nunca_se_cuela_el_nombre_de_la_clase(self):
+        for excepcion in (PermissionError(), OSError(), RuntimeError(),
+                          ZeroDivisionError(), KeyError("x")):
+            with self.subTest(excepcion=type(excepcion).__name__):
+                self.assertNotIn(type(excepcion).__name__, _motivo(excepcion))
+
+
+class NoPoderEscribirElInforme(unittest.TestCase):
+    """Tras intentarlo en dos sitios, el usuario merece saber cuáles."""
+
+    def _fallar(self, excepcion) -> str:
+        original = cli.export_html
+        cli.export_html = lambda *a, **k: (_ for _ in ()).throw(excepcion)
+        C.disable()
+        salida = io.StringIO()
+        try:
+            with redirect_stdout(salida):
+                resultado = cli._write_export("html", None, None, None, {})
+        finally:
+            cli.export_html = original
+        self.assertIsNone(resultado)
+        return salida.getvalue()
+
+    def test_nombra_las_ubicaciones_que_ha_probado(self):
+        texto = self._fallar(PermissionError(13, "Acceso denegado"))
+        self.assertIn(str(Path.cwd()), texto)
+        self.assertIn(str(Path.home()), texto)
+
+    def test_dice_el_motivo_en_castellano(self):
+        texto = self._fallar(PermissionError(13, "Acceso denegado"))
+        self.assertIn("permisos insuficientes", texto)
+        self.assertNotIn("PermissionError", texto)
+
+    def test_ofrece_la_salida_concreta(self):
+        # No basta con decir que no se pudo: hay que decir qué hacer.
+        texto = self._fallar(OSError(28, "No queda espacio"))
+        self.assertIn("--html", texto)
+        self.assertIn("quilate_informe.html", texto)
 
 
 class ElMargenDecide(unittest.TestCase):

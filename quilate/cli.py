@@ -161,6 +161,38 @@ def _try_elevate(args: argparse.Namespace) -> int | None:
     return code
 
 
+# Lo que le pasa al programa, dicho para quien no programa. El resto del informe
+# se ha escrito con ese criterio —los `detail` de cada hallazgo explican el
+# porqué, no solo el qué— y no hay motivo para que la única palabra en inglés y
+# en CamelCase de toda la ejecución sea la que aparece cuando algo falla.
+# Los textos son neutrales respecto a lo que se estaba haciendo, porque el mismo
+# traductor se usa al leer (rastreo, red) y al escribir (exportaciones): «sin
+# permisos para leerlo» quedaría mal en un fallo de escritura.
+_MOTIVOS = {
+    PermissionError: "permisos insuficientes",
+    FileNotFoundError: "la ruta no existe",
+    NotADirectoryError: "la ruta no es una carpeta",
+    IsADirectoryError: "la ruta es una carpeta, no un fichero",
+    TimeoutError: "ha tardado demasiado",
+    MemoryError: "no hay memoria suficiente",
+    InterruptedError: "algo lo ha interrumpido",
+    OSError: "el sistema lo ha impedido",
+}
+
+
+def _motivo(exc: BaseException) -> str:
+    """Traduce una excepción a algo que se pueda leer sin saber Python.
+
+    Se recorre `_MOTIVOS` en orden y no se usa `type(exc)` directamente para
+    que las subclases —`PermissionError` lo es de `OSError`— encuentren su
+    mensaje concreto antes de caer en el genérico.
+    """
+    for clase, texto in _MOTIVOS.items():
+        if isinstance(exc, clase):
+            return texto
+    return "ha fallado de una forma no prevista"
+
+
 def _run_comparison(rutas: list[str]) -> int:
     antes_path, despues_path = Path(rutas[0]), Path(rutas[1])
     try:
@@ -243,7 +275,7 @@ def main() -> int:
         except KeyboardInterrupt:
             print(f"\n  {C.YELLOW}Rastreo interrumpido.{C.RESET}")
         except Exception as exc:
-            spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
+            spinner_done(f"no se ha podido rastrear: {_motivo(exc)}", ok=False)
 
     section("Red")
     spinner_step("Enlace y adaptadores".ljust(38))
@@ -255,7 +287,7 @@ def main() -> int:
                      ok=bool(enlace))
     except Exception as exc:
         red = {}
-        spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
+        spinner_done(f"no se ha podido consultar la red: {_motivo(exc)}", ok=False)
     if args.no_net:
         print(f"  {C.DIM}Latencia y DNS omitidas por --no-net.{C.RESET}")
     else:
@@ -356,7 +388,13 @@ def _write_export(kind: str, si, bench, auditor, projection) -> tuple[Path, str]
                          f"{'s' if count != 1 else ''}"
         except OSError as exc:
             error = exc
-    print(f"{C.RED}✗{C.RESET}\n    No se pudo escribir {name}: {error}")
+    # Nombrar las dos ubicaciones intentadas: tras dos fallos, decir solo «no se
+    # pudo escribir» deja al usuario sin saber dónde se probó ni qué hacer.
+    probadas = "\n".join(f"      · {ruta}" for ruta in seen)
+    bandera = {"html": "--html", "json": "--json", "plan": "--plan"}[kind]
+    print(f"{C.RED}✗{C.RESET}\n    No se ha podido escribir {name}: {_motivo(error)}.")
+    print(f"    {C.DIM}Se ha intentado en:\n{probadas}\n"
+          f"      Dile tú dónde con `{bandera} C:\\ruta\\que\\elijas\\{name}`.{C.RESET}")
     return None
 
 

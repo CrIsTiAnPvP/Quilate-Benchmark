@@ -73,6 +73,7 @@ En los ejemplos siguientes, `python` asume el entorno ya activado.
 | `--scan-path D:\Juegos` | Carpeta extra a rastrear (repetible) |
 | `--min-file-size 512` | Umbral de "archivo grande" en MB (por defecto 128) |
 | `--check-drivers` | Consulta en línea si hay drivers más nuevos (tarda 10-30 s) |
+| `--check-updates` | Consulta en línea si faltan actualizaciones de seguridad (tarda 10-30 s) |
 | `--html informe.html` | Informe HTML con branding |
 | `--json datos.json` | Datos crudos para comparar ejecuciones |
 | `--export-plan` | Genera `plan_optimizacion.ps1` (solo Windows) |
@@ -97,10 +98,36 @@ icono del proyecto, que se regenera desde `quilate.png` con
 `python tools/make_icon.py` cuando cambia el logo. Acepta
 las mismas opciones que el script.
 
-Cuando le faltan permisos, **los pide** con el aviso de UAC de Windows: sin ellos
-se caen SMART, TRIM y la revisión de servicios. Si el usuario rechaza el aviso,
-el análisis continúa sin ellos, diciendo lo que se pierde. Cómo lo pide depende
-de cómo se haya abierto:
+#### Qué se gana aceptando el UAC
+
+Todo lo que Quilate hace con permisos de administrador es **leer**. No escribe en
+el registro, no cambia ninguna configuración y no instala nada por ningún camino:
+lo único que se toca del sistema es el fichero temporal del test de disco, que se
+borra al terminar y no necesita permisos. Estas son las comprobaciones que sin
+elevar aparecen en «Sin comprobar», y no como correctas:
+
+| Comprobación | Qué consulta | Qué se pierde sin ella |
+|---|---|---|
+| Duración real del arranque | log `Diagnostics-Performance` de Windows | cuánto tarda de verdad en arrancar y qué programa lo retrasa |
+| Integridad del sistema de archivos | `fsutil dirty query` | si el volumen está marcado como «sucio» |
+| Cifrado del disco | `Get-BitLockerVolume` | si el disco del sistema está cifrado |
+| Arranque seguro | `Confirm-SecureBootUEFI` | si Secure Boot está activo |
+| Chip TPM | `Get-Tpm` | si hay TPM y está encendido |
+| Protocolo SMB1 | `Get-WindowsOptionalFeature` | si sigue activo el protocolo por el que entró WannaCry |
+
+Además, la **salud SMART** se sigue comprobando sin permisos pero con menos
+detalle: el estado general (`HealthStatus`) se lee igual, mientras que el
+desgaste, las horas de uso y los errores acumulados salen de
+`Get-StorageReliabilityCounter`, que sí los exige. Son los que avisan de un
+disco que va a fallar **antes** de que Windows lo dé por degradado.
+
+Lo que **no** hace falta elevar, en contra de lo que suele suponerse: TRIM, el
+plan de energía, los programas de inicio, los servicios, la memoria, la red y
+todo el benchmark funcionan igual sin permisos.
+
+Cuando le faltan permisos, **los pide** con el aviso de UAC de Windows. Si el
+usuario lo rechaza, el análisis continúa sin ellos y dice exactamente qué no ha
+podido mirar. Cómo lo pide depende de cómo se haya abierto:
 
 - **Doble clic**: va directo al aviso de UAC. Aceptar sustituye esa ventana por
   la elevada.
