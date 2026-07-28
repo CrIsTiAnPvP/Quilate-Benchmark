@@ -11,21 +11,27 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
+from quilate.benchmark import PY_ADJUST
 from quilate.cli import _run_comparison
-from quilate.compare import (MARGEN_DESCONOCIDO_PCT, RunLoadError, calibracion,
-                             comparar_hallazgos, comparar_pruebas, compare_runs,
-                             load_run, mismo_equipo)
+from quilate.compare import (MARGEN_DESCONOCIDO_PCT, RunLoadError, _ajuste_python,
+                             calibracion, comparabilidad, comparar_hallazgos,
+                             comparar_pruebas, compare_runs, load_run)
 
 
 def ejecucion(**cambios) -> dict:
     base = {
-        "meta": {"version": "2.2.0", "generated_at": "2026-07-27T10:00:00"},
-        "system": {"hostname": "PC", "cpu_name": "CPU X", "ram_total": 16},
+        "meta": {"version": "2.2.0", "generated_at": "2026-07-27T10:00:00", "quick": False},
+        "system": {"hostname": "PC", "cpu_name": "CPU X", "ram_total": 16,
+                   "python_version": "3.10.11"},
+        # Con qué escala se dieron las notas: `build_payload` lo guarda desde la
+        # v2.2 justo para poder decidir si dos ejecuciones son conmensurables.
+        "reference_meta": {"date": "2026-07", "machine": "banco", "stale": False},
         "scores": {"overall": 100.0, "components": {"disk": 100.0}},
         "benchmark": {"disk_read": {"name": "Disco · lectura", "unit": "MB/s",
                                     "raw": 1000.0, "score": 100.0}},
@@ -276,22 +282,134 @@ class Calibracion(unittest.TestCase):
         self.assertIsNone(calibracion(ejecucion(), ejecucion()))
 
 
-class EquipoDistinto(unittest.TestCase):
-    def test_mismo_equipo(self):
-        coincide, difs = mismo_equipo(ejecucion(), ejecucion())
-        self.assertTrue(coincide)
-        self.assertEqual(difs, [])
+class Comparabilidad(unittest.TestCase):
+    """No basta con restar: hay que decidir si la resta significa algo.
 
+    Es el criterio que el módulo ya aplicaba al margen de cada prueba, llevado a
+    la ejecución entera. «Distinto equipo» era solo una de las formas de que dos
+    medidas no sean restables, y ni siquiera la más frecuente: lo normal es
+    comparar un equipo consigo mismo después de haber tocado algo.
+    """
+
+    def _motivos(self, antes: dict, despues: dict) -> dict[str, dict]:
+        return {m["key"]: m for m in comparabilidad(antes, despues)}
+
+    def test_dos_ejecuciones_iguales_no_tienen_pegas(self):
+        self.assertEqual(comparabilidad(ejecucion(), ejecucion()), [])
+        self.assertTrue(compare_runs(ejecucion(), ejecucion())["meta"]["comparable"])
+
+    # ------------------------------------------------------------ hardware ---
     def test_cpu_distinta_se_avisa(self):
         otro = ejecucion(system={"hostname": "PC", "cpu_name": "OTRA", "ram_total": 16})
-        coincide, difs = mismo_equipo(ejecucion(), otro)
-        self.assertFalse(coincide)
-        self.assertIn("CPU", difs[0])
+        motivos = self._motivos(ejecucion(), otro)
+        self.assertIn("CPU", motivos["hardware"]["text"])
+        self.assertEqual(motivos["hardware"]["severity"], "alta")
 
     def test_un_campo_ausente_no_cuenta_como_diferencia(self):
         # Un JSON antiguo sin el campo no debe hacer parecer que es otro equipo.
         viejo = ejecucion(system={"hostname": "PC"})
-        self.assertTrue(mismo_equipo(ejecucion(), viejo)[0])
+        self.assertNotIn("hardware", self._motivos(ejecucion(), viejo))
+
+    # --------------------------------------------------------------- quick ---
+    def test_quick_contra_completo(self):
+        rapida = ejecucion()
+        rapida["meta"] = dict(rapida["meta"], quick=True)
+        motivos = self._motivos(rapida, ejecucion())
+        self.assertEqual(motivos["quick"]["severity"], "alta")
+        self.assertIn("--quick", motivos["quick"]["text"])
+
+    def test_dos_quick_si_son_comparables(self):
+        rapida = ejecucion()
+        rapida["meta"] = dict(rapida["meta"], quick=True)
+        self.assertNotIn("quick", self._motivos(rapida, rapida))
+
+    # ---------------------------------------------------------- referencia ---
+    def test_escala_de_referencia_distinta(self):
+        viejo = ejecucion()
+        viejo["reference_meta"] = {"date": "2024-01"}
+        motivos = self._motivos(viejo, ejecucion())
+        self.assertEqual(motivos["reference"]["severity"], "alta")
+        self.assertIn("2024-01", motivos["reference"]["text"])
+
+    def test_la_misma_escala_no_se_avisa_aunque_cambie_la_version(self):
+        # Cambiar de versión sin tocar la escala no invalida nada.
+        viejo = ejecucion()
+        viejo["meta"] = dict(viejo["meta"], version="2.4.0")
+        motivos = self._motivos(viejo, ejecucion())
+        self.assertNotIn("reference", motivos)
+        self.assertNotIn("version", motivos)
+
+    def test_sin_reference_meta_la_version_es_lo_unico_que_queda(self):
+        # Las ejecuciones anteriores a la v2.2 no anotan con qué escala puntuaron.
+        viejo = ejecucion()
+        viejo["meta"] = dict(viejo["meta"], version="2.1.0")
+        del viejo["reference_meta"]
+        motivos = self._motivos(viejo, ejecucion())
+        self.assertEqual(motivos["version"]["severity"], "media")
+        self.assertIn("2.1.0", motivos["version"]["text"])
+
+    # -------------------------------------------------------------- python ---
+    def test_dos_interpretes_con_distinto_ajuste(self):
+        viejo = ejecucion()
+        viejo["system"] = dict(viejo["system"], python_version="3.10.11")
+        nuevo = ejecucion()
+        nuevo["system"] = dict(nuevo["system"], python_version="3.13.0")
+        motivos = self._motivos(viejo, nuevo)
+        self.assertEqual(motivos["python"]["severity"], "alta")
+        self.assertIn("1.35", motivos["python"]["text"])
+
+    def test_dos_interpretes_del_mismo_lado_del_umbral(self):
+        # 3.11 y 3.13 se corrigen igual: cambiar de uno a otro no sesga nada.
+        for antes_v, despues_v in (("3.11.0", "3.13.0"), ("3.9.7", "3.10.11")):
+            with self.subTest(versiones=(antes_v, despues_v)):
+                a, d = ejecucion(), ejecucion()
+                a["system"] = dict(a["system"], python_version=antes_v)
+                d["system"] = dict(d["system"], python_version=despues_v)
+                self.assertNotIn("python", self._motivos(a, d))
+
+    def test_una_version_de_python_ilegible_no_inventa_un_aviso(self):
+        for valor in (None, "", "vete a saber", "3", 3.11):
+            with self.subTest(valor=valor):
+                raro = ejecucion()
+                raro["system"] = dict(raro["system"], python_version=valor)
+                self.assertNotIn("python", self._motivos(raro, ejecucion()))
+
+    def test_el_umbral_es_el_de_PY_ADJUST(self):
+        # Si alguien mueve PY_ADJUST, este test lo obliga a mover también esto.
+        self.assertEqual(_ajuste_python(f"{sys.version_info[0]}.{sys.version_info[1]}.0"),
+                         PY_ADJUST)
+
+    # ----------------------------------------------------------- cobertura ---
+    def test_no_gpu_contra_completo(self):
+        completo = ejecucion()
+        completo["scores"] = {"overall": 100.0, "components": {"disk": 100.0, "gpu": 80.0}}
+        motivos = self._motivos(ejecucion(), completo)
+        self.assertEqual(motivos["coverage"]["severity"], "media")
+        self.assertIn("gpu", motivos["coverage"]["text"])
+
+    # ------------------------------------------------------------ conjunto ---
+    def test_solo_lo_grave_invalida_la_resta(self):
+        # Un aviso «media» se enseña, pero la comparación sigue teniendo sentido.
+        completo = ejecucion()
+        completo["scores"] = {"overall": 100.0, "components": {"disk": 100.0, "gpu": 80.0}}
+        cmp = compare_runs(ejecucion(), completo)
+        self.assertTrue(cmp["meta"]["comparable"])
+        self.assertEqual(len(cmp["meta"]["comparability"]), 1)
+
+    def test_el_caso_que_no_avisaba_de_nada(self):
+        # Verificado en el informe: quick v2.1.0 contra completa v2.6.0 devolvía
+        # same_machine=True y cero avisos.
+        viejo = ejecucion()
+        viejo["meta"] = {"version": "2.1.0", "generated_at": "2026-01-01T10:00:00",
+                         "quick": True}
+        viejo["system"] = dict(viejo["system"], python_version="3.10.11")
+        del viejo["reference_meta"]
+        nuevo = ejecucion()
+        nuevo["system"] = dict(nuevo["system"], python_version="3.13.0")
+        cmp = compare_runs(viejo, nuevo)
+        self.assertFalse(cmp["meta"]["comparable"])
+        self.assertEqual({m["key"] for m in cmp["meta"]["comparability"]},
+                         {"quick", "version", "python"})
 
 
 class InformeCompleto(unittest.TestCase):
@@ -300,7 +418,7 @@ class InformeCompleto(unittest.TestCase):
         for clave in ("meta", "overall", "tests", "components", "findings",
                       "coverage", "calibration", "ambient"):
             self.assertIn(clave, cmp)
-        self.assertTrue(cmp["meta"]["same_machine"])
+        self.assertTrue(cmp["meta"]["comparable"])
         self.assertEqual(cmp["overall"]["delta_pct"], 0.0)
 
     def test_no_revienta_con_json_minimos(self):

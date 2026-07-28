@@ -195,18 +195,106 @@ def _cobertura(run: dict) -> dict:
     }
 
 
-def mismo_equipo(antes: dict, despues: dict) -> tuple[bool, list[str]]:
-    """Si las dos medidas son del mismo hardware. Comparar equipos distintos no
-    está prohibido —sirve para contrastar dos máquinas— pero no puede pasar por
-    un «antes y después»."""
-    diferencias = []
+# Peso de cada discrepancia. «alta» significa que las dos cifras salen de reglas
+# distintas y restarlas no dice nada; «media», que la resta se sostiene pero hay
+# que leerla sabiendo qué más ha cambiado.
+GRAVE, LEVE = "alta", "media"
+
+
+def _ajuste_python(version: Any) -> float | None:
+    """El factor con el que se corrigió el intérprete en esa ejecución.
+
+    `PY_ADJUST` vale 1.0 en 3.11 o superior y 1.35 por debajo, porque 3.11 es un
+    25-40% más rápido en código puro. Comparar una ejecución desde el `.exe`
+    —empaquetado con un intérprete— contra otra desde el código fuente con otro
+    mete ese 35% en las tres pruebas de CPU monohilo, y no lo pone el hardware.
+    """
+    if not isinstance(version, str):
+        return None
+    partes = version.split(".")
+    if len(partes) < 2:
+        return None
+    try:
+        numero = (int(partes[0]), int(partes[1]))
+    except ValueError:
+        return None
+    return 1.0 if numero >= (3, 11) else 1.35
+
+
+def _motivo(clave: str, gravedad: str, texto: str) -> dict:
+    return {"key": clave, "severity": gravedad, "text": texto}
+
+
+def comparabilidad(antes: dict, despues: dict) -> list[dict]:
+    """Todo lo que impide leer la resta de estas dos ejecuciones como un cambio.
+
+    `mismo_equipo` cubría exactamente una de las formas de no ser comparables, y
+    no la más frecuente: lo normal es comparar un equipo consigo mismo después
+    de haber tocado algo. Lo que falsea la resta de verdad es medir dos veces con
+    reglas distintas —el modo rápido usa 192 MB de disco en vez de 512, 4000 IOPS
+    en vez de 12000 y una sola repetición por prueba—, puntuar contra dos escalas
+    de referencia distintas, o corregir el intérprete con dos factores distintos.
+    Nada de eso se veía, y todo estaba ya guardado en el JSON.
+    """
+    motivos: list[dict] = []
+    sa, sd = antes.get("system") or {}, despues.get("system") or {}
+    ma, md = antes.get("meta") or {}, despues.get("meta") or {}
+
+    # --- El hardware: comparar dos máquinas es legítimo, pero no es un «antes y
+    # después». Esto es lo único que se avisaba hasta ahora.
     for campo, etiqueta in (("hostname", "equipo"), ("cpu_name", "CPU"),
                             ("ram_total", "RAM total")):
-        a = (antes.get("system") or {}).get(campo)
-        d = (despues.get("system") or {}).get(campo)
+        a, d = sa.get(campo), sd.get(campo)
         if a and d and a != d:
-            diferencias.append(f"{etiqueta}: «{a}» → «{d}»")
-    return not diferencias, diferencias
+            motivos.append(_motivo("hardware", GRAVE, f"{etiqueta}: «{a}» → «{d}»"))
+
+    # --- El modo: dos escalas, no dos medidas.
+    if bool(ma.get("quick")) != bool(md.get("quick")):
+        rapida = "la primera" if ma.get("quick") else "la segunda"
+        motivos.append(_motivo(
+            "quick", GRAVE,
+            f"{rapida} se midió con --quick: menos datos, menos repeticiones y "
+            f"otras escalas, así que la diferencia no es del equipo"))
+
+    # --- La escala de referencia con la que se dieron las notas.
+    ra = (antes.get("reference_meta") or {}).get("date")
+    rd = (despues.get("reference_meta") or {}).get("date")
+    if ra and rd:
+        if ra != rd:
+            motivos.append(_motivo(
+                "reference", GRAVE,
+                f"la escala de referencia cambió entre las dos ({ra} → {rd}): "
+                f"las notas no son conmensurables, aunque las cifras crudas sí"))
+    elif (ma.get("version") or "?") != (md.get("version") or "?"):
+        # Las ejecuciones anteriores a la v2.2 no guardaban `reference_meta`, así
+        # que con una de ellas delante no se puede saber si la escala cambió. La
+        # versión es lo único que queda para decirlo, y decirlo es mejor que
+        # afirmar que son comparables sin haberlo mirado.
+        motivos.append(_motivo(
+            "version", LEVE,
+            f"versiones distintas (v{ma.get('version') or '?'} → "
+            f"v{md.get('version') or '?'}) y una de las dos no anota con qué "
+            f"escala puntuó"))
+
+    # --- El intérprete: 35% de sesgo en las pruebas de CPU monohilo.
+    pa, pd = _ajuste_python(sa.get("python_version")), _ajuste_python(sd.get("python_version"))
+    if pa is not None and pd is not None and pa != pd:
+        motivos.append(_motivo(
+            "python", GRAVE,
+            f"Python {sa.get('python_version')} → {sd.get('python_version')}: las "
+            f"pruebas de CPU monohilo se corrigen con factores distintos "
+            f"({pa} y {pd}), y esa diferencia no la pone el equipo"))
+
+    # --- Cobertura: un --no-gpu contra una ejecución completa.
+    ca = set((antes.get("scores") or {}).get("components") or {})
+    cd = set((despues.get("scores") or {}).get("components") or {})
+    if ca != cd:
+        faltan = sorted(ca - cd) + sorted(cd - ca)
+        motivos.append(_motivo(
+            "coverage", LEVE,
+            f"no se midió lo mismo en las dos: {', '.join(faltan)} solo está en "
+            f"una. La nota global sale de conjuntos distintos"))
+    return motivos
 
 
 def calibracion(antes: dict, despues: dict) -> dict | None:
@@ -236,15 +324,17 @@ def calibracion(antes: dict, despues: dict) -> dict | None:
 
 
 def compare_runs(antes: dict, despues: dict) -> dict[str, Any]:
-    coincide, diferencias = mismo_equipo(antes, despues)
+    motivos = comparabilidad(antes, despues)
     return {
         "meta": {
             "before": {"generated_at": (antes.get("meta") or {}).get("generated_at"),
                        "version": (antes.get("meta") or {}).get("version")},
             "after": {"generated_at": (despues.get("meta") or {}).get("generated_at"),
                       "version": (despues.get("meta") or {}).get("version")},
-            "same_machine": coincide,
-            "machine_differences": diferencias,
+            # No basta con restar: hay que decidir si la resta significa algo. Es
+            # el mismo criterio que el módulo ya aplica al margen de cada prueba.
+            "comparable": not any(m["severity"] == GRAVE for m in motivos),
+            "comparability": motivos,
         },
         "overall": {
             "before": (antes.get("scores") or {}).get("overall"),

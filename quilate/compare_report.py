@@ -38,11 +38,18 @@ def print_comparison(cmp: dict[str, Any], nombre_antes: str, nombre_despues: str
     print(f"  {C.DIM}después{C.RESET} {nombre_despues}   "
           f"{C.DIM}{meta['after']['generated_at'] or 'sin fecha'} "
           f"· v{meta['after']['version'] or '?'}{C.RESET}")
-    if not meta["same_machine"]:
-        print(f"\n  {C.YELLOW}⚠ No son el mismo equipo: {'; '.join(meta['machine_differences'])}."
-              f"{C.RESET}")
-        print(f"    {C.DIM}Sirve para contrastar dos máquinas, pero no es un antes y después."
-              f"{C.RESET}")
+    motivos = meta.get("comparability") or []
+    if motivos:
+        graves = [m for m in motivos if m["severity"] == "alta"]
+        print(f"\n  {C.YELLOW if graves else C.DIM}"
+              f"{'⚠' if graves else '·'} Estas dos ejecuciones no se restan sin más:{C.RESET}")
+        for m in motivos:
+            color = C.YELLOW if m["severity"] == "alta" else C.DIM
+            for i, linea in enumerate(_wrap(m["text"], BOX_W - 8)):
+                print(f"    {color}{'– ' if i == 0 else '  '}{linea}{C.RESET}")
+        if graves:
+            print(f"    {C.DIM}La comparación se hace igual, pero léela sabiendo esto: "
+                  f"parte de\n    la diferencia no la pone el equipo.{C.RESET}")
 
     # --- Nota global ---
     total = cmp["overall"]
