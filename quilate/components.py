@@ -23,18 +23,24 @@ COMPONENT_GROUPS: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
     ("cpu", "Procesador", ("cpu_single", "cpu_multi"), ("cpu_single", "cpu_multi")),
     ("memory", "Memoria RAM", ("memory",), ("memory",)),
     ("disk", "Almacenamiento", ("disk",), ("disk_write", "disk_read", "disk_iops")),
-    ("gpu", "Gráfica", (), ()),
+    ("gpu", "Gráfica", ("gpu",), ("gpu_compute", "gpu_vram", "gpu_pcie")),
+    ("network", "Red", ("network",), ()),
     ("system", "Sistema y software", ("system",), ()),
 ]
 
 COMPONENT_TO_GROUP = {"cpu_single": "cpu", "cpu_multi": "cpu", "memory": "memory",
-                      "disk": "disk", "system": "system"}
+                      "disk": "disk", "gpu": "gpu", "system": "system"}
 
 # El campo `component` de un hallazgo existe para la proyección: dice a qué score
-# sintético se aplica la ganancia. gpu_driver es "system" porque no hay ninguna
-# medida de GPU que corregir. En la ficha, en cambio, el sitio natural para leerlo
-# es junto a la gráfica, así que se reasigna por id sin tocar la proyección.
-FINDING_GROUP_OVERRIDES = {"gpu_driver": "gpu"}
+# sintético se aplica la ganancia. En la ficha, en cambio, lo que importa es
+# dónde se lee mejor, y no siempre coinciden. `gpu_driver` es "system" porque no
+# hay ninguna medida de GPU que corregir actualizando el driver; los hallazgos de
+# red también, porque no hay nota sintética de red a la que aplicarles la
+# ganancia. Se reasignan por id, sin tocar la proyección.
+FINDING_GROUP_OVERRIDES = {"gpu_driver": "gpu",
+                           "wifi_downgrade": "network", "wifi_signal": "network",
+                           "wifi_banda": "network", "ethernet_lento": "network",
+                           "dns_lento": "network", "red_perdida": "network"}
 
 
 def finding_group(f: Finding) -> str:
@@ -165,6 +171,60 @@ def _component_specs(key: str, si: SystemInfo, bench: Benchmark | None,
                 out.append(("  Estado actual", live))
             if g.get("resolution"):
                 out.append(("  Modo de pantalla", str(g["resolution"])))
+        # Cuál de las gráficas se puso a calcular. En un portátil con integrada y
+        # dedicada hay dos adaptadores en el inventario y solo una da la nota:
+        # sin esta línea, la puntuación no dice a qué pieza pertenece.
+        medida = (bench.gpu_info if bench else {}) or {}
+        if medida.get("device"):
+            dev = medida["device"]
+            detalle = dev.get("name") or "sin nombre"
+            if dev.get("compute_units"):
+                detalle += f"  ·  {dev['compute_units']} unidades de cómputo"
+            if dev.get("clock_mhz"):
+                detalle += f"  ·  {dev['clock_mhz']:.0f} MHz"
+            out.append(("Medida por OpenCL", detalle))
+            if dev.get("driver"):
+                out.append(("  Runtime OpenCL", str(dev["driver"])))
+            if medida.get("compute_iters"):
+                out.append(("  Vueltas del kernel",
+                            f"{medida['compute_iters']:,}".replace(",", ".")
+                            + "  ·  calibradas para este dispositivo"))
+        elif bench and getattr(bench, "gpu_unavailable", ""):
+            # «Sin nota» y «no se ha podido medir» no son lo mismo, y la razón
+            # concreta (sin OpenCL, driver roto, GPU ocupada) es lo accionable.
+            out.append(("Medida por OpenCL", f"no medible: {bench.gpu_unavailable}"))
+
+    elif key == "network":
+        red = getattr(auditor, "network", {}) or {}
+        for a in red.get("connected") or []:
+            velocidad = f"{a['link_mbps']:,.0f} Mbps" if a.get("link_mbps") else "sin negociar"
+            out.append(("Enlace activo", f"{a['name']}  ·  {velocidad}  ·  {a['description']}"))
+        wifi = red.get("wifi") or {}
+        if wifi:
+            detalle = [wifi.get("radio") or "wifi"]
+            if wifi.get("band_ghz"):
+                detalle.append(f"{wifi['band_ghz']} GHz")
+            if wifi.get("channel"):
+                detalle.append(f"canal {wifi['channel']}")
+            if wifi.get("rssi_dbm") is not None:
+                detalle.append(f"{wifi['rssi_dbm']} dBm ({wifi.get('signal_pct', '?')}%)")
+            out.append(("Wifi", "  ·  ".join(detalle)))
+        latencia = red.get("latency") or {}
+        for destino in latencia.get("targets") or []:
+            marca = (f"{destino['median_ms']:.1f} ms" if destino["median_ms"]
+                     else "sin respuesta")
+            if destino.get("jitter_ms"):
+                marca += f"  ·  ±{destino['jitter_ms']:.1f} ms"
+            if destino["loss_pct"]:
+                marca += f"  ·  {destino['loss_pct']}% de pérdida"
+            out.append((f"  Latencia a {destino['name']}", marca))
+        dns = red.get("dns") or {}
+        if dns.get("median_ms"):
+            out.append(("Resolución DNS", f"{dns['median_ms']:.1f} ms de mediana"
+                        + (f"  ·  {dns['failures']} fallos de {dns['queried']}"
+                           if dns.get("failures") else "")))
+        elif red and not red.get("active"):
+            out.append(("Latencia y DNS", "no medidos (--no-net)"))
 
     elif key == "system":
         out.append(("Sistema operativo", si.os_name))

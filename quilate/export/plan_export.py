@@ -10,13 +10,13 @@ from datetime import datetime
 from pathlib import Path
 
 from ..audit import Auditor
-from ..benchmark import Benchmark
+from ..benchmark import BUSY_CPU_PCT, Benchmark
 from ..components import ComponentCard, build_component_cards
 from ..console import human_bytes
 from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
 from ..projection import priority_rank
 from ..storage_scan import ScanResult, candidate_bytes
-from ..sysinfo import SystemInfo
+from ..sysinfo import SystemInfo, gpu_label
 
 
 PLAN_HEADER = """# ==============================================================================
@@ -316,6 +316,39 @@ def _ps_str(texto: str) -> str:
     return (texto.replace("`", "``").replace('"', '`"').replace("$", "`$"))
 
 
+def _plan_system_summary(si: SystemInfo, bench: Benchmark | None) -> str:
+    """Para que equipo se genero este plan.
+
+    Un plan de optimizacion es un script que se guarda, se pasa por correo y se
+    ejecuta dias despues. Sin esta cabecera, dos planes de dos maquinas son dos
+    ficheros indistinguibles, y el riesgo de aplicar el equivocado es real: los
+    bloques tocan el registro y los servicios del equipo donde se ejecuten, no
+    del equipo donde se midieron.
+    """
+    ram = f"{si.ram_total / 1024**3:.0f} GB"
+    if si.ram_speed_mhz:
+        ram += f" @ {si.ram_speed_mhz} MT/s"
+    lines = ["\n# ==============================================================================",
+             "#  EQUIPO PARA EL QUE SE GENERO ESTE PLAN",
+             "#  Comprueba que coincide antes de ejecutarlo en otra maquina.",
+             "# ==============================================================================",
+             f"#  Nombre: {si.hostname}  |  {si.os_name} {si.os_build}",
+             f"#  CPU:    {si.cpu_name} ({si.cpu_cores}C/{si.cpu_threads}T)",
+             f"#  RAM:    {ram}",
+             f"#  Disco:  {si.system_drive} {si.system_drive_media}"]
+    for g in si.gpus:
+        lines.append(f"#  GPU:    {gpu_label(g)}  |  driver {g.get('driver') or 'n/d'}")
+    medida = (bench.gpu_info if bench else {}) or {}
+    if medida.get("device", {}).get("name"):
+        lines.append(f"#  GPU medida por OpenCL: {medida['device']['name']}")
+    elif bench is not None and getattr(bench, "gpu_unavailable", ""):
+        lines.append(f"#  GPU no medible: {bench.gpu_unavailable}")
+    if bench is not None and bench.busy_during_run() >= BUSY_CPU_PCT:
+        lines.append(f"#  AVISO: al medir habia un {bench.busy_during_run():.0f}% de CPU "
+                     f"ocupada por otros programas; las notas de abajo estan tocadas.")
+    return "\n".join(lines) + "\n"
+
+
 def _plan_component_summary(cards: list[ComponentCard]) -> str:
     lines = ["\n# ==============================================================================",
              "#  RESUMEN POR COMPONENTE (nota medida y margen de mejora agrupado)",
@@ -361,7 +394,8 @@ def _plan_large_files(scan: ScanResult | None) -> str:
 
 
 def export_plan(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Auditor) -> int:
-    blocks: list[str] = [_plan_component_summary(build_component_cards(si, bench, auditor)),
+    blocks: list[str] = [_plan_system_summary(si, bench),
+                         _plan_component_summary(build_component_cards(si, bench, auditor)),
                          _plan_large_files(getattr(auditor, "scan", None))]
     n = 0
     for f in sorted([x for x in auditor.findings if x.gain > 0], key=priority_rank):

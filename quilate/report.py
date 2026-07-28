@@ -11,7 +11,8 @@ from .audit import Auditor, SEVERITY_ORDER, sev_label
 from .benchmark import (Benchmark, PY_ADJUST, REFERENCE_DATE, REFERENCE_MACHINE,
                         reference_age_months, reference_is_stale)
 from .components import ComponentCard, _no_score_text, build_component_cards
-from .console import (BOX_W, C, _wrap, bar, grade, human_bytes, kv, section)
+from .console import (BOX_W, C, _wrap, bar, component_label, grade, human_bytes,
+                      kv, section)
 from .const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
 from .projection import priority_rank
 from .storage_scan import RECLAIMABLE, REVIEWABLE, ScanResult, candidate_bytes
@@ -204,9 +205,7 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         comp = bench.component_scores()
         weakest = min(comp, key=lambda k: comp[k]) if comp else None
         if weakest:
-            label = {"cpu_single": "CPU monohilo", "cpu_multi": "CPU multihilo",
-                     "memory": "memoria", "disk": "almacenamiento"}[weakest]
-            print(f"  {C.YELLOW}▸ Cuello de botella principal: {label} "
+            print(f"  {C.YELLOW}▸ Cuello de botella principal: {component_label(weakest)} "
                   f"({comp[weakest]:.0f} pts){C.RESET}")
 
         # --- Métricas que no puntúan pero explican la puntuación ---
@@ -272,13 +271,10 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         print(f"  {'Fluidez percibida estimada'.ljust(34)} {C.GREEN}{C.BOLD}{exp:>6.0f} pts{C.RESET}"
               f"  {bar(exp, 22)}   {C.GREEN}+{projection['experiential_pct']:.0f}%{C.RESET}")
         print()
-        labels = {"cpu_single": "CPU monohilo", "cpu_multi": "CPU multihilo",
-                  "memory": "Memoria", "disk": "Almacenamiento",
-                    "gpu": "GPU"}
         for key, score in projection.get("current_components", {}).items():
             gain = projection["component_gain"].get(key, 0.0)
             if gain > 0.005:
-                print(f"    {labels.get(key, key).ljust(20)} {score:>5.0f} → "
+                print(f"    {component_label(key).ljust(20)} {score:>5.0f} → "
                       f"{C.GREEN}{projection['projected_components'][key]:>5.0f} pts "
                       f"(+{gain * 100:.0f}%){C.RESET}")
         sysgain = projection.get("system_gain", 0.0)
@@ -333,8 +329,8 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         if dns.get("median_ms"):
             kv("Resolución DNS", f"{dns['median_ms']:.1f} ms")
         if not red.get("active"):
-            print(f"  {C.DIM}Latencia y DNS no se han medido: requieren contactar con "
-                  f"servidores externos (--net).{C.RESET}")
+            print(f"  {C.DIM}Latencia y DNS no se han medido: se ejecutó con --no-net, "
+                  f"que evita contactar con servidores externos.{C.RESET}")
 
     # --- Lo que no se ha podido comprobar ---
     # Va antes del veredicto a propósito: es la advertencia de hasta dónde llega

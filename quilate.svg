@@ -8,8 +8,14 @@
       <stop offset="1" stop-color="#b87c0b"/>
     </linearGradient>
     <!-- La cola no toca el anillo en el icono original: este hueco reproduce esa
-         separación recortando el trazo justo por donde pasa la diagonal. -->
-    <mask id="ql-muesca">
+         separación recortando el trazo justo por donde pasa la diagonal.
+         maskUnits va explícito: por defecto la región de la máscara es la caja
+         del elemento enmascarado ampliada un 10%, y esa caja se calcula SIN el
+         grosor del trazo. Se quedaba una unidad por dentro del borde exterior
+         del anillo, y en un círculo de radio 37 recortar una unidad deja una
+         cuerda plana de diecisiete: el círculo salía achatado arriba y a la
+         izquierda. -->
+    <mask id="ql-muesca" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
       <rect width="100" height="100" fill="#fff"/>
       <rect x="56.5" y="46" width="21" height="52" fill="#000"
             transform="rotate(-45 67 72)"/>

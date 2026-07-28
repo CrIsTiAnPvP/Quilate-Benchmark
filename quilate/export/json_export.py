@@ -13,6 +13,7 @@ from ..benchmark import (Benchmark, REFERENCE, REFERENCE_DATE, REFERENCE_MACHINE
                          REFERENCE_ORIGIN, reference_age_months, reference_is_stale)
 from ..components import build_component_cards
 from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
+from ..report import build_verdict
 from ..sensors import cpu_temperature, gpu_telemetry, temperature_report, temperature_source
 from ..storage_scan import ScanResult, candidate_bytes
 from ..sysinfo import SystemInfo
@@ -81,6 +82,11 @@ def build_payload(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                                for c, r in getattr(auditor, "not_applicable", [])],
         },
         "projection": projection,
+        # La conclusión en una frase. La daban la consola y el HTML, y el JSON
+        # obligaba a reconstruirla: quien procese estos datos merece leer la
+        # misma lectura que el usuario, no una propia.
+        "verdict": dict(zip(("summary", "notes"), build_verdict(si, bench, auditor, projection))),
+        "notes": list(getattr(auditor, "notes", [])),
         "storage_scan": _scan_payload(getattr(auditor, "scan", None)),
         "sensors": {
             "cpu_temperature": cpu_temperature(),

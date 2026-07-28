@@ -6,8 +6,10 @@ pueda enviar por correo o abrir sin conexion y siga funcionando igual.
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -18,18 +20,14 @@ from ..benchmark import (BUSY_CPU_PCT, Benchmark, REFERENCE, REFERENCE_DATE,
                          REFERENCE_MACHINE, REFERENCE_ORIGIN, reference_age_months,
                          reference_is_stale)
 from ..sensors import temperature_report, temperature_source
-from ..components import (ComponentCard, _no_score_text, build_component_cards,
-                          finding_group)
-from ..console import grade
+from ..components import (COMPONENT_TO_GROUP, ComponentCard, _no_score_text,
+                          build_component_cards, finding_group)
+from ..console import COMPONENT_LABELS, grade
 from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE, WEBSITE_URL
 from ..projection import priority_rank
 from ..report import build_verdict
 from ..storage_scan import (RECLAIMABLE, REVIEWABLE, ScanResult, candidate_bytes)
 from ..sysinfo import KIND_LABELS, SystemInfo, gpu_label, primary_gpu
-
-COMPONENT_LABELS = {"cpu_single": "CPU monohilo", "cpu_multi": "CPU multihilo",
-                    "memory": "Memoria", "disk": "Almacenamiento",
-                    "gpu": "GPU"}
 
 SEVERITY_LABELS = {"critical": "críticos", "high": "altos", "medium": "medios",
                    "low": "bajos", "info": "info"}
@@ -89,33 +87,143 @@ ICONS = {
     # Ondas de wifi: la red se representa por el enlace, que es lo que se mide.
     "i-net": '<path d="M2 8.5a16 16 0 0 1 20 0"/><path d="M5.5 12a11 11 0 0 1 13 0"/>'
              '<path d="M9 15.5a6 6 0 0 1 6 0"/><circle cx="12" cy="19.5" r="1"/>',
+    "i-search": '<circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/>',
+    "i-x": '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+    "i-check": '<polyline points="20 6 9 17 4 12"/>',
+    "i-help": '<circle cx="12" cy="12" r="10"/>'
+              '<path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.6-3 4"/>'
+              '<line x1="12" y1="17.5" x2="12.01" y2="17.5"/>',
+    "i-layers": '<polygon points="12 2 22 8 12 14 2 8 12 2"/>'
+                '<polyline points="2 16 12 22 22 16"/>',
 }
 
 COMPONENT_ICONS = {"cpu": "i-cpu", "memory": "i-ram", "disk": "i-disk",
-                   "gpu": "i-gpu", "system": "i-sys"}
+                   "gpu": "i-gpu", "network": "i-net", "system": "i-sys"}
 
 # La barra de navegación se queda sin sitio con los títulos completos y acaba
 # recortando las últimas entradas: ahí van estos nombres cortos.
 NAV_LABELS = {"componentes": "Componentes", "proyeccion": "Proyección",
               "plan": "Plan de acción", "hallazgos": "Hallazgos"}
 
+# Para qué sirve cada sección, que es lo que decide en qué orden se leen:
+#   accion       lo que hay que decidir y aplicar
+#   diagnostico  lo que explica por qué sale esa nota
+#   referencia   inventario y escalas, se consultan pero no se actúa sobre ellas
+#   marca        la conclusión, en el color de la casa
+# Sin esta distinción, doce secciones idénticas compiten todas por igual.
+TONOS = {"plan": "accion", "hallazgos": "accion", "veredicto": "marca",
+         "inventario": "referencia"}
+
+# Grupos para los presets de exportación de la bandeja.
+GRUPOS = {"plan": "accion", "hallazgos": "accion", "veredicto": "accion",
+          "proyeccion": "accion tecnico"}
+
+# Términos que el informe usa y que no todo el mundo tiene por qué saber. Se
+# explican donde aparecen por primera vez, no en un anexo que nadie abre.
+GLOSARIO = {
+    "margen": ("Cuánto varió una prueba consigo misma al repetirla o al partir el "
+               "mismo trabajo en tramos. Un número solo nunca delata que está "
+               "contaminado; con margen, sí. Por encima de ±25% la cifra vale como "
+               "orden de magnitud, pero no para comparar con otra ejecución."),
+    "referencia": ("100 puntos equivalen a un equipo de gama media reciente, con la "
+                   "fecha en que se fijó esa equivalencia. Por encima de 100 el "
+                   "equipo va mejor que esa referencia; por debajo, peor."),
+    "sostenido": ("El trabajo hecho en el último cuarto de una carga larga frente al "
+                  "hecho en el primero. Por debajo del 90% el equipo se está "
+                  "limitando solo por temperatura o por potencia."),
+    "cobertura": ("Cuántas comprobaciones llegaron a un veredicto. Las que no, no "
+                  "significan «correcto»: significan que no había dato con el que "
+                  "opinar, y se listan con el motivo."),
+    "carga-ajena": ("CPU que consumían otros programas con el benchmark parado. Si es "
+                    "alta, no se está midiendo el equipo: se está midiendo el equipo "
+                    "mientras hace otra cosa."),
+    "opencl": ("La biblioteca con la que se pone a calcular la gráfica. La instala el "
+               "propio driver, así que no hay nada que instalar aparte, y funciona "
+               "igual con NVIDIA, AMD e Intel."),
+}
+
+# Términos ya explicados en este documento. Se vacía al empezar cada informe:
+# repetir el mismo globo diez veces convierte una ayuda en ruido.
+_TERMINOS_VISTOS: set[str] = set()
+
 HTML_CSS = """
-:root{--bg:#0d1117;--card:#161b22;--card2:#1b2028;--line:#262d38;--txt:#e6edf3;
---dim:#8b949e;--acc:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--brand:#e8b33e;
---brand-dark:#8a6a1e;
+/* ==========================================================================
+   Quilate · hoja de estilo del informe
+   --------------------------------------------------------------------------
+   Tres zonas de color que no se mezclan nunca, porque significan cosas
+   distintas y mezclarlas es lo que convierte un informe en un adorno:
+
+     · DORADO  (--gold)  la marca y la estructura: isotipo, filetes, veredicto.
+                         Nunca califica un dato.
+     · CIAN    (--acc)   lo que se puede pulsar: enlaces, navegación, foco.
+     · SEMÁFORO(--ok/--warn/--bad)  el diagnóstico, y solo el diagnóstico.
+
+   El ámbar del semáforo tira deliberadamente a naranja: con el dorado de la
+   marca al lado, un ámbar amarillo se leía como «esto es de Quilate» en vez de
+   como «esto va regular».
+   ========================================================================== */
+:root{
+--ink:#0a0c11;--ink2:#0e1117;--surface:#141821;--surface2:#1a1f2b;
+--line:#242b38;--line2:#333d4f;
+--txt:#e9edf4;--dim:#95a1b5;--faint:#6d798c;
+
+--gold:#e8b33e;--gold-lt:#ffe9a8;--gold-dk:#8a6a1e;
+--brand:#e8b33e;--brand-dark:#8a6a1e;      /* nombres antiguos, aún referidos */
+
+--acc:#5cc8ff;--acc-soft:rgba(92,200,255,.13);
+--ok:#42c46b;--warn:#f7923b;--bad:#ff5f5f;
+
+--r:15px;--r-s:11px;--r-xs:8px;--pill:999px;
+--sh:0 1px 2px rgba(0,0,0,.45),0 8px 24px -14px rgba(0,0,0,.8);
+--sh-lg:0 12px 40px -12px rgba(0,0,0,.85),0 2px 8px rgba(0,0,0,.4);
 --nav:56px}
+
 *{box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{margin:0;background:var(--bg);color:var(--txt);
-font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-a{color:var(--acc)}
+html{scroll-behavior:smooth;background:var(--ink)}
+body{margin:0;color:var(--txt);background:transparent;
+font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+
+/* Luz dorada arriba a la izquierda y fría arriba a la derecha: da profundidad a
+   la cabecera sin teñir el cuerpo, donde están las tablas. */
+html{background-image:
+radial-gradient(1200px 520px at 12% -10%,rgba(232,179,62,.13),transparent 60%),
+radial-gradient(1000px 480px at 92% -6%,rgba(92,200,255,.09),transparent 58%);
+background-repeat:no-repeat;background-attachment:fixed}
+
+/* Grano. Va incrustado como SVG en la propia URL, así que no rompe la regla de
+   fichero único, y con opacidad muy baja: lo justo para que las superficies no
+   parezcan plástico, no tanto como para estorbar a una tabla de cifras. */
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+opacity:.05;mix-blend-mode:overlay;
+background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+.topbar,.layout,footer,#top,.tray{position:relative;z-index:1}
+
+a{color:var(--acc);text-underline-offset:2px}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+clip:rect(0 0 0 0);white-space:nowrap;border:0}
+
+/* Las cifras se comparan en vertical por columnas: sin cifras de ancho fijo,
+   los millares bailan y dos números del mismo orden parecen distintos. */
+table,.gnum,.n,.cs-num,.big,.kvs div,.chead .note,.mm-n{font-variant-numeric:tabular-nums}
+.num{font-weight:800;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+
 svg.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:2;
 stroke-linecap:round;stroke-linejoin:round}
 svg.ic.lg{width:20px;height:20px}
+svg.ic.sm{width:13px;height:13px}
 
-/* barra de navegación */
-.topbar{position:sticky;top:0;z-index:50;background:rgba(13,17,23,.93);
-backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+/* ---------------------------------------------------------------- topbar -- */
+.topbar{position:sticky;top:0;z-index:60;background:rgba(10,12,17,.88);
+backdrop-filter:blur(16px) saturate(1.4);border-bottom:1px solid var(--line)}
+/* Hilo dorado permanente + barra de progreso de lectura encima de él. */
+.topbar::before{content:"";position:absolute;inset:0 0 auto;height:2px;
+background:linear-gradient(90deg,transparent,var(--gold-dk) 20%,var(--gold) 50%,
+var(--gold-dk) 80%,transparent);opacity:.55}
+.prog{position:absolute;top:0;left:0;height:2px;width:0;z-index:2;
+background:linear-gradient(90deg,var(--gold-dk),var(--gold) 55%,var(--gold-lt));
+box-shadow:0 0 10px rgba(232,179,62,.55)}
 /* Altura variable: con muchas secciones la navegación se repartía en una fila
    con scroll horizontal y la barra oculta, así que los últimos enlaces quedaban
    fuera de la vista sin ninguna pista de que seguían ahí. Ahora envuelve.
@@ -123,159 +231,403 @@ backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
    la barra se dimensionaba con la variable que el JS calcula midiéndola, y como
    offsetHeight incluye el borde inferior cada medida salía un píxel más alta que
    la anterior: la barra crecía sin parar. --nav es solo salida, nunca entrada. */
-.tb{max-width:1300px;margin:0 auto;min-height:40px;display:flex;align-items:center;
-flex-wrap:wrap;gap:10px 16px;padding:8px 20px}
-.tb .logo{font-weight:800;letter-spacing:-.3px;white-space:nowrap;font-size:15px;
-display:flex;align-items:center;gap:8px}
-.tb .logo b{color:var(--brand)}
-.brandmark{width:22px;height:22px;flex:none;display:block}
+.tb{max-width:1320px;margin:0 auto;min-height:40px;display:flex;align-items:center;
+flex-wrap:wrap;gap:9px 14px;padding:9px 20px}
+.tb .logo{font-weight:800;letter-spacing:-.02em;white-space:nowrap;font-size:15px;
+display:flex;align-items:center;gap:9px;color:var(--txt);text-decoration:none}
+.tb .logo b{color:var(--gold)}
+.brandmark{width:24px;height:24px;flex:none;display:block}
 .brandmark.foot{width:16px;height:16px;vertical-align:-3px;margin-right:7px}
+.brandmark.hero{width:68px;height:68px}
 .fbrand{display:flex;align-items:center}
-.tb nav{display:flex;gap:2px;flex:1 1 420px;flex-wrap:wrap}
-.tb nav a{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:8px;
-color:var(--dim);text-decoration:none;font-size:13px;white-space:nowrap;transition:.15s}
-.tb nav a:hover{color:var(--txt);background:var(--card)}
-.tb nav a.active{color:var(--acc);background:rgba(88,166,255,.13)}
-.btn{background:var(--card);color:var(--dim);border:1px solid var(--line);border-radius:8px;
-padding:7px 12px;font:inherit;font-size:12px;cursor:pointer;white-space:nowrap;
-display:flex;align-items:center;gap:6px}
-.btn:hover{color:var(--txt);border-color:var(--acc)}
 
-/* estructura */
-.layout{max-width:1300px;margin:0 auto;padding:26px 20px 72px;display:grid;
-grid-template-columns:286px minmax(0,1fr);gap:26px;align-items:start}
-.side{position:sticky;top:calc(var(--nav) + 20px);display:flex;flex-direction:column;gap:14px}
-.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
-.panel .lbl{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:1.2px;
-font-weight:700;margin-bottom:10px}
-.panel .big{font-size:46px;font-weight:800;letter-spacing:-2px;line-height:1}
-.panel .big span{font-size:15px;font-weight:600;letter-spacing:0;color:var(--dim);margin-left:6px}
-.panel .sub{color:var(--dim);font-size:13px;margin-top:4px}
-.panel .delta{margin-top:12px;font-size:13px;color:var(--dim);border-top:1px solid var(--line);
-padding-top:10px}
-.mini{list-style:none;margin:0;padding:0;font-size:13px}
+/* Dónde se está leyendo. Va en su propia franja bajo la navegación y no pegado
+   al logo: ahí estrujaba la marca contra los enlaces y el ancho le bailaba con
+   cada sección. Está siempre presente, aunque sea para decir «Resumen», porque
+   una fila que aparece y desaparece cambia la altura de la barra —y con ella la
+   variable --nav y el desplazamiento de todos los anclajes— a mitad de scroll. */
+.crumb{border-top:1px solid var(--line);background:rgba(255,255,255,.016)}
+.crumb .cin{max-width:1320px;margin:0 auto;padding:6px 20px;display:flex;
+align-items:center;gap:8px;font-size:11.5px;color:var(--faint)}
+.crumb svg{color:var(--faint)}
+.crumb b{color:var(--txt);font-weight:600;overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap}
+.crumb .pct{margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap}
+
+.tb nav{display:flex;gap:2px;flex:1 1 380px;flex-wrap:wrap}
+.tb nav a{display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:var(--r-xs);
+color:var(--dim);text-decoration:none;font-size:12.5px;white-space:nowrap;
+transition:color .15s,background .15s;position:relative}
+.tb nav a:hover{color:var(--txt);background:var(--surface)}
+.tb nav a.active{color:var(--acc);background:var(--acc-soft);
+box-shadow:inset 0 -2px 0 var(--acc)}
+/* Punto de severidad en la propia navegación: se ve dónde está lo urgente sin
+   entrar a mirar. */
+.tb nav a .sev{width:6px;height:6px;border-radius:var(--pill);flex:none}
+.sev.s-critical,.sev.s-high{background:var(--bad)}
+.sev.s-medium{background:var(--warn)}
+.sev.s-low,.sev.s-info{background:var(--acc)}
+
+.find{display:flex;align-items:center;gap:7px;background:var(--surface);
+border:1px solid var(--line);border-radius:var(--pill);padding:5px 12px;min-width:186px;
+position:relative}
+.find svg{color:var(--faint)}
+.find input{background:none;border:0;color:var(--txt);font:inherit;font-size:12.5px;
+width:100%;min-width:0;outline:none}
+.find input::placeholder{color:var(--faint)}
+.find.hit{border-color:var(--acc)}
+.find .cnt{color:var(--faint);font-size:11px;white-space:nowrap}
+/* Un campo de filtro vacío no dice qué se puede filtrar. Al enfocarlo aparecen
+   ejemplos sacados de este informe —sus categorías, sus componentes—, no una
+   lista genérica que podría no encontrar nada. */
+.tips{position:absolute;top:calc(100% + 9px);left:0;z-index:70;background:var(--ink2);
+border:1px solid var(--line2);border-radius:var(--r-s);box-shadow:var(--sh-lg);
+padding:11px 12px;display:none;width:max-content;max-width:min(360px,82vw)}
+.find:focus-within .tips{display:block}
+.find.hit .tips{display:none}
+.tips .th{font-size:10px;text-transform:uppercase;letter-spacing:.13em;color:var(--faint);
+margin-bottom:9px;font-weight:700}
+.tips .tr{display:flex;flex-wrap:wrap;gap:6px}
+.tips button{background:var(--surface);border:1px solid var(--line);color:var(--dim);
+border-radius:var(--pill);padding:3px 11px;font:inherit;font-size:11.5px;cursor:pointer}
+.tips button:hover{color:var(--acc);border-color:var(--acc)}
+
+.btn{background:var(--surface);color:var(--dim);border:1px solid var(--line);
+border-radius:var(--r-xs);padding:6px 11px;font:inherit;font-size:12px;cursor:pointer;
+white-space:nowrap;display:flex;align-items:center;gap:6px;
+transition:color .15s,border-color .15s,background .15s}
+.btn:hover{color:var(--txt);border-color:var(--acc)}
+.btn[disabled]{opacity:.42;cursor:default}
+.btn[disabled]:hover{color:var(--dim);border-color:var(--line)}
+.btn.gold{border-color:rgba(232,179,62,.42);color:var(--gold)}
+.btn.gold:hover{background:rgba(232,179,62,.1);border-color:var(--gold)}
+
+/* --------------------------------------------------------------- layout -- */
+.layout{max-width:1320px;margin:0 auto;padding:26px 20px 96px;display:grid;
+grid-template-columns:298px minmax(0,1fr);gap:26px;align-items:start}
+/* La barra se fija SOLO si cabe entera. Fijarla siempre dejaba el ultimo panel
+   fuera de la pantalla hasta llegar al final de la pagina, y darle scroll propio
+   cortaba las frases a media palabra. Ninguna de las dos es aceptable, asi que
+   en pantallas que no dan de si se desplaza con la pagina y se ve completa, que
+   es lo que cualquiera espera de una barra lateral. */
+.side{display:flex;flex-direction:column;gap:14px}
+@media (min-height:940px){
+.side{position:sticky;top:calc(var(--nav) + 18px)}
+}
+.panel{background:linear-gradient(180deg,var(--surface2),var(--surface));
+border:1px solid var(--line);border-radius:var(--r);padding:16px;box-shadow:var(--sh);
+position:relative;overflow:hidden}
+/* El panel de la nota es el que lleva la marca: filete dorado y el isotipo de
+   filigrana al fondo. Es la única cifra que resume todo el informe. */
+.panel.mark{border-color:rgba(232,179,62,.24)}
+.panel.mark::before{content:"";position:absolute;inset:0 0 auto;height:2px;
+background:linear-gradient(90deg,transparent,var(--gold),transparent);opacity:.8}
+/* La filigrana se queda fuera del flujo. OJO con el orden: `.panel>*` es mas
+   especifico que `.wm` y le ganaba el `position`, asi que el isotipo entraba en
+   el flujo como un bloque de 150px y empujaba hacia abajo el titulo y el dial.
+   El `:not()` es justo lo que evita esa pelea. */
+.panel>*:not(.wm),.verdict>*:not(.wm){position:relative;z-index:1}
+.wm{position:absolute;right:-26px;bottom:-30px;width:150px;height:150px;
+opacity:.05;pointer-events:none;z-index:0}
+.lbl{color:var(--faint);font-size:10.5px;text-transform:uppercase;letter-spacing:.15em;
+font-weight:700;margin-bottom:11px}
+.panel .sub{color:var(--dim);font-size:12.5px;margin-top:4px}
+.panel .delta{margin-top:13px;font-size:12.5px;color:var(--dim);
+border-top:1px solid var(--line);padding-top:10px}
+.mini{list-style:none;margin:0;padding:0;font-size:12.5px}
 .mini li{display:flex;gap:9px;align-items:flex-start;padding:5px 0}
-.mini li svg{color:var(--dim);margin-top:4px}
+.mini li svg{color:var(--faint);margin-top:4px}
 .mini li span{min-width:0;overflow-wrap:anywhere}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
-.hint{margin-top:12px;font-size:12px;color:var(--dim);border-top:1px solid var(--line);
-padding-top:10px}
-header.page{margin-bottom:22px}
-header.page h1{margin:0 0 6px;font-size:27px;letter-spacing:-.6px}
-header.page .meta{color:var(--dim);font-size:13px}
+.hint{margin-top:12px;font-size:11.5px;color:var(--faint);border-top:1px solid var(--line);
+padding-top:10px;line-height:1.5}
 
-/* secciones colapsables */
-details.sec{background:var(--card);border:1px solid var(--line);border-radius:12px;
+/* ---------------------------------------------------------------- dial --- */
+.gauge{position:relative;width:100%;display:flex;justify-content:center;margin:16px 0 6px}
+.gauge svg{display:block;overflow:visible}
+.gauge .grail{stroke:#1e2532;fill:none;stroke-linecap:round}
+.gauge .gval{fill:none;stroke-linecap:round;
+filter:drop-shadow(0 0 7px var(--glow,rgba(66,196,107,.5)));
+animation:gfill 1.05s cubic-bezier(.16,.84,.34,1) both}
+@keyframes gfill{from{stroke-dashoffset:var(--dash)}to{stroke-dashoffset:0}}
+.gauge .gtick{stroke:var(--txt);stroke-width:2;opacity:.85;stroke-linecap:round}
+.gauge .gtxt{fill:var(--faint);font-size:9.5px;font-weight:700;letter-spacing:.1em;
+text-anchor:middle}
+.gauge .gin{position:absolute;inset:0;display:flex;flex-direction:column;
+align-items:center;justify-content:center;pointer-events:none}
+.gauge .gnum{font-size:42px;font-weight:800;letter-spacing:-.045em;line-height:1}
+.gauge .gunit{font-size:11px;color:var(--faint);letter-spacing:.12em;margin-top:2px;
+text-transform:uppercase}
+.gauge .gletter{font-size:11.5px;font-weight:800;letter-spacing:.12em;margin-top:7px;
+padding:1px 10px;border-radius:var(--pill);border:1px solid currentColor}
+
+/* --------------------------------------------------------- cabecera ------ */
+header.page{margin-bottom:22px;display:flex;align-items:center;gap:18px}
+header.page .htxt{min-width:0}
+header.page .kicker{color:var(--gold);font-size:10.5px;font-weight:700;
+letter-spacing:.19em;text-transform:uppercase;margin-bottom:5px}
+header.page h1{margin:0 0 6px;font-size:30px;letter-spacing:-.028em;line-height:1.12;
+font-weight:800}
+header.page .meta{color:var(--dim);font-size:12.5px;overflow-wrap:anywhere}
+@media (max-width:560px){header.page .brandmark.hero{display:none}}
+
+/* ------------------------------------------------------------- hero ------ */
+.hero{display:grid;grid-template-columns:repeat(auto-fit,minmax(172px,1fr));gap:14px;
 margin-bottom:16px;scroll-margin-top:calc(var(--nav) + 14px)}
+.hero .box{background:linear-gradient(180deg,var(--surface2),var(--surface));
+border:1px solid var(--line);border-radius:var(--r);padding:18px;box-shadow:var(--sh);
+position:relative;overflow:hidden}
+/* Filo de color arriba de cada dato de cabecera: el mismo semáforo que la
+   cifra, legible de un vistazo y sin repetir el número. */
+.hero .box::before{content:"";position:absolute;inset:0 0 auto;height:3px;
+background:var(--edge,var(--line2))}
+.hero .n{font-size:37px;font-weight:800;letter-spacing:-.045em;line-height:1.08}
+.hero .l{color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.11em;
+margin-top:9px;line-height:1.45}
+.hero .box .foot{color:var(--faint);font-size:11.5px;margin-top:9px;
+border-top:1px solid var(--line);padding-top:9px;line-height:1.5}
+
+/* ----------------------------------------------- tira por componente ----- */
+.strip{background:linear-gradient(180deg,var(--surface2),var(--surface));
+border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;margin-bottom:22px;
+box-shadow:var(--sh);position:relative;overflow:hidden}
+.strip::before{content:"";position:absolute;inset:0 0 auto;height:2px;
+background:linear-gradient(90deg,var(--gold-dk),transparent 55%);opacity:.65}
+.cs-row{display:grid;grid-template-columns:minmax(170px,248px) minmax(0,1fr) 82px;
+align-items:center;gap:14px;padding:7px 0}
+/* La etiqueta envuelve en vez de recortarse: «Almacenamiento» con el distintivo
+   al lado no cabe en una línea, y cortarlo a «Almacenam...» deja al componente
+   más importante del informe sin nombre. */
+.cs-name{display:flex;align-items:center;gap:8px;font-size:14px;min-width:0;flex-wrap:wrap}
+.cs-name svg{color:var(--faint)}
+.cs-name .badge{font-size:9px;padding:1px 7px}
+.cs-bar .track{min-width:0}
+.cs-num{text-align:right;font-weight:800;font-size:18px;letter-spacing:-.03em}
+.cs-let{color:var(--faint);font-size:11px;font-weight:700;margin-left:6px;letter-spacing:.08em}
+.strip .hint{border-top:1px solid var(--line);margin-top:10px}
+@media (max-width:620px){
+.cs-row{grid-template-columns:minmax(0,1fr) 66px;row-gap:2px}
+.cs-bar{grid-column:1/-1}
+}
+
+/* -------------------------------------------------------- secciones ------ */
+/* El tono dice para qué sirve cada sección, que es lo que decide en qué orden
+   se leen: lo que hay que decidir, lo que explica por qué, y lo que solo está
+   de referencia. Sin esto, doce secciones idénticas compiten todas igual. */
+details.sec{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+margin-bottom:16px;scroll-margin-top:calc(var(--nav) + 14px);box-shadow:var(--sh);
+position:relative;overflow:hidden}
+details.sec::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+background:var(--tone,transparent)}
+details.sec.t-accion{--tone:linear-gradient(180deg,var(--bad),var(--warn))}
+details.sec.t-diagnostico{--tone:linear-gradient(180deg,var(--acc),transparent 70%)}
+details.sec.t-referencia{--tone:var(--line2)}
+details.sec.t-marca{--tone:linear-gradient(180deg,var(--gold),var(--gold-dk));
+border-color:rgba(232,179,62,.26)}
 details.sec>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;
-padding:15px 18px;font-size:12px;text-transform:uppercase;letter-spacing:1.3px;font-weight:700;
-color:var(--acc);user-select:none;border-radius:12px}
+padding:14px 18px 14px 20px;font-size:11.5px;text-transform:uppercase;letter-spacing:.15em;
+font-weight:700;color:var(--acc);user-select:none}
+details.sec.t-accion>summary{color:var(--txt)}
+details.sec.t-referencia>summary{color:var(--dim)}
+details.sec.t-marca>summary{color:var(--gold)}
 details.sec>summary::-webkit-details-marker{display:none}
-details.sec>summary:hover{background:rgba(88,166,255,.05)}
-details.sec>summary .cnt{margin-left:auto;color:var(--dim);font-size:11px;letter-spacing:.4px;
-text-transform:none;font-weight:600}
-details.sec>summary .chev{color:var(--dim);transition:transform .18s}
-details.sec[open]>summary{border-bottom:1px solid var(--line);border-radius:12px 12px 0 0}
+details.sec>summary:hover{background:rgba(255,255,255,.028)}
+/* El margen automatico va en el titulo, no en el contador: «Inventario» y
+   «Veredicto» no tienen contador, y con el `margin-left:auto` colgando de el
+   sus controles se quedaban pegados al titulo mientras los de las demas
+   secciones se iban al borde derecho. */
+details.sec>summary .stitle{display:flex;align-items:center;gap:9px;min-width:0;
+margin-right:auto}
+details.sec>summary .cnt{color:var(--faint);font-size:11px;
+letter-spacing:.02em;text-transform:none;font-weight:600;white-space:nowrap}
+details.sec>summary .chev{color:var(--faint);transition:transform .18s}
+details.sec[open]>summary{border-bottom:1px solid var(--line)}
 details.sec[open]>summary .chev{transform:rotate(90deg)}
 .body{padding:18px}
+.sec.nomatch{display:none}
 
-/* contenido */
-.hero{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;
-margin-bottom:22px;scroll-margin-top:calc(var(--nav) + 14px)}
-.hero .box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
-.hero .n{font-size:34px;font-weight:800;letter-spacing:-1.4px;line-height:1.1}
-.hero .l{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-top:8px}
-.card{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:16px;
-margin-bottom:12px}
+/* Índice interno de las secciones largas, generado por el JS a partir de los
+   subtítulos: «Estado del sistema» son cinco tablas seguidas y llegar a la
+   cuarta era puro scroll. */
+.subnav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px;padding-bottom:14px;
+border-bottom:1px solid var(--line)}
+.subnav a{font-size:11.5px;color:var(--dim);text-decoration:none;padding:4px 10px;
+border:1px solid var(--line);border-radius:var(--pill);background:var(--surface2);
+transition:color .15s,border-color .15s}
+.subnav a:hover{color:var(--acc);border-color:var(--acc)}
+.backtop{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--faint);
+text-decoration:none;margin-top:14px}
+.backtop:hover{color:var(--acc)}
+
+/* -------------------------------------------------------- contenido ------ */
+.card{background:var(--surface2);border:1px solid var(--line);border-radius:var(--r-s);
+padding:16px;margin-bottom:12px}
 .card:last-child{margin-bottom:0}
 .tw{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:14px}
-th{text-align:left;color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;
-letter-spacing:1px;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
-td{padding:9px 10px;border-bottom:1px solid var(--line)}
+th{text-align:left;color:var(--faint);font-weight:700;font-size:10.5px;text-transform:uppercase;
+letter-spacing:.11em;padding:9px 10px;border-bottom:1px solid var(--line2);white-space:nowrap}
+td{padding:10px;border-bottom:1px solid var(--line)}
+/* La fila 1 es la de encabezados, así que el rayado empieza en el primer dato. */
+table tr:nth-of-type(2n){background:rgba(255,255,255,.02)}
+table tr:hover td{background:var(--acc-soft)}
 tr:last-child td{border-bottom:none}
-.track{height:7px;background:#21262d;border-radius:4px;overflow:hidden;min-width:96px}
-.fill{height:100%;border-radius:4px}
-.badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;
-text-transform:uppercase;letter-spacing:.6px;white-space:nowrap}
-.b-critical{background:rgba(248,81,73,.18);color:var(--bad)}
-.b-high{background:rgba(248,81,73,.13);color:var(--bad)}
-.b-medium{background:rgba(210,153,34,.16);color:var(--warn)}
-.b-low{background:rgba(88,166,255,.14);color:var(--acc)}
-.b-info{background:rgba(139,148,158,.16);color:var(--dim)}
+tr.nomatch{display:none}
+.track{height:7px;background:#1e2532;border-radius:4px;min-width:104px;position:relative}
+.fill{height:100%;border-radius:4px;
+animation:grow .8s cubic-bezier(.16,.84,.34,1) both}
+@keyframes grow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+.fill{transform-origin:left center}
+/* Marca de la referencia dentro de la barra: sin ella, 100 y 190 puntos se
+   pintaban igual de llenos y la barra dejaba de decir nada por encima de la
+   media. Ahora el 100 es una línea fija y se ve quién la pasa. */
+.track.ref{overflow:visible}
+.track.ref .fill{max-width:100%}
+.track.ref::after{content:"";position:absolute;top:-3px;bottom:-3px;left:52%;width:2px;
+background:var(--dim);opacity:.5;border-radius:2px}
+.track>.clip{position:absolute;inset:0;border-radius:4px;overflow:hidden}
+.badge{display:inline-block;padding:2px 9px;border-radius:var(--pill);font-size:10.5px;
+font-weight:700;text-transform:uppercase;letter-spacing:.07em;white-space:nowrap}
+.b-critical{background:rgba(255,59,71,.2);color:var(--bad)}
+.b-high{background:rgba(255,95,95,.15);color:var(--bad)}
+.b-medium{background:rgba(247,146,59,.16);color:var(--warn)}
+.b-low{background:var(--acc-soft);color:var(--acc)}
+.b-info{background:rgba(149,161,181,.14);color:var(--dim)}
 .gain{color:var(--ok);font-weight:700}
-.kvs{display:grid;grid-template-columns:190px minmax(0,1fr);gap:7px 16px;font-size:14px}
+.kvs{display:grid;grid-template-columns:200px minmax(0,1fr);gap:7px 16px;font-size:14px}
 .kvs .k{color:var(--dim)}
 .kvs div{overflow-wrap:anywhere}
-.sub-h{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:1px;
-margin:18px 0 8px;font-weight:700}
+.sub-h{color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.11em;
+margin:20px 0 9px;font-weight:700;scroll-margin-top:calc(var(--nav) + 16px)}
 .sub-h:first-child{margin-top:0}
 .chead{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;
 border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:14px}
-.chead h3{margin:0;font-size:17px;display:flex;align-items:center;gap:9px}
+.chead h3{margin:0;font-size:17px;display:flex;align-items:center;gap:9px;letter-spacing:-.015em}
 .chead h3 svg{color:var(--acc)}
-.chead .note{font-size:15px;font-weight:700;white-space:nowrap}
+.chead .note{font-size:15px;font-weight:700;white-space:nowrap;letter-spacing:-.02em}
 .imp{list-style:none;margin:0;padding:0;font-size:14px}
 .imp li{padding:8px 0;border-bottom:1px solid var(--line)}
 .imp li:last-child{border-bottom:none}
 .imp a{text-decoration:none}
 .imp a:hover{text-decoration:underline}
-.tags{color:var(--dim);font-size:12px;margin-top:3px}
-.finding h3{margin:0 0 9px;font-size:16px}
-.finding p{margin:0 0 12px;color:#c9d1d9}
-.finding ul{margin:0;padding-left:20px;color:#c9d1d9;font-size:14px}
+.tags{color:var(--faint);font-size:11.5px;margin-top:3px}
+.finding h3{margin:0 0 9px;font-size:16px;letter-spacing:-.015em}
+.finding p{margin:0 0 12px;color:#cbd4e0}
+.finding ul{margin:0;padding-left:20px;color:#cbd4e0;font-size:14px}
 .finding li{margin-bottom:5px}
 .finding:target{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
 .steps-link{margin:0}
 .steps-link a{display:inline-flex;align-items:center;gap:7px;font-size:13px;
 text-decoration:none;color:var(--acc)}
 .steps-link a:hover{text-decoration:underline}
-details.howto{margin-top:14px;border:1px solid var(--line);border-radius:9px;
-background:rgba(88,166,255,.04)}
+details.howto{margin-top:14px;border:1px solid var(--line);border-radius:var(--r-s);
+background:var(--acc-soft)}
 details.howto>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:9px;
 padding:10px 13px;font-size:13px;font-weight:600;color:var(--acc);user-select:none}
 details.howto>summary::-webkit-details-marker{display:none}
-details.howto>summary:hover{background:rgba(88,166,255,.07)}
-details.howto>summary .cnt{margin-left:auto;color:var(--dim);font-size:11px;font-weight:500}
-details.howto>summary .chev{color:var(--dim);transition:transform .18s}
+details.howto>summary:hover{background:rgba(92,200,255,.07)}
+details.howto>summary .cnt{margin-left:auto;color:var(--faint);font-size:11px;font-weight:500}
+details.howto>summary .chev{color:var(--faint);transition:transform .18s}
 details.howto[open]>summary{border-bottom:1px solid var(--line)}
 details.howto[open]>summary .chev{transform:rotate(90deg)}
 .howto-body{padding:6px 14px 14px}
 .howto-item{padding:12px 0;border-bottom:1px dashed var(--line)}
 .howto-item:last-child{border-bottom:none;padding-bottom:0}
 .howto-item h4{margin:0 0 5px;font-size:14px}
-.howto-item ol{margin:9px 0 0;padding-left:20px;font-size:14px;color:#c9d1d9}
+.howto-item ol{margin:9px 0 0;padding-left:20px;font-size:14px;color:#cbd4e0}
 .howto-item li{margin-bottom:6px}
-.scan-note{color:var(--dim);font-size:13px;margin:0 0 12px}
+.scan-note{color:var(--dim);font-size:12.5px;margin:0 0 12px;line-height:1.55}
+.ok-note{color:var(--ok);margin:0}
+.verdict{border-left:3px solid var(--gold);background:rgba(232,179,62,.055);
+position:relative;overflow:hidden}
+.verdict p{font-size:15.5px;line-height:1.6;margin-top:0}
+code{background:#1e2532;padding:2px 6px;border-radius:5px;font-size:13px;
+font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.pathcell{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;
+word-break:break-all}
 
-/* selección y exportación por secciones */
-.pick{display:flex;align-items:center;margin-right:2px}
-.pick input{width:15px;height:15px;accent-color:var(--acc);cursor:pointer;margin:0}
-.exp{background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:7px;
-padding:3px 8px;font:inherit;font-size:11px;cursor:pointer;display:inline-flex;align-items:center;
-gap:5px;margin-left:10px;text-transform:none;letter-spacing:0}
+/* ------------------------------------------------------------ glosario --- */
+/* Un término técnico se explica donde aparece por primera vez, no en un anexo
+   que nadie abre. Va en prosa y nunca dentro de .tw, que tiene overflow y
+   recortaría el globo. */
+.term{position:relative;display:inline-flex;align-items:center;gap:4px;
+border-bottom:1px dashed var(--faint);cursor:help;color:inherit}
+.term>svg{color:var(--faint);flex:none}
+.term .tip{position:absolute;left:0;bottom:calc(100% + 9px);z-index:70;width:max-content;
+max-width:min(340px,74vw);background:var(--ink2);border:1px solid var(--line2);
+border-radius:var(--r-s);padding:10px 12px;font-size:12.5px;line-height:1.55;
+color:var(--txt);box-shadow:var(--sh-lg);opacity:0;visibility:hidden;
+transform:translateY(4px);transition:opacity .15s,transform .15s,visibility .15s;
+text-transform:none;letter-spacing:0;font-weight:400;text-align:left}
+.term .tip::after{content:"";position:absolute;left:16px;top:100%;border:6px solid transparent;
+border-top-color:var(--line2)}
+.term:hover .tip,.term:focus .tip,.term:focus-visible .tip{opacity:1;visibility:visible;
+transform:none}
+
+/* --------------------------------------- selección y exportación --------- */
+.pick{display:inline-flex;align-items:center;gap:7px;margin:-6px 0 -6px -6px;padding:6px;
+border-radius:var(--r-xs);cursor:pointer;color:var(--faint);font-size:10.5px;
+text-transform:uppercase;letter-spacing:.08em;font-weight:700;transition:color .15s,background .15s}
+.pick:hover{background:rgba(255,255,255,.045);color:var(--dim)}
+.pick input{width:16px;height:16px;accent-color:var(--acc);cursor:pointer;margin:0;flex:none}
+.pick .ptxt{display:none}
+@media (min-width:1100px){.pick .ptxt{display:inline}}
+.exp{background:transparent;border:1px solid var(--line);color:var(--faint);
+border-radius:var(--r-xs);padding:3px 9px;font:inherit;font-size:11px;cursor:pointer;
+display:inline-flex;align-items:center;gap:5px;margin-left:10px;text-transform:none;
+letter-spacing:0;font-weight:600}
 .exp:hover{color:var(--acc);border-color:var(--acc)}
-details.sec.picked{border-color:var(--acc);box-shadow:0 0 0 1px rgba(88,166,255,.35)}
-.btn[disabled]{opacity:.45;cursor:default}
-.btn[disabled]:hover{color:var(--dim);border-color:var(--line)}
+details.sec.picked{border-color:var(--acc);box-shadow:0 0 0 1px rgba(92,200,255,.32),var(--sh)}
+
+/* Bandeja flotante: mientras se eligen secciones hay que poder ver cuáles van,
+   y quitar una sin ir a buscarla por la página. */
+.tray{position:fixed;right:20px;bottom:20px;z-index:65;width:min(320px,calc(100vw - 40px));
+background:var(--ink2);border:1px solid var(--line2);border-radius:var(--r);
+box-shadow:var(--sh-lg);padding:14px;display:none}
+.tray.on{display:block}
+.tray h4{margin:0 0 10px;font-size:10.5px;text-transform:uppercase;letter-spacing:.14em;
+color:var(--faint);display:flex;align-items:center;gap:8px}
+.tray h4 .n{margin-left:auto;color:var(--acc);font-weight:800;font-size:13px;
+letter-spacing:0;text-transform:none}
+.tray ul{list-style:none;margin:0 0 12px;padding:0;max-height:190px;overflow:auto;
+display:flex;flex-direction:column;gap:3px}
+.tray li{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--txt);
+background:var(--surface);border:1px solid var(--line);border-radius:var(--r-xs);
+padding:5px 6px 5px 10px}
+.tray li span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.tray li button{background:none;border:0;color:var(--faint);cursor:pointer;padding:3px;
+display:flex;border-radius:5px}
+.tray li button:hover{color:var(--bad);background:rgba(255,95,95,.12)}
+.tray .row{display:flex;gap:8px}
+.tray .row .btn{flex:1;justify-content:center}
+.presets{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:11px}
+/* Los botones de preset llevan icono: sin `inline-flex` el SVG se apoya en la
+   linea base del texto y queda pegado y descolgado. */
+.presets button{background:var(--surface);border:1px solid var(--line);color:var(--dim);
+border-radius:var(--pill);padding:4px 11px;font:inherit;font-size:11px;cursor:pointer;
+display:inline-flex;align-items:center;gap:6px;line-height:1.5}
+.presets button svg{flex:none}
+.presets button:hover{color:var(--acc);border-color:var(--acc)}
+
+/* --------------------------------- documento exportado por secciones ----- */
 .exp-wrap{max-width:1040px;margin:0 auto;padding:28px 20px 60px}
 .exp-sec{margin-bottom:34px}
-.exp-h2{font-size:13px;text-transform:uppercase;letter-spacing:1.4px;color:var(--acc);
+.exp-h2{font-size:12px;text-transform:uppercase;letter-spacing:.15em;color:var(--acc);
 margin:0 0 14px;font-weight:700;display:flex;align-items:center;gap:9px}
-.exp-src{color:var(--dim);font-size:12px;border-left:2px solid var(--line);padding-left:10px;
+.exp-src{color:var(--dim);font-size:12px;border-left:2px solid var(--gold-dk);padding-left:11px;
 margin:0 0 26px}
 
-/* categorías desplegables del rastreo de archivos */
+/* ---------------------------------- categorías del rastreo de archivos --- */
 details.cat{border-bottom:1px solid var(--line)}
 details.cat:last-of-type{border-bottom:none}
 details.cat>summary{list-style:none;cursor:pointer;display:grid;
 grid-template-columns:minmax(120px,1.4fr) 90px 90px 130px minmax(80px,1fr) 18px;
 align-items:center;gap:10px;padding:10px 4px;font-size:14px}
 details.cat>summary::-webkit-details-marker{display:none}
-details.cat>summary:hover{background:rgba(88,166,255,.05)}
+details.cat>summary:hover{background:rgba(255,255,255,.03)}
 details.cat[open]>summary .chev{transform:rotate(90deg)}
-details.cat .chev{color:var(--dim);transition:transform .18s}
-details.cat .cat-count{color:var(--dim);font-size:12px}
+details.cat .chev{color:var(--faint);transition:transform .18s}
+details.cat .cat-count{color:var(--faint);font-size:12px}
 details.cat .cat-bar{display:block;height:7px}
 details.cat .cat-bar .fill{display:block}
 .cat-body{padding:4px 4px 16px}
@@ -283,33 +635,57 @@ details.cat .cat-bar .fill{display:block}
 details.cat>summary{grid-template-columns:1fr auto 18px}
 details.cat .cat-count,details.cat .cat-bar{display:none}
 }
-.pathcell{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;
-word-break:break-all}
-code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:13px;
-font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.verdict{border-left:3px solid var(--acc);background:rgba(88,166,255,.06)}
-.ok-note{color:var(--ok);margin:0}
-footer{max-width:1300px;margin:0 auto;padding:20px;border-top:1px solid var(--line);
-color:var(--dim);font-size:12px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
-footer a{color:var(--brand);text-decoration:none}
-#top{position:fixed;right:22px;bottom:22px;z-index:40;opacity:0;pointer-events:none;
-transition:.2s;border-radius:50%;width:42px;height:42px;justify-content:center;padding:0}
-#top.on{opacity:1;pointer-events:auto}
 
-@media (max-width:960px){
+footer{max-width:1320px;margin:0 auto;padding:20px;border-top:1px solid var(--line);
+color:var(--faint);font-size:12px;display:flex;justify-content:space-between;
+flex-wrap:wrap;gap:8px}
+footer a{color:var(--gold);text-decoration:none}
+#top{position:fixed;right:22px;bottom:22px;z-index:40;opacity:0;pointer-events:none;
+transition:opacity .2s;border-radius:var(--pill);width:42px;height:42px;
+justify-content:center;padding:0}
+#top.on{opacity:1;pointer-events:auto}
+.tray.on ~ #top{right:calc(min(320px,100vw - 40px) + 32px)}
+
+@media (max-width:980px){
 .layout{grid-template-columns:minmax(0,1fr);padding-top:18px}
 .side{position:static;flex-direction:row;flex-wrap:wrap}
-.side .panel{flex:1;min-width:230px}
-.tb .logo{display:none}
+.side .panel{flex:1;min-width:236px}
+.tb .logo span{display:none}
+.here{display:none!important}
+}
+@media (prefers-reduced-motion:reduce){
+html{scroll-behavior:auto}
+*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;
+transition-duration:.001ms!important}
 }
 @media print{
-.topbar,.side,#top,.exp,.pick{display:none}
+.topbar,.side,#top,.exp,.pick,.tray,.subnav,.backtop,.find,.term>svg{display:none}
+body::before{display:none}
+html{background:#fff;background-image:none}
 body{background:#fff;color:#000}
 .layout{display:block;padding:0}
-details.sec,.card,.panel,.hero .box{border-color:#ccc;background:#fff;break-inside:avoid}
-details.sec>summary{color:#000}
+details.sec,.card,.panel,.hero .box,.strip{border-color:#ccc;background:#fff;
+box-shadow:none;break-inside:avoid}
+details.sec::before,.strip::before{display:none}
+details.sec>summary,details.sec.t-referencia>summary{color:#000}
+/* El rayado de las tablas se imprime como una mancha gris o no se imprime en
+   absoluto, según el navegador. Sobre papel las líneas ya separan bastante. */
+table tr:nth-of-type(2n){background:none}
+.track{background:#e6e6e6;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.gauge .grail{stroke:#ddd}
+/* El gris claro del cuerpo de los hallazgos está pensado para fondo oscuro:
+   sobre papel blanco queda casi invisible, y ahí es donde están el diagnóstico
+   y los pasos para arreglarlo, que es lo que la gente imprime. */
+.finding p,.finding ul,.howto-item ol{color:#000}
+/* El globo del glosario no se puede pasar el ratón por encima en papel: se
+   imprime detrás del término, entre paréntesis. */
+.term{border-bottom:0}
+.term .tip{position:static;opacity:1;visibility:visible;transform:none;display:inline;
+border:0;background:none;box-shadow:none;padding:0;color:#444;font-size:11px;max-width:none}
+.term .tip::before{content:" ("}
+.term .tip::after{content:")";position:static;border:0}
 /* el dorado sobre papel blanco no se lee: se oscurece solo al imprimir */
-footer a,.hero .n[style*="--brand"]{color:var(--brand-dark)}
+footer a,.hero .n[style*="--brand"],header.page .kicker{color:var(--brand-dark)}
 }
 """
 
@@ -319,7 +695,11 @@ HTML_JS = """
   var links = Array.prototype.slice.call(document.querySelectorAll('.tb nav a'));
   var toggle = document.getElementById('toggle-all');
   var topbar = document.querySelector('.topbar');
+  var prog = document.querySelector('.prog');
+  var crumbName = document.getElementById('crumb-name');
+  var crumbPct = document.getElementById('crumb-pct');
 
+  // ---- Altura de la barra ---------------------------------------------------
   // La barra ya no tiene altura fija: los enlaces envuelven en varias filas si
   // hacen falta. Todo lo que dependia de su altura la mide en vez de suponerla.
   function navHeight(){ return topbar ? topbar.offsetHeight : 56; }
@@ -337,6 +717,7 @@ HTML_JS = """
   window.addEventListener('resize', syncNav);
   if (window.ResizeObserver && topbar) new ResizeObserver(syncNav).observe(topbar);
 
+  // ---- Plegar y desplegar ---------------------------------------------------
   function setAll(open){
     secs.forEach(function(s){ s.open = open; });
     toggle.dataset.open = open ? '1' : '0';
@@ -345,13 +726,64 @@ HTML_JS = """
   toggle.addEventListener('click', function(){ setAll(toggle.dataset.open !== '1'); });
 
   // Saltar a una seccion plegada no serviria de nada: se abre antes de ir.
+  function abrir(id){
+    var t = document.getElementById(id);
+    if (t && t.tagName === 'DETAILS') t.open = true;
+    return t;
+  }
+  // Al pulsar un enlace, la seccion activa se fija en el destino hasta que el
+  // desplazamiento suave termina. Sin esto el resaltado iba saltando por todas
+  // las secciones intermedias mientras la pagina viajaba, que es informacion
+  // que nadie ha pedido y ademas distrae de a donde se va.
+  var fijada = null, vigilante = null;
+  function soltarCuandoPare(){
+    var ultimo = -1;
+    if (vigilante) clearTimeout(vigilante);
+    (function mirar(){
+      if (window.scrollY === ultimo) { fijada = null; vigilante = null; spy(); return; }
+      ultimo = window.scrollY;
+      vigilante = setTimeout(mirar, 90);
+    })();
+  }
   links.forEach(function(a){
     a.addEventListener('click', function(){
-      var t = document.getElementById(a.dataset.target);
-      if (t && t.tagName === 'DETAILS') t.open = true;
+      abrir(a.dataset.target);
+      fijada = a.dataset.target;
+      spy();
+      soltarCuandoPare();
     });
   });
 
+  // ---- Indice interno de las secciones largas -------------------------------
+  // Se construye leyendo los subtitulos que ya existen, no con una lista escrita
+  // a mano: asi ninguna seccion nueva se queda sin indice, y ninguna lo tiene
+  // desactualizado. Por debajo de tres subtitulos no compensa: estorba mas de lo
+  // que ayuda.
+  secs.forEach(function(s){
+    var body = s.querySelector('.body');
+    if (!body) return;
+    var subs = Array.prototype.slice.call(body.querySelectorAll('.sub-h'));
+    if (subs.length < 3) return;
+    var nav = document.createElement('div');
+    nav.className = 'subnav';
+    subs.forEach(function(h, i){
+      if (!h.id) h.id = s.id + '-s' + i;
+      var a = document.createElement('a');
+      a.href = '#' + h.id;
+      a.textContent = h.textContent.trim();
+      nav.appendChild(a);
+    });
+    body.insertBefore(nav, body.firstChild);
+    var back = document.createElement('a');
+    back.className = 'backtop';
+    back.href = '#' + s.id;
+    back.innerHTML = '<svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true">' +
+                     '<use href="#i-up"/></svg>Volver al principio de ' +
+                     s.dataset.title.toLowerCase();
+    body.appendChild(back);
+  });
+
+  // ---- Seccion activa, progreso de lectura y volver arriba ------------------
   var targets = links.map(function(a){ return document.getElementById(a.dataset.target); })
                      .filter(Boolean);
   var topBtn = document.getElementById('top');
@@ -361,44 +793,166 @@ HTML_JS = """
       var top = t.getBoundingClientRect().top - (navHeight() + 34);
       if (top <= 0 && top > bestTop) { bestTop = top; best = t; }
     });
-    links.forEach(function(a){
-      a.classList.toggle('active', !!best && a.dataset.target === best.id);
-    });
+    var alto = document.documentElement.scrollHeight - window.innerHeight;
+    // La ultima seccion nunca llegaba a marcarse: el veredicto y el pie juntos
+    // miden menos que la ventana, asi que por mucho que se baje su borde
+    // superior no cruza el umbral. Al tocar fondo, la activa es la ultima.
+    if (targets.length && alto > 0 && window.scrollY >= alto - 2) {
+      best = targets[targets.length - 1];
+    }
+    if (fijada) best = document.getElementById(fijada) || best;
+    var id = best ? best.id : '';
+    links.forEach(function(a){ a.classList.toggle('active', a.dataset.target === id); });
+    var avance = alto > 0 ? Math.min(100, Math.max(0, window.scrollY / alto * 100)) : 0;
+    if (crumbName) crumbName.textContent = best ? (best.dataset.title || 'Resumen') : 'Resumen';
+    if (crumbPct) crumbPct.textContent = avance.toFixed(0) + '% leido';
+    if (prog) prog.style.width = avance + '%';
     topBtn.classList.toggle('on', window.scrollY > 500);
   }
   window.addEventListener('scroll', spy, {passive:true});
   window.addEventListener('resize', spy);
   spy();
 
-  // ---- Exportacion de secciones -------------------------------------------
+  // ---- Buscador -------------------------------------------------------------
+  // Filtra filas de tabla, hallazgos y elementos de lista sin tocar el DOM mas
+  // alla de una clase: hay informes con doscientas filas de ficheros y encontrar
+  // uno a ojo no es razonable. Se recuerda que secciones estaban abiertas para
+  // devolverlas a su sitio al vaciar la busqueda.
+  var buscador = document.getElementById('buscar');
+  var contador = document.getElementById('buscar-cnt');
+  var caja = document.querySelector('.find');
+  var abiertasAntes = null;
+
+  function filtrables(){
+    return Array.prototype.slice.call(
+      document.querySelectorAll('.body table tr, .body .card.finding, .body .imp li, ' +
+                                '.body details.cat'));
+  }
+
+  function filtrar(texto){
+    var q = texto.trim().toLowerCase();
+    if (q && abiertasAntes === null) {
+      abiertasAntes = secs.map(function(s){ return s.open; });
+    }
+    var total = 0;
+    if (!q) {
+      filtrables().forEach(function(el){ el.classList.remove('nomatch'); });
+      secs.forEach(function(s, i){
+        s.classList.remove('nomatch');
+        if (abiertasAntes) s.open = abiertasAntes[i];
+      });
+      abiertasAntes = null;
+    } else {
+      filtrables().forEach(function(el){
+        // La fila de encabezados no se filtra nunca: sin ella la tabla que
+        // queda es una lista de numeros sin nombre.
+        if (el.tagName === 'TR' && el.querySelector('th')) return;
+        var hit = el.textContent.toLowerCase().indexOf(q) >= 0;
+        el.classList.toggle('nomatch', !hit);
+        if (hit) total++;
+      });
+      secs.forEach(function(s){
+        var body = s.querySelector('.body');
+        var hit = !!body && body.textContent.toLowerCase().indexOf(q) >= 0;
+        s.classList.toggle('nomatch', !hit);
+        if (hit) s.open = true;
+      });
+    }
+    if (contador) contador.textContent = q ? (total + (total === 1 ? ' fila' : ' filas')) : '';
+    if (caja) caja.classList.toggle('hit', !!q);
+  }
+
+  if (buscador) {
+    buscador.addEventListener('input', function(){ filtrar(buscador.value); });
+    buscador.addEventListener('keydown', function(ev){
+      if (ev.key === 'Escape') { buscador.value = ''; filtrar(''); buscador.blur(); }
+    });
+    // Los ejemplos se aplican con mousedown y no con click: al soltar el raton
+    // el campo ya habria perdido el foco, el panel se habria cerrado por CSS y
+    // el clic caeria en el vacio.
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tip]'), function(b){
+      b.addEventListener('mousedown', function(ev){
+        ev.preventDefault();
+        buscador.value = b.dataset.tip;
+        filtrar(buscador.value);
+      });
+    });
+  }
+
+  // ---- Exportacion de secciones ---------------------------------------------
   // El fichero resultante se construye con el mismo <style> y el mismo sprite de
   // iconos que este informe, asi que sale igual de autocontenido: se puede
   // enviar por correo y abrir sin conexion.
   var exportBtn = document.getElementById('export-sel');
   var exportLabel = exportBtn.querySelector('span');
+  var tray = document.getElementById('tray');
+  var trayList = document.getElementById('tray-list');
+  var trayCount = document.getElementById('tray-count');
   var host = (document.body.dataset.host || 'equipo');
   var stamp = (document.body.dataset.stamp || '');
 
+  function casilla(s){ return s.querySelector('input[data-pick]'); }
   function picked(){
-    return secs.filter(function(s){
-      var box = s.querySelector('input[data-pick]');
-      return box && box.checked;
-    });
+    return secs.filter(function(s){ var b = casilla(s); return b && b.checked; });
+  }
+
+  function marcar(s, valor){
+    var b = casilla(s);
+    if (b) b.checked = valor;
   }
 
   function refresh(){
-    var n = picked().length;
+    var elegidas = picked();
+    var n = elegidas.length;
     exportLabel.textContent = 'Exportar (' + n + ')';
     exportBtn.disabled = n === 0;
     secs.forEach(function(s){
-      var box = s.querySelector('input[data-pick]');
-      s.classList.toggle('picked', !!box && box.checked);
+      var b = casilla(s);
+      s.classList.toggle('picked', !!b && b.checked);
+    });
+    if (!tray) return;
+    tray.classList.toggle('on', n > 0);
+    trayCount.textContent = n;
+    trayList.innerHTML = '';
+    elegidas.forEach(function(s){
+      var li = document.createElement('li');
+      var nombre = document.createElement('span');
+      nombre.textContent = s.dataset.title;
+      var quita = document.createElement('button');
+      quita.type = 'button';
+      quita.setAttribute('aria-label', 'Quitar ' + s.dataset.title + ' de la exportacion');
+      quita.innerHTML = '<svg class="ic sm" viewBox="0 0 24 24" aria-hidden="true">' +
+                        '<use href="#i-x"/></svg>';
+      quita.addEventListener('click', function(){ marcar(s, false); refresh(); });
+      li.appendChild(nombre);
+      li.appendChild(quita);
+      trayList.appendChild(li);
     });
   }
+
+  // Presets: un informe entero es mucho para adjuntar en un correo, y lo que se
+  // suele querer mandar son dos cosas concretas. `data-group` lo declara el
+  // generador, que es quien sabe para que sirve cada seccion.
+  function aplicarPreset(grupo){
+    secs.forEach(function(s){
+      var grupos = (s.dataset.group || '').split(' ');
+      marcar(s, grupo === 'all' ? true : grupo === 'none' ? false
+                                       : grupos.indexOf(grupo) >= 0);
+    });
+    refresh();
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('[data-preset]'), function(b){
+    b.addEventListener('click', function(){ aplicarPreset(b.dataset.preset); });
+  });
 
   function buildDocument(sections){
     var style = document.querySelector('style').outerHTML;
     var sprite = document.getElementById('sprite').outerHTML;
+    // El icono viaja dentro de su propia URL, asi que el extracto se lleva la
+    // marca en la pestaña igual que el informe completo y sigue sin depender
+    // de ningun fichero al lado.
+    var icono = document.querySelector('link[rel="icon"]');
+    icono = icono ? icono.outerHTML : '';
     var head = document.querySelector('header.page').innerHTML;
     var foot = document.querySelector('footer').outerHTML;
     var titles = sections.map(function(s){ return s.dataset.title; });
@@ -408,12 +962,18 @@ HTML_JS = """
     var cuerpo = sections.map(function(s){
       var ico = '<svg class="ic lg" viewBox="0 0 24 24" aria-hidden="true"><use href="#' +
                 s.dataset.icon + '"/></svg>';
+      // El indice interno y el «volver» solo tienen sentido dentro del informe
+      // completo: en el extracto apuntarian a secciones que no viajan con el.
+      var copia = s.querySelector('.body').cloneNode(true);
+      Array.prototype.forEach.call(copia.querySelectorAll('.subnav,.backtop'), function(e){
+        e.remove();
+      });
       return '<section class="exp-sec"><h2 class="exp-h2">' + ico + s.dataset.title +
-             '</h2>' + s.querySelector('.body').innerHTML + '</section>';
+             '</h2>' + copia.innerHTML + '</section>';
     }).join('');
-    return '<!DOCTYPE html>\\n<html lang="es"><head><meta charset="utf-8">' +
+    return '<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-      '<title>' + titles.join(' + ') + ' \\u00b7 ' + host + '</title>' + style +
+      '<title>' + titles.join(' + ') + ' · ' + host + '</title>' + icono + style +
       '</head><body>' + sprite + '<div class="exp-wrap"><header class="page">' + head +
       '</header><p class="exp-src">' + origen + '</p>' + cuerpo + foot +
       '</div></body></html>';
@@ -435,15 +995,26 @@ HTML_JS = """
   }
 
   secs.forEach(function(s){
-    var box = s.querySelector('input[data-pick]');
+    var etiqueta = s.querySelector('label.pick');
+    var box = casilla(s);
     var btn = s.querySelector('button[data-export]');
-    // Sin esto, cualquier clic dentro del <summary> pliega la seccion.
-    if (box) box.addEventListener('click', function(ev){ ev.stopPropagation(); refresh(); });
+    // Sin esto, cualquier clic dentro del <summary> pliega la seccion: la
+    // etiqueta entera es zona de marcado, no solo el cuadradito.
+    if (etiqueta) etiqueta.addEventListener('click', function(ev){ ev.stopPropagation(); });
+    if (box) {
+      box.addEventListener('click', function(ev){ ev.stopPropagation(); });
+      box.addEventListener('change', refresh);
+      // Con el teclado, la barra espaciadora sobre el checkbox no puede acabar
+      // desplegando la seccion que lo contiene.
+      box.addEventListener('keydown', function(ev){ ev.stopPropagation(); });
+    }
     if (btn) btn.addEventListener('click', function(ev){
       ev.preventDefault(); ev.stopPropagation(); descargar([s]);
     });
   });
   exportBtn.addEventListener('click', function(){ descargar(picked()); });
+  var trayBtn = document.getElementById('tray-export');
+  if (trayBtn) trayBtn.addEventListener('click', function(){ descargar(picked()); });
   refresh();
 })();
 """
@@ -459,6 +1030,24 @@ def _icon(name: str, cls: str = "ic") -> str:
     return f'<svg class="{cls}" viewBox="0 0 24 24" aria-hidden="true"><use href="#{name}"/></svg>'
 
 
+def _term(texto: str, clave: str) -> str:
+    """Marca un término del glosario con su explicación emergente.
+
+    Solo la primera aparición lleva globo: repetir el mismo aviso en cada tabla
+    convierte una ayuda en ruido, y a la tercera ya nadie la lee. Las siguientes
+    salen como texto normal.
+
+    Va siempre en prosa, nunca dentro de un `.tw`: ese contenedor tiene
+    `overflow-x` para las tablas anchas y recortaría el globo.
+    """
+    if clave in _TERMINOS_VISTOS or clave not in GLOSARIO:
+        return _e(texto)
+    _TERMINOS_VISTOS.add(clave)
+    return (f'<span class="term" tabindex="0" role="note">{_e(texto)}'
+            f'{_icon("i-help", "ic sm")}'
+            f'<span class="tip">{_e(GLOSARIO[clave])}</span></span>')
+
+
 def _logo(cls: str = "brandmark", uid: str = "a") -> str:
     """Isotipo de Quilate, mismo trazado que quilate.svg.
 
@@ -466,6 +1055,10 @@ def _logo(cls: str = "brandmark", uid: str = "a") -> str:
     el sprite lleva display:none y ahí Chromium no resuelve el degradado ni la
     máscara —los iconos de trazo sí salen porque no referencian nada—, así que
     el logotipo quedaba invisible. El sufijo evita que dos copias compartan id.
+
+    El `maskUnits` explícito no es decorativo: sin él la región de la máscara es
+    la caja del círculo ampliada un 10%, medida SIN el grosor del trazo, y el
+    anillo salía achatado arriba y a la izquierda en vez de redondo.
     """
     oro, muesca = f"ql-oro-{uid}", f"ql-muesca-{uid}"
     return (
@@ -475,13 +1068,95 @@ def _logo(cls: str = "brandmark", uid: str = "a") -> str:
         '<stop offset="0" stop-color="#ffeeb0"/><stop offset=".34" stop-color="#f8d156"/>'
         '<stop offset=".70" stop-color="#e9ab1e"/><stop offset="1" stop-color="#b87c0b"/>'
         "</linearGradient>"
-        f'<mask id="{muesca}"><rect width="100" height="100" fill="#fff"/>'
+        f'<mask id="{muesca}" maskUnits="userSpaceOnUse" x="0" y="0" width="100" '
+        'height="100"><rect width="100" height="100" fill="#fff"/>'
         '<rect x="56.5" y="46" width="21" height="52" fill="#000" '
         'transform="rotate(-45 67 72)"/></mask></defs>'
         f'<circle cx="48" cy="46" r="30" fill="none" stroke="url(#{oro})" stroke-width="14" '
         f'mask="url(#{muesca})"/>'
         f'<rect x="60.5" y="50.8" width="13" height="42.4" rx="1" fill="url(#{oro})" '
         'transform="rotate(-45 67 72)"/></svg>'
+    )
+
+
+def _favicon() -> str:
+    """El isotipo como icono de pestaña, incrustado en la propia URL.
+
+    Sin esto haría falta el .ico al lado del fichero, y el informe dejaría de ser
+    un único documento que se puede enviar por correo. Va en `data:` con el SVG
+    escrito a mano: `#` tiene que ir escapado o el navegador lee el resto de la
+    URL como un ancla y no pinta nada.
+    """
+    svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+        "<defs><linearGradient id='g' x1='20' y1='10' x2='84' y2='94' "
+        "gradientUnits='userSpaceOnUse'>"
+        "<stop offset='0' stop-color='%23ffeeb0'/><stop offset='.34' stop-color='%23f8d156'/>"
+        "<stop offset='.70' stop-color='%23e9ab1e'/><stop offset='1' stop-color='%23b87c0b'/>"
+        "</linearGradient>"
+        "<mask id='m' maskUnits='userSpaceOnUse' x='0' y='0' width='100' height='100'>"
+        "<rect width='100' height='100' fill='%23fff'/>"
+        "<rect x='56.5' y='46' width='21' height='52' fill='%23000' "
+        "transform='rotate(-45 67 72)'/></mask></defs>"
+        "<circle cx='48' cy='46' r='30' fill='none' stroke='url(%23g)' stroke-width='14' "
+        "mask='url(%23m)'/>"
+        "<rect x='60.5' y='50.8' width='13' height='42.4' rx='1' fill='url(%23g)' "
+        "transform='rotate(-45 67 72)'/></svg>"
+    )
+    return f'<link rel="icon" href="data:image/svg+xml,{svg.replace(chr(34), chr(39))}">'
+
+
+# El halo del arco tiene que ser del mismo tono que el arco, y `drop-shadow` no
+# entiende `var(--ok)` a través de otra variable: se pasa el color ya resuelto.
+_GAUGE_GLOW = {"var(--ok)": "rgba(66,196,107,.55)", "var(--warn)": "rgba(247,146,59,.55)",
+               "var(--bad)": "rgba(255,95,95,.55)"}
+
+
+def _gauge(score: float, letter: str, size: int = 168) -> str:
+    """Dial de 270° con la referencia justo arriba.
+
+    La escala llega a 200 puntos, así que los 100 de la referencia caen exactos
+    en las doce en punto: la aguja por encima de esa marca significa «mejor que
+    un equipo de gama media», y eso se lee sin necesidad de comparar cifras.
+
+    El arco se dibuja con degradado y un halo del mismo tono, y entra animándose
+    desde cero. La animación va por `stroke-dashoffset` y no por `dasharray`
+    porque el valor final depende de la nota: se pasa en `--dash` y el fotograma
+    inicial lo lee de ahí, así que el mismo `@keyframes` sirve para cualquier
+    puntuación. Con `prefers-reduced-motion` la hoja de estilo la desactiva.
+    """
+    trazo = 13
+    radio = (size - trazo) / 2 - 4
+    centro = size / 2
+    circun = 2 * math.pi * radio
+    arco = circun * 0.75
+    fraccion = max(0.0, min(1.0, score / 200.0))
+    color = _score_color(score)
+    lleno = arco * fraccion
+    uid = f"gg{int(score * 10)}"
+    return (
+        f'<div class="gauge" style="height:{size}px">'
+        f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" '
+        f'role="img" aria-label="Puntuación global {score:.0f} sobre una referencia '
+        f'de 100, nota {_e(letter)}">'
+        f'<defs><linearGradient id="{uid}" x1="0" y1="1" x2="1" y2="0">'
+        f'<stop offset="0" stop-color="{color}" stop-opacity=".55"/>'
+        f'<stop offset="1" stop-color="{color}"/></linearGradient></defs>'
+        f'<g transform="rotate(135 {centro} {centro})">'
+        f'<circle class="grail" cx="{centro}" cy="{centro}" r="{radio:.2f}" '
+        f'stroke-width="{trazo}" stroke-dasharray="{arco:.2f} {circun:.2f}"/>'
+        f'<circle class="gval" cx="{centro}" cy="{centro}" r="{radio:.2f}" '
+        f'stroke="url(#{uid})" stroke-width="{trazo}" '
+        f'stroke-dasharray="{lleno:.2f} {circun:.2f}" '
+        f'style="--dash:{lleno:.2f};--glow:{_GAUGE_GLOW.get(color, "rgba(255,255,255,.4)")}"/>'
+        f"</g>"
+        f'<line class="gtick" x1="{centro}" y1="{centro - radio - trazo / 2 - 5:.1f}" '
+        f'x2="{centro}" y2="{centro - radio + trazo / 2 + 2:.1f}"/>'
+        f'<text class="gtxt" x="{centro}" y="{centro - radio - trazo / 2 - 9:.1f}">100</text>'
+        f"</svg>"
+        f'<div class="gin"><div class="gnum" style="color:{color}">{score:.0f}</div>'
+        f'<div class="gunit">puntos</div>'
+        f'<div class="gletter" style="color:{color}">{_e(letter)}</div></div></div>'
     )
 
 
@@ -509,25 +1184,78 @@ def _human(n: float) -> str:
     return f"{n:.1f} EB"
 
 
-def _html_bar(pct: float) -> str:
-    pct = max(0, min(100, pct))
-    return (f'<div class="track"><div class="fill" style="width:{pct:.0f}%;'
-            f'background:{_score_color(pct)}"></div></div>')
+# Dónde cae la referencia (100 puntos) dentro de la barra. La escala llega hasta
+# 192 puntos para que quede recorrido visible por encima de la media: con el
+# tope en 100, un equipo de 105 y otro de 190 pintaban exactamente la misma
+# barra llena y el gráfico dejaba de aportar justo donde empieza lo interesante.
+BAR_REF_PCT = 52.0
+BAR_MAX_SCORE = 100.0 / (BAR_REF_PCT / 100.0)
 
 
-def _section(sid: str, label: str, icon: str, inner: str, count: str = "") -> str:
-    cnt = f'<span class="cnt">{_e(count)}</span>' if count else ""
+def _html_bar(score: float, ref: bool = True) -> str:
+    """Barra de puntuación con la referencia marcada.
+
+    `ref=False` para porcentajes normales (una ganancia estimada, una ocupación),
+    donde 100 es el máximo y no una nota media.
+    """
+    if not ref:
+        ancho = max(0.0, min(100.0, score))
+        return (f'<div class="track"><div class="clip"><div class="fill" '
+                f'style="width:{ancho:.0f}%;background:{_score_color(score)}">'
+                f"</div></div></div>")
+    ancho = max(0.0, min(100.0, score / BAR_MAX_SCORE * 100))
+    return (f'<div class="track ref" title="la marca es la referencia: 100 puntos">'
+            f'<div class="clip"><div class="fill" style="width:{ancho:.1f}%;'
+            f'background:{_score_color(score)}"></div></div></div>')
+
+
+@dataclass
+class Seccion:
+    """Una sección del informe y todo lo que hace falta para colocarla.
+
+    Va en una clase y no en una tupla porque ya son siete campos y la llamada
+    posicional se había vuelto ilegible.
+    """
+
+    sid: str
+    label: str
+    icon: str
+    inner: str
+    count: str = ""
+    severity: str = ""          # peor severidad de los hallazgos que trae
+    findings: int = 0
+
+    @property
+    def tono(self) -> str:
+        return TONOS.get(self.sid, "diagnostico")
+
+    @property
+    def grupo(self) -> str:
+        return GRUPOS.get(self.sid, "tecnico")
+
+
+def _section(sec: Seccion) -> str:
+    cnt = f'<span class="cnt">{_e(sec.count)}</span>' if sec.count else ""
     # La casilla y el botón viven dentro del <summary>: el JS corta ahí la
     # propagación del clic para que marcar o exportar no pliegue la sección.
-    pick = (f'<span class="pick"><input type="checkbox" data-pick="{sid}" '
-            f'title="Marcar para exportar varias secciones juntas"></span>')
-    export = (f'<button class="exp" data-export="{sid}" '
-              f'title="Exportar solo esta sección">{_icon("i-download")}Exportar</button>')
-    return (f'<details class="sec" id="{sid}" data-title="{_e(label)}" '
-            f'data-slug="{_slug(label)}" data-icon="{icon}" open>'
-            f"<summary>{pick}{_icon(icon)} {_e(label)}{cnt}{export}"
+    # Va envuelta en un <label> con texto propio —oculto en pantallas
+    # estrechas, pero siempre presente para un lector de pantalla— porque un
+    # checkbox suelto no dice qué marca, y aquí marcarlo no selecciona la
+    # sección: la añade a un fichero que se va a descargar.
+    pick = (f'<label class="pick" for="pick-{sec.sid}">'
+            f'<input type="checkbox" id="pick-{sec.sid}" data-pick="{sec.sid}" '
+            f'aria-label="Incluir «{_e(sec.label)}» en la exportación por secciones">'
+            f'<span class="ptxt">Exportar</span></label>')
+    export = (f'<button class="exp" data-export="{sec.sid}" type="button" '
+              f'title="Descargar solo esta sección como fichero HTML suelto">'
+              f'{_icon("i-download")}Descargar</button>')
+    return (f'<details class="sec t-{sec.tono}" id="{sec.sid}" data-title="{_e(sec.label)}" '
+            f'data-slug="{_slug(sec.label)}" data-icon="{sec.icon}" '
+            f'data-group="{sec.grupo}" open>'
+            f'<summary><span class="stitle">{_icon(sec.icon)}{_e(sec.label)}</span>'
+            f"{cnt}{pick}{export}"
             f'{_icon("i-chev", "ic chev")}</summary>'
-            f'<div class="body">{inner}</div></details>')
+            f'<div class="body">{sec.inner}</div></details>')
 
 
 # ------------------------------------------------------------------ bloques --
@@ -538,24 +1266,89 @@ def _hero(bench: Benchmark | None, auditor: Auditor, projection: dict[str, Any])
         letter, _ = grade(overall)
         proj = projection.get("projected_overall", overall)
         exp_pct = projection.get("experiential_pct", 0.0)
-        boxes.append(f'<div class="box"><div class="n" style="color:{_score_color(overall)}">'
-                     f'{overall:.0f}</div><div class="l">Puntuación actual · nota {letter}</div>'
-                     f"</div>")
-        boxes.append(f'<div class="box"><div class="n" style="color:var(--ok)">{proj:.0f}</div>'
-                     f'<div class="l">Tras optimizar</div></div>')
-        boxes.append(f'<div class="box"><div class="n" style="color:var(--brand)">+{exp_pct:.0f}%'
-                     f'</div><div class="l">Fluidez percibida estimada</div></div>')
+        boxes.append(f'<div class="box" style="--edge:{_score_color(overall)}">'
+                     f'<div class="n" style="color:{_score_color(overall)}">{overall:.0f}</div>'
+                     f'<div class="l">Puntuación actual · nota {letter}</div>'
+                     f'<div class="foot">100 = equipo de gama media</div></div>')
+        boxes.append(f'<div class="box" style="--edge:var(--ok)">'
+                     f'<div class="n" style="color:var(--ok)">{proj:.0f}</div>'
+                     f'<div class="l">Tras optimizar</div>'
+                     f'<div class="foot">+{projection.get("headroom_pct", 0.0):.0f}% sobre la '
+                     f"nota de hoy</div></div>")
+        boxes.append(f'<div class="box" style="--edge:var(--brand)">'
+                     f'<div class="n" style="color:var(--brand)">+{exp_pct:.0f}%</div>'
+                     f'<div class="l">Fluidez percibida estimada</div>'
+                     f'<div class="foot">lo que se nota al usarlo, no lo que sube la nota'
+                     f"</div></div>")
     sin_datos = len(getattr(auditor, "unverified", []))
-    etiqueta = f"Hallazgos en {auditor.checks_run} pruebas concluyentes"
+    graves = sum(1 for f in auditor.findings if f.severity in ("critical", "high"))
+    borde = ("var(--bad)" if graves else "var(--warn)" if auditor.findings else "var(--ok)")
+    pie = (f"{graves} de severidad alta o crítica" if graves
+           else "ninguno grave" if auditor.findings else "nada que corregir")
     if sin_datos:
-        etiqueta += f" · {sin_datos} sin comprobar"
-    boxes.append(f'<div class="box"><div class="n">{len(auditor.findings)}</div>'
-                 f'<div class="l">{etiqueta}</div></div>')
+        pie += f" · {sin_datos} sin comprobar"
+    boxes.append(f'<div class="box" style="--edge:{borde}"><div class="n">'
+                 f'{len(auditor.findings)}</div>'
+                 f'<div class="l">Hallazgos en {auditor.checks_run} pruebas concluyentes</div>'
+                 f'<div class="foot">{pie}</div></div>')
     return f'<div class="hero" id="resumen">{"".join(boxes)}</div>'
 
 
+def _component_strip(bench: Benchmark | None) -> str:
+    """Las notas por componente, una al lado de otra y sobre la misma escala.
+
+    Es la respuesta a «¿por dónde falla?», que hasta ahora había que deducir
+    comparando filas sueltas de la tabla del benchmark. Con la referencia marcada
+    en todas las barras, el componente que se queda corto salta a la vista.
+    """
+    comp = bench.component_scores() if bench else {}
+    if not comp:
+        return ""
+    peor = min(comp, key=lambda k: comp[k])
+    filas = ""
+    for clave, nota in sorted(comp.items(), key=lambda x: x[1]):
+        letra, _ = grade(nota)
+        marca = ('<span class="badge b-medium">cuello de botella</span>'
+                 if clave == peor and len(comp) > 1 else "")
+        filas += (f'<div class="cs-row"><div class="cs-name">'
+                  f'{_icon(COMPONENT_ICONS.get(COMPONENT_TO_GROUP.get(clave, clave), "i-sys"))}'
+                  f"<span>{_e(COMPONENT_LABELS.get(clave, clave))}</span>{marca}</div>"
+                  f'<div class="cs-bar">{_html_bar(nota)}</div>'
+                  f'<div class="cs-num" style="color:{_score_color(nota)}">{nota:.0f}'
+                  f'<span class="cs-let">{_e(letra)}</span></div></div>')
+    return (f'<div class="strip"><div class="lbl">Nota por componente</div>{filas}'
+            f'<div class="hint">La marca de cada barra son los 100 puntos de la '
+            f"referencia. Lo que sobresale por la derecha va por encima de un equipo "
+            f"de gama media reciente.</div></div>")
+
+
+def _findings_panel(auditor: Auditor, bench: Benchmark | None) -> str:
+    """Recuento por severidad y cuello de botella.
+
+    Aquí solo van las cifras totales. Se probó a desglosarlo por secciones y no
+    cuadraba: los mismos cinco hallazgos aparecen en la ficha por componente, en
+    el plan de acción y en el detalle, así que los recuentos por sección se
+    solapaban y sumaban el triple del total que hay justo encima. Dónde está cada
+    uno ya lo dicen los puntos de color de la navegación.
+    """
+    counts: dict[str, int] = {}
+    for f in auditor.findings:
+        counts[f.severity] = counts.get(f.severity, 0) + 1
+    chips = "".join(f'<span class="badge b-{s}">{n} {SEVERITY_LABELS.get(s, s)}</span>'
+                    for s, n in sorted(counts.items(), key=lambda x: SEVERITY_ORDER[x[0]]))
+    hint = ""
+    comp = bench.component_scores() if bench else {}
+    if comp:
+        weakest = min(comp, key=lambda k: comp[k])
+        hint = (f'<div class="hint">Cuello de botella: '
+                f"<b>{COMPONENT_LABELS.get(weakest, weakest)}</b> "
+                f"({comp[weakest]:.0f} pts)</div>")
+    return (f'<div class="panel"><div class="lbl">Hallazgos</div>'
+            f'<div class="chips">{chips or "ninguno"}</div>{hint}</div>')
+
+
 def _sidebar(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
-             projection: dict[str, Any]) -> str:
+             projection: dict[str, Any], secs: list[Seccion] | None = None) -> str:
     panels = []
 
     if bench and bench.results:
@@ -566,15 +1359,20 @@ def _sidebar(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
             delta = (f'<div class="delta">Tras optimizar '
                      f'<b style="color:var(--ok)">{projection["projected_overall"]:.0f} pts</b>'
                      f' · fluidez percibida +{projection.get("experiential_pct", 0):.0f}%</div>')
-        panels.append(f'<div class="panel"><div class="lbl">Puntuación global</div>'
-                      f'<div class="big" style="color:{_score_color(overall)}">{overall:.0f}'
-                      f"<span>pts</span></div>"
-                      f'<div class="sub">nota {letter} · 100 = gama media reciente</div>'
-                      f'<div style="margin-top:12px">{_html_bar(overall)}</div>{delta}</div>')
+        # El isotipo de filigrana al fondo: es la única cifra que resume todo el
+        # informe, y el sitio donde la marca no compite con ningún dato.
+        panels.append(f'<div class="panel mark">{_logo("brandmark wm", uid="wm")}'
+                      f'<div class="lbl">Puntuación global</div>'
+                      f"{_gauge(overall, letter)}"
+                      f'<div class="sub" style="text-align:center">La marca de arriba son '
+                      f'los 100 puntos de la {_term("referencia", "referencia")}</div>'
+                      f"{delta}</div>")
     else:
-        panels.append('<div class="panel"><div class="lbl">Puntuación global</div>'
+        panels.append('<div class="panel mark"><div class="lbl">Puntuación global</div>'
                       '<div class="sub">Ejecutado sin benchmark: informe solo de auditoría.'
                       "</div></div>")
+
+    panels.append(_findings_panel(auditor, bench))
 
     ram = f"{si.ram_total / 1024**3:.1f} GB"
     if si.ram_speed_mhz:
@@ -591,20 +1389,6 @@ def _sidebar(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
     items = "".join(f"<li>{_icon(k)}<span>{_e(v)}</span></li>" for k, v in equipo)
     panels.append(f'<div class="panel"><div class="lbl">Equipo</div>'
                   f'<ul class="mini">{items}</ul></div>')
-
-    counts: dict[str, int] = {}
-    for f in auditor.findings:
-        counts[f.severity] = counts.get(f.severity, 0) + 1
-    chips = "".join(f'<span class="badge b-{s}">{n} {SEVERITY_LABELS.get(s, s)}</span>'
-                    for s, n in sorted(counts.items(), key=lambda x: SEVERITY_ORDER[x[0]]))
-    hint = ""
-    comp = bench.component_scores() if bench else {}
-    if comp:
-        weakest = min(comp, key=lambda k: comp[k])
-        hint = (f'<div class="hint">Cuello de botella: '
-                f"<b>{COMPONENT_LABELS.get(weakest, weakest)}</b> ({comp[weakest]:.0f} pts)</div>")
-    panels.append(f'<div class="panel"><div class="lbl">Hallazgos</div>'
-                  f'<div class="chips">{chips or "ninguno"}</div>{hint}</div>')
 
     return f'<aside class="side">{"".join(panels)}</aside>'
 
@@ -767,6 +1551,13 @@ def _benchmark_table(bench: Benchmark) -> str:
         aviso += ('<p class="scan-note" style="color:var(--warn)">El equipo no estaba en '
                   f"reposo: un {ocupada:.0f}% de CPU la consumían otros procesos con el "
                   "benchmark parado.</p>")
+    # Una tabla sin filas de GPU no distingue «este equipo no tiene» de «no se
+    # ha mirado». La razón concreta va aquí, junto a la ausencia.
+    if getattr(bench, "gpu_unavailable", ""):
+        aviso += (f'<p class="scan-note">La gráfica no se ha podido medir por '
+                  f'{_term("OpenCL", "opencl")}: {_e(bench.gpu_unavailable)}. Su peso se '
+                  "reparte entre el resto de componentes, así que la nota global no la "
+                  "penaliza.</p>")
     return ('<div class="card"><div class="tw"><table>'
             "<tr><th>Prueba</th><th>Medida</th><th>Margen</th><th>Puntos</th><th>Nota</th>"
             "<th>Relativo a la referencia</th></tr>" + trs
@@ -775,9 +1566,9 @@ def _benchmark_table(bench: Benchmark) -> str:
               f"<td><b>{letter}</b></td><td>{_html_bar(overall)}</td></tr>"
               "</table></div>"
             + aviso
-            + '<p class="scan-note">El margen es cuánto varió cada prueba consigo misma '
-              "entre repeticiones o tramos del mismo trabajo. Un número sin margen no "
-              "revela nunca que está contaminado.</p></div>")
+            + f'<p class="scan-note">El {_term("margen", "margen")} es cuánto varió cada '
+              "prueba consigo misma entre repeticiones o tramos del mismo trabajo. Un "
+              "número sin margen no revela nunca que está contaminado.</p></div>")
 
 
 def _howto_subcard(card: ComponentCard) -> str:
@@ -864,6 +1655,59 @@ def _html_component_cards(cards: list[ComponentCard]) -> str:
     return "".join(parts)
 
 
+def _conditions_block(bench: Benchmark) -> str:
+    """En qué condiciones se midió: qué más corría y cómo llegó el equipo al
+    final de la carga.
+
+    Las dos cosas se guardaban en el JSON y no se enseñaban en ninguna parte, así
+    que el margen de una prueba salía marcado en amarillo sin que se pudiera ver
+    la causa. La causa suele tener nombre y estar en esta tabla.
+    """
+    ambiente = getattr(bench, "ambient_load", {}) or {}
+    fotos = getattr(bench, "load_snapshots", []) or []
+    out = ""
+
+    filas = ""
+    for momento, datos in ambiente.items():
+        culpables = ", ".join(f"{_e(n)} ({p:.0f}%)" for n, p in datos.get("top") or []) or "—"
+        color = "var(--warn)" if datos.get("cpu_pct", 0) >= BUSY_CPU_PCT else "inherit"
+        filas += (f"<tr><td>{_e(momento.capitalize())}</td>"
+                  f'<td style="color:{color}"><b>{datos.get("cpu_pct", 0):.1f}%</b></td>'
+                  f"<td>{culpables}</td></tr>")
+    if filas:
+        out += ('<div class="card"><div class="sub-h">Carga ajena durante la sesión</div>'
+                f'<p class="scan-note">La {_term("carga ajena", "carga-ajena")} se mide con '
+                "el benchmark parado, justo antes y justo después: lo que aparezca aquí lo "
+                "consumía otro programa. Es lo que decide si esta ejecución se puede "
+                "comparar con otra.</p><div class=\"tw\"><table>"
+                "<tr><th>Momento</th><th>CPU ajena</th><th>Procesos que la usaban</th></tr>"
+                + filas + "</table></div></div>")
+
+    utiles = [f for f in fotos if any(f.get(k) is not None for k in
+                                      ("cpu_mhz", "cpu_temp", "gpu_temp", "gpu_power_w"))]
+    if utiles:
+        def celda(foto: dict, clave: str, fmt: str) -> str:
+            valor = foto.get(clave)
+            return format(valor, fmt) if valor is not None else "—"
+
+        filas = ""
+        for foto in utiles:
+            fuente = foto.get("cpu_mhz_source") or ""
+            nota = f'<div class="tags">{_e(fuente)}</div>' if fuente else ""
+            filas += (f"<tr><td>{_e(str(foto.get('moment') or '—').capitalize())}{nota}</td>"
+                      f"<td>{celda(foto, 'cpu_mhz', '.0f')} MHz</td>"
+                      f"<td>{celda(foto, 'cpu_temp', '.0f')} °C</td>"
+                      f"<td>{celda(foto, 'gpu_temp', '.0f')} °C</td>"
+                      f"<td>{celda(foto, 'gpu_power_w', '.0f')} W</td></tr>")
+        out += ('<div class="card"><div class="sub-h">Sensores antes y después de la carga'
+                '</div><p class="scan-note">La misma foto en dos momentos. Si la frecuencia '
+                "baja o la temperatura se dispara entre una y otra, el equipo se está "
+                "limitando solo y la nota de la prueba larga lo refleja.</p>"
+                '<div class="tw"><table><tr><th>Momento</th><th>CPU</th><th>Temp. CPU</th>'
+                "<th>Temp. GPU</th><th>Consumo GPU</th></tr>" + filas + "</table></div></div>")
+    return out
+
+
 def _metrics_block(bench: Benchmark) -> str:
     """Métricas que no puntúan pero explican el porqué de la puntuación."""
     if not bench.metrics and not bench.memory_hierarchy:
@@ -912,9 +1756,10 @@ def _system_state_block(auditor: Auditor, bench: Benchmark | None) -> str:
             cuerpo += ('<p class="scan-note">No aplican a este equipo: '
                        + ", ".join(f"{_e(c)} ({_e(r)})" for c, r in no_aplican) + ".</p>")
         out.append('<div class="card"><div class="sub-h">Cobertura de la auditoría</div>'
-                   f'<p class="scan-note">{auditor.checks_run} de '
-                   f'{getattr(auditor, "checks_total", auditor.checks_run)} comprobaciones '
-                   "llegaron a un veredicto. Las de abajo no: no significan «correcto», "
+                   f'<p class="scan-note">La {_term("cobertura", "cobertura")} de esta '
+                   f"ejecución es de {auditor.checks_run} sobre "
+                   f'{getattr(auditor, "checks_total", auditor.checks_run)} comprobaciones. '
+                   "Las de abajo no llegaron a un veredicto: no significan «correcto», "
                    "significan que no hay dato con el que opinar.</p>" + cuerpo + "</div>")
 
     boot = getattr(auditor, "boot_report", {}) or {}
@@ -1001,8 +1846,10 @@ def _system_state_block(auditor: Auditor, bench: Benchmark | None) -> str:
                         "«100 puntos = gama media» ya no describe lo que se vende hoy: "
                         "la nota está inflada respecto a un equipo actual.</p>")
         out.append('<div class="card"><div class="sub-h">Escala de referencia</div>'
-                   f'<p class="scan-note">100 puntos equivalen a estos valores, fijados en '
-                   f"<b>{_e(REFERENCE_DATE)}</b> sobre un equipo tipo {_e(REFERENCE_MACHINE)}. "
+                   f'<p class="scan-note">Los 100 puntos de la '
+                   f'{_term("referencia", "referencia")} equivalen a estos valores, fijados '
+                   f"en <b>{_e(REFERENCE_DATE)}</b> sobre un equipo tipo "
+                   f"{_e(REFERENCE_MACHINE)}. "
                    "Los tiempos van en segundos; el resto, en su unidad.</p>"
                    + caducada + '<div class="tw">'
                    "<table><tr><th>Prueba</th><th>Referencia</th><th>De dónde sale</th></tr>"
@@ -1062,8 +1909,8 @@ def _network_block(red: dict[str, Any]) -> str:
                 + filas + "</table></div></div>")
     elif not red.get("active"):
         out += ('<div class="card"><p class="scan-note">La latencia y el DNS no se han '
-                "medido: hacerlo requiere abrir conexiones a servidores de terceros. "
-                "Ejecuta con <code>--net</code> si quieres incluirlos.</p></div>")
+                "medido: esta ejecución usó <code>--no-net</code>, que impide abrir "
+                "conexiones a servidores de terceros.</p></div>")
     return out
 
 
@@ -1160,7 +2007,7 @@ def _projection_tables(projection: dict[str, Any]) -> str:
     if sysgain:
         trs += (f"<tr><td>Arranque / fluidez</td><td colspan=2>sin métrica sintética</td>"
                 f'<td class="gain">+{sysgain * 100:.0f}%</td>'
-                f"<td>{_html_bar(sysgain * 100)}</td></tr>")
+                f"<td>{_html_bar(sysgain * 100, ref=False)}</td></tr>")
     out = ('<div class="card"><div class="tw"><table>'
            "<tr><th>Componente</th><th>Ahora</th><th>Optimizado</th><th>Ganancia</th><th></th>"
            "</tr>" + trs + "</table></div></div>")
@@ -1169,50 +2016,96 @@ def _projection_tables(projection: dict[str, Any]) -> str:
     for cat, gain in sorted(projection.get("category_gain", {}).items(), key=lambda x: -x[1]):
         cats += (f"<tr><td>{_e(cat.capitalize())}</td>"
                  f'<td class="gain">+{gain * 100:.0f}%</td>'
-                 f"<td>{_html_bar(min(100, gain * 100))}</td></tr>")
+                 f"<td>{_html_bar(min(100, gain * 100), ref=False)}</td></tr>")
     if cats:
         out += ('<div class="card"><div class="sub-h">Margen por área</div><div class="tw">'
                 "<table>" + cats + "</table></div></div>")
     return out
 
 
+def _worst(findings: list) -> str:
+    """La severidad más grave de un grupo de hallazgos, o cadena vacía."""
+    if not findings:
+        return ""
+    return min((f.severity for f in findings), key=lambda s: SEVERITY_ORDER.get(s, 9))
+
+
+def _search_hints(auditor: Auditor, cards: list[ComponentCard]) -> list[str]:
+    """Ejemplos de filtro sacados de ESTE informe.
+
+    Un campo de búsqueda vacío no dice qué se puede buscar, y una lista de
+    ejemplos escrita a mano acabaría proponiendo cosas que en este equipo no
+    aparecen: buscar «wifi» en un sobremesa por cable no devuelve nada y hace
+    parecer que el buscador no funciona. Salen de lo que el informe contiene.
+    """
+    vistos: list[str] = []
+
+    def añadir(*terminos: str) -> None:
+        for t in terminos:
+            t = (t or "").strip().lower()
+            if t and t not in vistos:
+                vistos.append(t)
+
+    # Las categorías de los hallazgos son lo que la gente busca: «arranque»,
+    # «térmico», «almacenamiento».
+    añadir(*[f.category for f in auditor.findings])
+    scan = getattr(auditor, "scan", None)
+    if scan is not None and getattr(scan, "by_category", None):
+        añadir(*list(scan.by_category)[:3])
+    if (getattr(auditor, "network", {}) or {}).get("wifi"):
+        añadir("wifi")
+    # Componentes con nota: sirven para saltar a sus filas en cualquier tabla.
+    añadir(*[c.label for c in cards if c.score is not None])
+    return vistos[:7]
+
+
 def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                 projection: dict[str, Any]) -> None:
+    # El glosario marca solo la primera aparición de cada término, así que su
+    # memoria es por informe: sin esto, generar dos seguidos dejaría el segundo
+    # sin ninguna explicación.
+    _TERMINOS_VISTOS.clear()
+
     cards = build_component_cards(si, bench, auditor)
     findings = sorted(auditor.findings, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), -f.gain))
     actionable = sorted([f for f in auditor.findings if f.gain > 0], key=priority_rank)
 
-    # (id, etiqueta, icono, contenido, contador del encabezado)
-    secs: list[tuple[str, str, str, str, str]] = [
-        ("inventario", "Inventario", "i-box", _inventory(si), ""),
+    secs: list[Seccion] = [
+        Seccion("inventario", "Inventario", "i-box", _inventory(si)),
     ]
     if bench and bench.results:
-        secs.append(("benchmark", "Benchmark", "i-chart",
-                     _benchmark_table(bench) + _metrics_block(bench),
-                     f"{len(bench.results)} pruebas"))
-    secs.append(("componentes", "Ficha por componente", "i-cpu",
-                 _html_component_cards(cards), f"{len(cards)} componentes"))
+        secs.append(Seccion("benchmark", "Benchmark", "i-chart",
+                            _benchmark_table(bench) + _metrics_block(bench)
+                            + _conditions_block(bench),
+                            f"{len(bench.results)} pruebas"))
+    secs.append(Seccion("componentes", "Ficha por componente", "i-cpu",
+                        _html_component_cards(cards), f"{len(cards)} componentes",
+                        _worst(auditor.findings), len(auditor.findings)))
 
     estado = _system_state_block(auditor, bench)
     if estado:
         arranque = getattr(auditor, "boot_seconds", None)
-        secs.append(("estado", "Estado del sistema", "i-clock", estado,
-                     f"arranque {arranque:.0f} s" if arranque else ""))
+        secs.append(Seccion("estado", "Estado del sistema", "i-clock", estado,
+                            f"arranque {arranque:.0f} s" if arranque else ""))
 
     red = _network_block(getattr(auditor, "network", {}) or {})
     if red:
         wifi = (getattr(auditor, "network", {}) or {}).get("wifi") or {}
-        secs.append(("red", "Red", "i-net", red, wifi.get("radio", "")))
+        de_red = [c for c in cards if c.key == "network"]
+        hallazgos_red = de_red[0].findings if de_red else []
+        secs.append(Seccion("red", "Red", "i-net", red, wifi.get("radio", ""),
+                            _worst(hallazgos_red), len(hallazgos_red)))
 
     scan = getattr(auditor, "scan", None)
     if scan is not None and scan.available and (scan.files or scan.special):
         safe, review = candidate_bytes(scan)
-        secs.append(("archivos", "Archivos grandes", "i-folder", _storage_scan_block(scan),
-                     f"{_human(safe + review)} prescindibles"))
+        secs.append(Seccion("archivos", "Archivos grandes", "i-folder",
+                            _storage_scan_block(scan),
+                            f"{_human(safe + review)} prescindibles"))
     if projection.get("current_components"):
-        secs.append(("proyeccion", "Proyección de mejora", "i-trend",
-                     _projection_tables(projection),
-                     f"+{projection.get('headroom_pct', 0.0):.0f}% sintético"))
+        secs.append(Seccion("proyeccion", "Proyección de mejora", "i-trend",
+                            _projection_tables(projection),
+                            f"+{projection.get('headroom_pct', 0.0):.0f}% sintético"))
 
     if actionable:
         trs = ""
@@ -1221,13 +2114,16 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
                     f'<td class="gain">+{f.gain * 100:.0f}%</td>'
                     f"<td>{_e(f.effort)}</td><td>{_e(f.risk)}</td>"
                     f'<td><span class="badge b-{f.severity}">{f.severity}</span></td></tr>')
-        secs.append(("plan", "Plan de acción priorizado", "i-list",
-                     '<div class="card"><div class="tw"><table>'
-                     "<tr><th>#</th><th>Acción</th><th>Ganancia est.</th><th>Esfuerzo</th>"
-                     "<th>Riesgo</th><th>Severidad</th></tr>" + trs + "</table></div>"
-                     '<p class="tags">Ordenado por retorno estimado dividido por esfuerzo. '
-                     "Aplica de arriba hacia abajo y vuelve a medir tras cada bloque.</p></div>",
-                     f"{len(actionable)} acciones"))
+        secs.append(Seccion("plan", "Plan de acción priorizado", "i-list",
+                            '<div class="card"><div class="tw"><table>'
+                            "<tr><th>#</th><th>Acción</th><th>Ganancia est.</th>"
+                            "<th>Esfuerzo</th><th>Riesgo</th><th>Severidad</th></tr>"
+                            + trs + "</table></div>"
+                            '<p class="tags">Ordenado por retorno estimado dividido por '
+                            "esfuerzo. Aplica de arriba hacia abajo y vuelve a medir tras "
+                            "cada bloque.</p></div>",
+                            f"{len(actionable)} acciones",
+                            _worst(actionable), len(actionable)))
 
     if findings:
         # Aquí va el diagnóstico, no el procedimiento: los pasos viven en la
@@ -1248,52 +2144,109 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
                        f'<div class="tags"><span class="badge b-{f.severity}">{f.severity}</span>'
                        f" &nbsp; {_e(f.category)} · esfuerzo {_e(f.effort)} · riesgo "
                        f"{_e(f.risk)} &nbsp; {gain}</div><p>{_e(f.detail)}</p>{enlace}</div>")
-        secs.append(("hallazgos", "Hallazgos en detalle", "i-alert", detail,
-                     f"{len(findings)} hallazgos"))
+        secs.append(Seccion("hallazgos", "Hallazgos en detalle", "i-alert", detail,
+                            f"{len(findings)} hallazgos",
+                            _worst(findings), len(findings)))
 
     verdict, extra = build_verdict(si, bench, auditor, projection)
     extras = "".join(f"<li>{_e(x)}</li>" for x in extra)
-    secs.append(("veredicto", "Veredicto", "i-award",
-                 f'<div class="card verdict"><p>{_e(verdict)}</p>'
-                 f'{"<ul>" + extras + "</ul>" if extras else ""}</div>', ""))
+    secs.append(Seccion("veredicto", "Veredicto", "i-award",
+                        f'<div class="card verdict">{_logo("brandmark wm", uid="ver")}'
+                        f"<p>{_e(verdict)}</p>"
+                        f'{"<ul>" + extras + "</ul>" if extras else ""}</div>'))
 
     nav = f'<a href="#resumen" data-target="resumen">{_icon("i-zap")}Resumen</a>'
-    nav += "".join(f'<a href="#{sid}" data-target="{sid}" title="{_e(label)}">'
-                   f"{_icon(icon)}{_e(NAV_LABELS.get(sid, label))}</a>"
-                   for sid, label, icon, _inner, _cnt in secs)
-    body = "".join(_section(sid, label, icon, inner, cnt)
-                   for sid, label, icon, inner, cnt in secs)
+    for s in secs:
+        # Punto de severidad en la propia navegación: dónde está lo urgente sin
+        # tener que entrar a mirar sección por sección.
+        punto = f'<span class="sev s-{s.severity}"></span>' if s.severity else ""
+        nav += (f'<a href="#{s.sid}" data-target="{s.sid}" title="{_e(s.label)}">'
+                f"{_icon(s.icon)}{_e(NAV_LABELS.get(s.sid, s.label))}{punto}</a>")
+    body = "".join(_section(s) for s in secs)
+
+    # Bandeja de selección: mientras se eligen secciones hay que poder ver
+    # cuáles van y quitar una sin salir a buscarla por la página.
+    presets = (
+        f'<div class="presets">'
+        f'<button type="button" data-preset="all">{_icon("i-check", "ic sm")}Todo</button>'
+        f'<button type="button" data-preset="none">{_icon("i-x", "ic sm")}Ninguno</button>'
+        f'<button type="button" data-preset="accion">{_icon("i-alert", "ic sm")}'
+        f"Solo lo accionable</button>"
+        f'<button type="button" data-preset="tecnico">{_icon("i-layers", "ic sm")}'
+        f"Solo diagnóstico técnico</button></div>"
+    )
+    tray = (
+        f'<aside class="tray" id="tray" aria-label="Secciones seleccionadas para exportar">'
+        f'<h4>{_icon("i-download", "ic sm")}Se exportarán'
+        f'<span class="n" id="tray-count">0</span></h4>'
+        f'<ul id="tray-list"></ul>{presets}'
+        f'<div class="row"><button class="btn gold" type="button" id="tray-export">'
+        f'{_icon("i-download")}Descargar</button>'
+        f'<button class="btn" type="button" data-preset="none">Vaciar</button></div></aside>'
+    )
+
+    # Ejemplos de filtro: como <datalist> para quien use el teclado, y como
+    # botones al enfocar el campo para quien no sepa que hay algo que escribir.
+    sugerencias = _search_hints(auditor, cards)
+    lista_sugerencias = ""
+    chips_sugerencias = ""
+    if sugerencias:
+        lista_sugerencias = ('<datalist id="sugerencias">'
+                             + "".join(f'<option value="{_e(s)}">' for s in sugerencias)
+                             + "</datalist>")
+        chips_sugerencias = (
+            '<div class="tips"><div class="th">Prueba a filtrar por</div><div class="tr">'
+            + "".join(f'<button type="button" data-tip="{_e(s)}">{_e(s)}</button>'
+                      for s in sugerencias)
+            + "</div></div>")
 
     date = f"{datetime.now():%d/%m/%Y %H:%M}"
     html = (
         '<!DOCTYPE html>\n<html lang="es"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"<title>Informe de rendimiento · {_e(si.hostname)}</title>"
+        f"{_favicon()}"
         f"<style>{HTML_CSS}</style></head>"
         f'<body data-host="{_e(_slug(si.hostname))}" data-stamp="{date}">'
         f"{_sprite()}"
-        '<div class="topbar"><div class="tb">'
-        f'<div class="logo">{_logo(uid="nav")}<span>Quilate <b>Suite</b></span></div>'
+        '<header class="topbar"><div class="prog"></div><div class="tb">'
+        f'<a class="logo" href="#resumen" data-target="resumen">{_logo(uid="nav")}'
+        "<span>Quilate <b>Suite</b></span></a>"
         f"<nav>{nav}</nav>"
-        '<button class="btn" id="export-sel" disabled title="Marca secciones con su casilla '
-        'para exportarlas juntas en un solo fichero">'
+        f'<div class="find">{_icon("i-search", "ic sm")}'
+        '<label class="vh" for="buscar">Filtrar el informe por texto</label>'
+        '<input id="buscar" type="search" placeholder="Filtrar el informe…" '
+        'autocomplete="off" list="sugerencias">'
+        f"{lista_sugerencias}"
+        '<span class="cnt" id="buscar-cnt"></span>'
+        f"{chips_sugerencias}</div>"
+        '<button class="btn" type="button" id="export-sel" disabled '
+        'title="Marca secciones con su casilla para exportarlas juntas en un solo fichero">'
         f'{_icon("i-download")}<span>Exportar (0)</span></button>'
-        '<button class="btn" id="toggle-all" data-open="1">'
+        '<button class="btn" type="button" id="toggle-all" data-open="1">'
         f'{_icon("i-list")}<span>Colapsar todo</span></button>'
-        "</div></div>"
-        '<div class="layout">'
-        f"{_sidebar(si, bench, auditor, projection)}"
-        '<main class="main">'
-        '<header class="page"><h1>Informe de rendimiento y optimización</h1>'
-        f'<div class="meta">{_e(si.hostname)} · {_e(si.os_name)} · generado el {date}</div>'
+        "</div>"
+        f'<div class="crumb"><div class="cin">{_icon("i-chev", "ic sm")}'
+        '<span>Estás en</span><b id="crumb-name">Resumen</b>'
+        '<span class="pct" id="crumb-pct">0% leído</span></div></div>'
         "</header>"
-        f"{_hero(bench, auditor, projection)}{body}"
+        '<div class="layout">'
+        f"{_sidebar(si, bench, auditor, projection, secs)}"
+        '<main class="main">'
+        '<header class="page">'
+        f'{_logo("brandmark hero", uid="cab")}'
+        '<div class="htxt"><div class="kicker">Quilate Suite</div>'
+        "<h1>Informe de rendimiento y optimización</h1>"
+        f'<div class="meta">{_e(si.hostname)} · {_e(si.os_name)} · generado el {date}</div>'
+        "</div></header>"
+        f"{_hero(bench, auditor, projection)}{_component_strip(bench)}{body}"
         "</main></div>"
         f'<footer><span class="fbrand">{_logo("brandmark foot", uid="pie")}'
         f"{_e(APP_NAME)} v{APP_VERSION} · escala de referencia: "
         f"100 pts = gama media reciente</span>"
         f'<span>{_e(AUTHOR)} — <a href="{WEBSITE_URL}">{_e(WEBSITE)}</a></span></footer>'
-        '<button class="btn" id="top" title="Volver arriba" '
+        f"{tray}"
+        '<button class="btn" type="button" id="top" title="Volver arriba" '
         "onclick=\"window.scrollTo({top:0,behavior:'smooth'})\">"
         f'{_icon("i-up")}</button>'
         f"<script>{HTML_JS}</script></body></html>"

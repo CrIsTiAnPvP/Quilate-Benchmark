@@ -154,12 +154,13 @@ def wifi_capability(descripcion: str) -> str | None:
 
 
 # ==============================================================================
-# Sondas activas: solo bajo petición expresa
+# Sondas activas: van por defecto, y --no-net las corta
 # ==============================================================================
-# Estas dos funciones abren conexiones a servidores que no son del usuario. No
-# se ejecutan salvo que se pidan con --net, y los destinos son resolutores DNS
-# públicos y conocidos, no un servicio propio: Quilate no envía nada a ninguna
-# parte, solo cronometra el saludo TCP.
+# Estas dos funciones abren conexiones a servidores que no son del usuario. Los
+# destinos son resolutores DNS públicos y conocidos, no un servicio propio, y lo
+# único que sale del equipo es el saludo TCP: Quilate no envía ningún dato a
+# ninguna parte, solo lo cronometra. `--no-net` no oculta el resultado, impide
+# la llamada.
 DESTINOS = (("1.1.1.1", 53, "Cloudflare"),
             ("8.8.8.8", 53, "Google"),
             ("9.9.9.9", 53, "Quad9"))

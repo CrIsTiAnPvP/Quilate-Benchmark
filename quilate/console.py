@@ -120,6 +120,18 @@ def read_key() -> str:
 
 BOX_W = 78
 
+# Nombre legible de cada componente puntuado. Vive aqui, y no en cada informe,
+# porque habia cinco copias de este diccionario y la de `report` se habia
+# quedado sin la GPU: en un equipo donde la grafica era el componente mas flojo,
+# buscar el cuello de botella reventaba con KeyError. Una tabla de etiquetas
+# duplicada no avisa cuando aparece una clave nueva.
+COMPONENT_LABELS = {"cpu_single": "CPU monohilo", "cpu_multi": "CPU multihilo",
+                    "memory": "Memoria", "disk": "Almacenamiento", "gpu": "GPU"}
+
+
+def component_label(key: str) -> str:
+    return COMPONENT_LABELS.get(key, key)
+
 
 def banner() -> None:
     line = "═" * BOX_W

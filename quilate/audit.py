@@ -840,7 +840,7 @@ class Auditor:
         """Latencia y resolución DNS. Solo si se han pedido las sondas."""
         datos = self.network or {}
         if not datos.get("active"):
-            raise NoAplica("las sondas de red no se han pedido (--net)")
+            raise NoAplica("se desactivaron las sondas de red con --no-net")
         latencia = datos.get("latency") or {}
         dns = datos.get("dns") or {}
         if not latencia.get("reachable"):

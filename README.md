@@ -64,8 +64,10 @@ En los ejemplos siguientes, `python` asume el entorno ya activado.
 | `--quick` | Benchmark rápido, menor precisión |
 | `--no-bench` | Solo auditoría, sin medir |
 | `--no-disk` | Omite las pruebas de disco |
+| `--no-gpu` | Omite las pruebas de GPU (cómputo, VRAM y PCIe) |
 | `--disk-size 2048` | Tamaño del fichero de test en MB (por defecto 512) |
 | `--disk-path D:\` | Carpeta donde medir el disco |
+| `--no-net` | No mide latencia ni DNS: no abre ninguna conexión a internet |
 | `--no-files` | Omite el rastreo de archivos grandes |
 | `--scan-time 60` | Segundos de presupuesto para el rastreo (por defecto 30) |
 | `--scan-path D:\Juegos` | Carpeta extra a rastrear (repetible) |
@@ -74,6 +76,9 @@ En los ejemplos siguientes, `python` asume el entorno ya activado.
 | `--html informe.html` | Informe HTML con branding |
 | `--json datos.json` | Datos crudos para comparar ejecuciones |
 | `--export-plan` | Genera `plan_optimizacion.ps1` (solo Windows) |
+| `--compare antes.json despues.json` | Contrasta dos ejecuciones y sale (no mide nada) |
+| `--history` | Muestra el histórico local y su deriva, y sale |
+| `--no-history` | No guarda esta ejecución en el histórico local |
 | `--elevate` | Pide permisos de administrador aunque se lance desde una terminal |
 | `--no-elevate` | No pide permisos de administrador en ningún caso |
 | `--no-color` | Desactiva colores ANSI |
@@ -131,25 +136,41 @@ siempre ejecuciones del mismo tipo: `.exe` con `.exe`, script con script.
 # 1. Medir el estado inicial y guardar la línea base
 python quilate.py --disk-size 2048 --json antes.json --html antes.html --export-plan
 
-# 2. Revisar plan_optimizacion.ps1 línea por línea y ejecutarlo
+# 2. Ver qué haría el plan sin tocar nada
+powershell -ExecutionPolicy Bypass -File plan_optimizacion.ps1 -WhatIf
+
+# 3. Revisarlo línea por línea y ejecutarlo (cada bloque pide confirmación)
 powershell -ExecutionPolicy Bypass -File plan_optimizacion.ps1
 
-# 3. Reiniciar y volver a medir
+# 4. Reiniciar, volver a medir y contrastar
 python quilate.py --disk-size 2048 --json despues.json --html despues.html
+python quilate.py --compare antes.json despues.json
 ```
 
 ## Qué hace
 
 - **Benchmark**: CPU monohilo (4 subtests), CPU multihilo con eficiencia de
-  escalado, ancho de banda de memoria, escritura/lectura secuencial y IOPS 4K.
+  escalado, ancho de banda de memoria, escritura/lectura secuencial, IOPS 4K y
+  **GPU** (cómputo FP32, ancho de banda de VRAM y transferencia PCIe).
   Escala normalizada donde 100 pts = equipo de gama media reciente.
+- **Margen de error en cada medida**: el mismo trabajo se reparte en tramos o
+  repeticiones y se mira cuánto varían entre sí. Un número solo nunca delata que
+  está contaminado —el test de disco daba 205.000 IOPS con todo aplomo mientras
+  medía la caché del sistema operativo—, y una cifra con margen sí. Las medidas
+  inestables se marcan y no valen para comparar dos ejecuciones.
+- **Condiciones de la sesión**: cuánta CPU consumían *otros* programas con el
+  benchmark parado, y qué programas eran. Si el equipo no estaba en reposo, la
+  nota lo dice en vez de atribuir al hardware lo que era un antivirus.
 - **Métricas de diagnóstico** que no puntúan pero explican la nota: jerarquía de
   caché (L1/L2/L3/RAM), rendimiento sostenido bajo carga larga —la señal de
   throttling que se ve sin sensores—, frecuencia real con todos los núcleos,
   latencia 4K del disco y telemetría de GPU en vivo.
-- **Auditoría**: ~25 comprobaciones (espacio, tipo de disco, TRIM, canales de
+- **Auditoría**: ~30 comprobaciones (espacio, tipo de disco, TRIM, canales de
   RAM, temperaturas, frecuencia sostenida, plan de energía, programas de inicio,
-  servicios, SMART, antivirus solapados, antigüedad de la instalación...).
+  servicios, SMART, antivirus solapados, antigüedad de la instalación, enlace de
+  red...). Cada una acaba en un veredicto, en un «no aplica» o en un **«no se ha
+  podido comprobar» con su motivo**: lo que no se ha podido mirar no cuenta como
+  correcto, y el informe dice cuántas comprobaciones llegaron a conclusión.
 - **Archivos grandes**: rastrea el disco de sistema con un presupuesto de tiempo
   fijo, clasifica lo que encuentra (temporales, cachés, volcados, instaladores,
   copias, vídeo…) y separa lo que es basura de lo que hay que revisar antes de
@@ -158,7 +179,7 @@ python quilate.py --disk-size 2048 --json despues.json --html despues.html
   El archivo de paginación, el de hibernación y el de intercambio quedan fuera
   del ranking —son enormes y lo encabezarían siempre— y se informan aparte con
   su explicación, porque no se borran a mano.
-- **Ficha por componente**: procesador, memoria, almacenamiento, gráfica y
+- **Ficha por componente**: procesador, memoria, almacenamiento, gráfica, red y
   sistema, cada uno con su inventario, la nota que ha sacado en las pruebas y
   las mejoras que le corresponden agrupadas, con la ganancia combinada y la
   puntuación que alcanzaría al aplicarlas. Va en la consola, en el JSON
@@ -166,27 +187,167 @@ python quilate.py --disk-size 2048 --json despues.json --html despues.html
 - **Proyección**: mejora estimada por componente y por área, con rendimientos
   decrecientes, y plan de acción ordenado por retorno dividido por esfuerzo.
 
+## GPU
+
+La gráfica se mide de verdad, no solo se inventaría: **cómputo FP32**, **ancho
+de banda de VRAM** y **transferencia por PCIe**, cada uno con su margen.
+
+Va por OpenCL a través de `ctypes` (`OpenCL.dll` en Windows,
+`libOpenCL.so.1` en Linux). Esa biblioteca la instala el propio driver de la
+tarjeta, así que **no hay ninguna dependencia nueva que instalar** y funciona
+igual con NVIDIA, AMD e Intel. Si no hay ninguna GPU medible, el informe dice
+por qué y reparte su peso entre el resto de componentes: no tener gráfica no
+penaliza la nota, pero tenerla y no mirarla ya no es una opción.
+
+Dos detalles que no son obvios:
+
+- **El número de vueltas del kernel se calibra** en cada equipo. Con una cifra
+  fija, una tarjeta rápida despacha el kernel en tres milisegundos y la
+  dispersión se dispara al 18%; calibrado baja al 0,7%. Y una integrada lenta no
+  se queda colgada: Windows reinicia el driver si un kernel tarda más de dos
+  segundos.
+- **Se elige la gráfica que de verdad calcula.** En un portátil con integrada y
+  dedicada aparecen las dos, y la ficha dice cuál se ha medido. Medir la que no
+  trabaja sería repetir el error del driver que ya se corrigió.
+
+## Red
+
+Se lee el enlace, que es donde está el problema que nadie mira: una tarjeta
+**Wi-Fi 6 conectada en 802.11ac**, un gigabit negociando a 100 Mbps por un cable
+malo, o la banda de 2,4 GHz con una tarjeta capaz de 5. Es el mismo patrón que
+la RAM funcionando a velocidad JEDEC con módulos que dan más.
+
+La latencia y la resolución DNS **se miden por defecto**: se cronometra el
+saludo TCP contra tres resolutores públicos y conocidos (1.1.1.1, 8.8.8.8 y
+9.9.9.9). No se envía ningún dato a ninguna parte, solo se mide el tiempo de ida
+y vuelta. `--no-net` impide la llamada, no oculta el resultado.
+
+**No se recogen el SSID, el BSSID ni la dirección MAC.** Identifican tu red y tu
+equipo, no dicen nada sobre el rendimiento, y estos informes se comparten. Hay
+tests que lo comprueban.
+
+## Comparar dos ejecuciones
+
+```powershell
+python quilate.py --compare antes.json despues.json
+```
+
+No mide nada: contrasta lo ya medido. La parte que importa no es la resta, es
+decidir si la diferencia significa algo — **una mejora del 3% entre dos
+ejecuciones cuyas medidas bailan un 12% cada una no es una mejora, es ruido con
+buena prensa**. Cada diferencia se compara contra el margen de las dos medidas y
+se etiqueta como real o como indistinguible del ruido.
+
+También enfrenta la proyección de la ejecución antigua con lo que de verdad
+pasó, que es la única forma de saber si el modelo acierta. Si los dos JSON no
+son del mismo equipo, lo dice antes de comparar nada.
+
+## Histórico y deriva
+
+Cada ejecución deja una línea en un fichero local (`LOCALAPPDATA` en Windows,
+`XDG_DATA_HOME` en Linux). `--history` lo lee:
+
+```text
+Almacenamiento         120.0     99.0   -17.5%   ▇▇█▇▅▄▂▁
+Duración del arranque   22.5     36.0   -60.0%   ▁▁▁▁▃▄▆█
+```
+
+`--compare` responde a «¿ha servido de algo lo que acabo de aplicar?».
+Esto responde a la otra pregunta, la que un equipo acaba haciéndose con el
+tiempo: **¿voy a peor?** El disco que se degrada, el arranque que crece mes a
+mes, el portátil que baja de frecuencia en cuanto llega el verano.
+
+Se comparan **bloques de al menos tres medidas**, no los extremos: con dos
+puntos siempre se puede trazar una recta y no dice nada, y una ejecución rara no
+puede declarar que el equipo se degrada. El signo va corregido, así que «+»
+siempre significa mejor, también en el arranque y la temperatura, donde el
+número baja cuando la cosa mejora.
+
+**Solo se guardan cifras y fechas**: ni rutas, ni nombres de programa, ni el
+nombre del equipo. `--no-history` desactiva el registro, y el fichero es texto
+plano que se puede leer, copiar o borrar.
+
 ## El informe HTML
 
 Un único fichero autocontenido —sin CDN, sin fuentes externas, sin conexión—
-que se puede enviar por correo tal cual:
+que se puede enviar por correo tal cual. **Todo va dentro**, incluido el
+isotipo: el logo es SVG escrito a mano en el propio documento y el icono de la
+pestaña viaja en una URL `data:`, así que no hay ningún `.ico` que acompañar.
+Un test recorre todos los `href` y `src` del informe y falla si alguno apunta
+fuera.
 
-- Barra de navegación fija con salto a cada sección y resaltado de la sección
-  activa al desplazarte.
+- **Dial de puntuación** con la referencia marcada arriba del todo: la escala
+  llega a 200 puntos, así que los 100 de la referencia caen exactos en las doce
+  en punto. Pasar de esa marca significa ir por encima de un equipo de gama
+  media, y eso se lee sin comparar cifras.
+- **Nota por componente** en una sola tira, todas las barras sobre la misma
+  escala y con la referencia marcada. Antes las barras se saturaban al llegar a
+  100 y un equipo de 105 puntos se pintaba igual que uno de 190; ahora el
+  recorrido por encima de la media se ve.
+- Barra lateral con la puntuación global, el recuento de hallazgos por severidad
+  y el cuello de botella. Se fija en pantalla **solo si cabe entera**: fijarla
+  siempre dejaba el último panel fuera de la vista hasta el final de la página, y
+  darle scroll propio cortaba las frases a media palabra.
+- **Buscador en cliente**: filtra filas de tablas, hallazgos y categorías de
+  archivos según escribes, y esconde las secciones que no tienen coincidencias.
+  En un rastreo con doscientas filas de ficheros no es un lujo. Al enfocarlo
+  propone ejemplos **sacados de este informe** —sus categorías de hallazgo, sus
+  componentes, sus tipos de archivo—, no una lista escrita a mano que acabaría
+  sugiriendo «wifi» en un sobremesa conectado por cable.
+- **Glosario emergente**: los términos que no todo el mundo tiene por qué saber
+  —margen, referencia, carga ajena, cobertura— se explican con un globo la
+  primera vez que aparecen. Solo la primera: a la tercera nadie lo lee.
+- Barra de navegación fija con progreso de lectura, un punto de color en las
+  secciones que traen hallazgos y una franja debajo que dice en qué sección
+  estás y cuánto llevas leído. Al pulsar un enlace el resaltado salta directo al
+  destino en vez de ir encendiéndose por todas las secciones intermedias
+  mientras la página viaja.
+- Las secciones largas se generan su propio índice a partir de sus subtítulos,
+  con un «volver al principio» al final.
+- **Cada sección tiene un tono según para qué sirve**: lo que hay que decidir
+  (plan, hallazgos), lo que explica la nota (benchmark, componentes, red) y lo
+  que solo es referencia (inventario). Sin esa distinción, doce secciones
+  idénticas compiten todas por igual.
 - Secciones plegables, con botón de *colapsar / expandir todo*.
 - **Exportación por secciones**: cada sección tiene su botón para guardarla como
-  fichero HTML suelto, y una casilla para marcar varias y bajarlas juntas en un
-  único documento. Lo exportado se lleva los estilos y los iconos incrustados,
-  así que sigue siendo autocontenido.
-- Barra lateral fija con la puntuación global, la ficha resumida del equipo,
-  el recuento de hallazgos por severidad y el cuello de botella detectado.
+  fichero HTML suelto, y una casilla para marcar varias y bajarlas juntas. Una
+  bandeja flotante enseña las elegidas y deja quitarlas una a una, con atajos
+  para *todo*, *ninguno*, *solo lo accionable* y *solo diagnóstico técnico*. Lo
+  exportado se lleva los estilos, los iconos y la marca incrustados, así que
+  sigue siendo autocontenido: hay tests que lo comprueban abriéndolo.
 - Inventario completo: discos físicos con su salud y todos los volúmenes con
   su ocupación, no solo la unidad de sistema.
 - Cada componente lleva una subtarjeta plegada con el procedimiento paso a paso
   de las mejoras que le tocan. Los pasos viven solo ahí: la sección *Hallazgos
   en detalle* se queda con el diagnóstico y enlaza a la ficha del componente,
   para no mantener dos copias del mismo procedimiento.
-- Iconos SVG embebidos, diseño adaptable a móvil y hoja de estilo de impresión.
+- Iconos SVG embebidos, diseño adaptable a móvil, hoja de estilo de impresión y
+  respeto por `prefers-reduced-motion`.
+
+Sobre el color: el **dorado es de la marca** y nunca califica un dato; el
+**cian** marca lo que se puede pulsar; el **semáforo** es solo diagnóstico. Por
+eso su ámbar tira a naranja — con el dorado al lado, un ámbar amarillo se leía
+como «esto es de Quilate» en vez de como «esto va regular».
+
+### Las cuatro salidas dicen lo mismo
+
+Consola, HTML, JSON y plan PowerShell son cuatro vistas de la misma ejecución, y
+el modo natural de que se desincronicen es añadir un dato, enseñarlo donde
+estabas trabajando y olvidarte del resto. Ha pasado: la GPU entró en la
+puntuación global y la ficha de la gráfica siguió diciendo «sin nota sintética»
+durante toda una versión.
+
+`tests/test_paridad.py` planta un valor reconocible en cada fuente de datos y
+comprueba que sale por el otro lado. No mira si existe la clave —una clave
+presente con la lista vacía es justo el fallo que se quiere cazar—, mira si el
+dato llega.
+
+Ahí mismo se vigila el JavaScript del informe, que hace dos travesías delicadas:
+de una cadena de Python a un `<script>`. Un error de sintaxis ahí no falla al
+generar el fichero, produce un informe mudo —plegar, buscar y exportar dejan de
+responder a la vez— y desde fuera parece un problema de diseño. Por eso el JS no
+lleva **ni una sola barra invertida**: sin escapes no hay nada que se pueda
+malinterpretar por el camino, y un test lo comprueba.
 
 ## Detección de hardware
 
@@ -227,9 +388,13 @@ que se puede enviar por correo tal cual:
 | `sysinfo.py` | Inventario del equipo y clasificación de volúmenes |
 | `storage_scan.py` | Rastreo y clasificación de archivos grandes |
 | `benchmark.py` | Motor de medición, puntuación y nota global |
+| `gpu_bench.py` | Medida de la GPU por OpenCL (enlace con `ctypes`) |
+| `network.py` | Enlace de red, latencia y resolución DNS |
 | `audit.py` | Comprobaciones de configuración y hallazgos |
 | `projection.py` | Combinación de ganancias y proyección |
 | `components.py` | Ficha por componente |
+| `compare.py` · `compare_report.py` | Contraste de dos ejecuciones |
+| `history.py` · `history_report.py` | Histórico local y detección de deriva |
 | `report.py` | Informe de consola |
 | `export/` | `json_export` · `html_export` · `plan_export` |
 | `cli.py` | Argumentos y orquestación |
@@ -237,12 +402,48 @@ que se puede enviar por correo tal cual:
 Las dependencias van siempre en un sentido (de `const` hacia `cli`), sin
 importaciones circulares. También funciona como módulo: `python -m quilate`.
 
+### Tests
+
+```powershell
+python -m unittest discover -s tests
+```
+
+Solo biblioteca estándar y sin red. Las capturas de WMI y del registro viven en
+`tests/fixtures/` con los SID, los nombres de usuario, los nombres de equipo y
+las rutas de perfil ya quitados, así que la lógica se puede probar en cualquier
+sistema —también en Linux— sin depender de la máquina que los generó. Los que
+necesitan hardware que no siempre está (la GPU con OpenCL) se saltan diciendo
+por qué. Hay más detalle en `tests/README.md`.
+
+## El plan PowerShell
+
+- **El script de Quilate no modifica nada.** Solo lee. El plan se genera aparte
+  y no se ejecuta solo: cada bloque pide confirmación por separado.
+- **`-WhatIf` enseña qué haría cada bloque sin cambiar una sola cosa.**
+- **Cada cambio se anota antes de aplicarlo** en un script de reversión que se
+  escribe al lado, con **el valor que tenía tu equipo**, leído en ese momento.
+  No se pone «el valor por defecto de Windows» en su lugar: el valor por defecto
+  y el tuyo no tienen por qué coincidir, y suponerlo sería inventar. Si el ajuste
+  no existía, la reversión lo borra en vez de dejarlo puesto a algo.
+- Si no se consigue anotar cómo deshacer un cambio, se avisa y se pregunta antes
+  de aplicarlo igualmente.
+- El script de reversión **solo se crea si algo llega a aplicarse**: un fichero
+  vacío invitaría a confiar en él.
+- El bloque 0 crea un punto de restauración y exporta el registro.
+- La cabecera identifica **para qué equipo se generó** el plan. Es un fichero que
+  se guarda y se ejecuta días después; los bloques tocan el registro y los
+  servicios de la máquina donde se ejecuten, no de la máquina donde se midió.
+
 ## Notas importantes
 
-- **El script no modifica nada.** Solo lee. El plan PowerShell se genera aparte,
-  pide confirmación en cada bloque y el primero crea un punto de restauración.
 - Los porcentajes de mejora son **estimaciones heurísticas** basadas en el tipo
-  de cuello de botella detectado, no garantías. Mide antes y después.
+  de cuello de botella detectado, no garantías. Mide antes y después, y usa
+  `--compare` para saber si la diferencia supera el margen de las medidas.
+- **La escala de referencia lleva fecha.** Una escala sin fecha no envejece, se
+  pudre: «gama media» significaba una cosa en 2024 y otra en 2028, y la nota
+  cambiaría de significado sin que nadie tocara una línea de código. Cuando la
+  escala caduca, el informe avisa de que su propia vara de medir se ha quedado
+  vieja en vez de seguir dando notas infladas.
 - Las lecturas de disco pueden salir infladas por la caché del SO. Si ves IOPS
   por encima de 200.000, sube `--disk-size` a 2048 o más.
 - El rastreo de archivos grandes tiene un presupuesto de tiempo: si lo agota,
