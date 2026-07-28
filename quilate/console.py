@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import subprocess
 import sys
 from typing import Any
 
@@ -77,13 +76,15 @@ def clear_screen() -> None:
     Solo cuando la salida va a un terminal: si esta redirigida a un fichero o a
     otro proceso, el borrado no tendria efecto visible y ademas ensuciaria el
     destino con el codigo de control.
+
+    Se borra con la secuencia VT100 y no llamando a `cls`/`clear`: `configure_output`
+    ya ha activado VT100, asi que hace lo mismo sin levantar un proceso hijo por
+    ejecucion y sin depender de que %COMSPEC% en Windows —o el `clear` que haya
+    en el PATH en Linux— sean los que uno espera.
     """
     if not sys.stdout.isatty():
         return
-    try:
-        subprocess.run("cls" if IS_WINDOWS else "clear", shell=True, check=False)
-    except OSError:
-        print("\033[2J\033[H", end="")   # respaldo: borrar y volver al origen
+    print("\033[2J\033[H", end="")   # borrar la pantalla y volver al origen
 
 
 def read_key() -> str:
