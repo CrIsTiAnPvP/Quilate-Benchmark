@@ -165,7 +165,12 @@ HTML_CSS = """
 :root{
 --ink:#0a0c11;--ink2:#0e1117;--surface:#141821;--surface2:#1a1f2b;
 --line:#242b38;--line2:#333d4f;
---txt:#e9edf4;--dim:#95a1b5;--faint:#6d798c;
+/* --faint se usa donde más duele: .hint (11,5px), .lbl (10,5px en mayúsculas
+   con letter-spacing), .crumb y el placeholder del buscador. Texto pequeño y
+   secundario, que es justo el que no puede quedarse corto de contraste. El
+   #6d798c anterior daba 4,03:1 sobre --surface, por debajo del 4,5:1 que exige
+   WCAG AA; este da 5,66:1 y a simple vista es casi el mismo gris. */
+--txt:#e9edf4;--dim:#95a1b5;--faint:#8792a6;
 
 --gold:#e8b33e;--gold-lt:#ffe9a8;--gold-dk:#8a6a1e;
 --brand:#e8b33e;--brand-dark:#8a6a1e;      /* nombres antiguos, aún referidos */
