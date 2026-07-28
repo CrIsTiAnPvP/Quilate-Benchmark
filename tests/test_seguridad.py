@@ -581,6 +581,68 @@ class CuentasLocales(unittest.TestCase):
             self._auditar([{"disponible": False}])
 
 
+class ActualizacionesDeSeguridad(unittest.TestCase):
+    """Detrás de un flag, igual que `--check-drivers` y por el mismo motivo."""
+
+    def _auditar(self, filas):
+        a = Auditor(SystemInfo(), None, check_updates=True)
+        with patched(audit, pending_security_updates=lambda *a, **k: filas):
+            return a, a.check_security_updates()
+
+    def fila(self, titulo="KB5000001", severidad="Critical") -> dict:
+        return {"Title": titulo, "MsrcSeverity": severidad}
+
+    def test_sin_actualizaciones_pendientes(self):
+        a, resumen = self._auditar(PSResult([]))
+        self.assertEqual(a.findings, [])
+        self.assertIn("ninguna de seguridad", resumen)
+
+    def test_una_actualizacion_que_no_es_de_seguridad_no_cuenta(self):
+        # Las que no son de seguridad vienen sin MsrcSeverity. Contarlas
+        # inflaría el hallazgo con una actualización de zona horaria.
+        a, resumen = self._auditar(PSResult([self.fila("Zona horaria", None),
+                                             self.fila("Otra", "")]))
+        self.assertEqual(a.findings, [])
+        self.assertIn("ninguna de seguridad", resumen)
+
+    def test_criticas(self):
+        a, _ = self._auditar(PSResult([self.fila(severidad="Critical")]))
+        self.assertEqual([f.id for f in a.findings], ["updates_pendientes"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("high", SEGURIDAD, 0.0))
+
+    def test_solo_importantes_baja_de_severidad(self):
+        a, _ = self._auditar(PSResult([self.fila(severidad="Important")]))
+        self.assertEqual(a.findings[0].severity, "medium")
+
+    def test_solo_menores(self):
+        a, _ = self._auditar(PSResult([self.fila(severidad="Moderate")]))
+        self.assertEqual(a.findings[0].severity, "low")
+
+    def test_la_mezcla_manda_la_mas_grave(self):
+        a, _ = self._auditar(PSResult([self.fila("A", "Moderate"),
+                                       self.fila("B", "Critical"),
+                                       self.fila("C", "Important")]))
+        self.assertEqual(a.findings[0].severity, "high")
+        self.assertIn("3 actualización(es)", a.findings[0].title)
+
+    def test_dice_cuales_son(self):
+        a, _ = self._auditar(PSResult([self.fila("KB5000123 para Windows 11")]))
+        self.assertIn("KB5000123", a.findings[0].detail)
+
+    def test_no_poder_preguntar_no_es_estar_al_dia(self):
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult((), ok=False, error="sin conexión"))
+
+    def test_sin_el_flag_ni_se_pregunta(self):
+        # Registrarla sin haberla pedido la dejaría como «sin comprobar» en un
+        # informe donde nadie ha querido esperar los 30 segundos.
+        sin_flag = Auditor(SystemInfo(), None)
+        con_flag = Auditor(SystemInfo(), None, check_updates=True)
+        self.assertFalse(sin_flag.check_updates)
+        self.assertTrue(con_flag.check_updates)
+
+
 class Decodificador(unittest.TestCase):
     def test_los_dos_bytes_que_importan(self):
         self.assertEqual(_estado_antivirus(0x061100), (True, True))

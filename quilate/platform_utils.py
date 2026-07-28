@@ -361,6 +361,29 @@ def pending_driver_updates(timeout: int = 90) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def pending_security_updates(timeout: int = 120) -> PSResult:
+    """Actualizaciones de software pendientes, con su severidad según Microsoft.
+
+    Comparte con `pending_driver_updates` el coste y la contrapartida —tarda
+    entre 10 y 30 segundos y necesita conexión, por eso va detrás de un flag—
+    pero no su forma de fallar: aquella se traga el error dentro de un
+    `catch { }` de PowerShell y sale con código 0, así que «no hay nada
+    pendiente» y «no he podido preguntarlo» acaban siendo la misma lista vacía.
+    Aquí el fallo llega por `PSResult.ok`, que es lo que permite decirlo.
+
+    `MsrcSeverity` solo lo traen las actualizaciones de seguridad; las demás lo
+    dejan vacío, y quien llame debe usarlo para no contar como riesgo una
+    actualización de zona horaria.
+    """
+    if not IS_WINDOWS:
+        return PSResult((), ok=False, error="solo Windows")
+    return ps_json(
+        "$( $s = New-Object -ComObject Microsoft.Update.Session;"
+        "   $r = $s.CreateUpdateSearcher().Search(\"IsInstalled=0 and Type='Software'\");"
+        "   $r.Updates | Select-Object Title,MsrcSeverity )",
+        timeout=timeout)
+
+
 def is_admin() -> bool:
     try:
         if IS_WINDOWS:

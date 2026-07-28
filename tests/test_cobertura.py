@@ -49,6 +49,10 @@ class SistemaMudo(unittest.TestCase):
             run_cmd=lambda *a, **k: CmdResult(ok=False, error="sin respuesta"),
             boot_performance=lambda *a, **k: {"error": "sin acceso", "boots": [], "delays": []},
             pending_driver_updates=lambda *a, **k: [],
+            # Sin cegar esta, la suite entera llamaba a Windows Update de verdad:
+            # 30 segundos de espera y un resultado distinto según la conexión.
+            pending_security_updates=lambda *a, **k: PSResult(
+                (), ok=False, error="sin respuesta"),
             cpu_temperature=lambda *a, **k: None,
             gpu_temperature=lambda *a, **k: None,
             temperature_report=lambda *a, **k: [],

@@ -16,8 +16,9 @@ from .sensors import cpu_temperature, gpu_temperature, temperature_report, tempe
 from .storage_scan import ScanResult, candidate_bytes
 from .console import C, human_bytes, section, spinner_done, spinner_step
 from .const import IS_LINUX, IS_WINDOWS
-from .platform_utils import (_sys_exe, boot_performance, pending_driver_updates, ps_json,
-                             reg_key_readable, reg_list_values, reg_read, run_cmd, winreg)
+from .platform_utils import (_sys_exe, boot_performance, pending_driver_updates,
+                             pending_security_updates, ps_json, reg_key_readable,
+                             reg_list_values, reg_read, run_cmd, winreg)
 from .network import WIFI_TECHO, wifi_capability
 from .sysinfo import KIND_LABELS, SystemInfo, local_volumes, primary_gpu
 
@@ -122,12 +123,13 @@ class Finding:
 class Auditor:
     def __init__(self, si: SystemInfo, bench: Benchmark | None,
                  scan: ScanResult | None = None, check_drivers: bool = False,
-                 network: dict | None = None):
+                 network: dict | None = None, check_updates: bool = False):
         self.si = si
         self.network = network or {}
         self.bench = bench
         self.scan = scan
         self.check_drivers = check_drivers
+        self.check_updates = check_updates
         self.findings: list[Finding] = []
         self.checks_run = 0
         self.notes: list[str] = []
@@ -184,6 +186,12 @@ class Auditor:
                 ("Protocolo SMB1", self.check_smb1),
                 ("Cuentas locales sin contraseña", self.check_local_accounts),
             ]
+            # Detrás de un flag, igual que --check-drivers y por lo mismo: la
+            # consulta a Windows Update tarda entre 10 y 30 segundos. No se
+            # registra si no se ha pedido, para que no cuente como pendiente
+            # algo que nadie ha querido preguntar.
+            if self.check_updates:
+                checks.append(("Actualizaciones de seguridad", self.check_security_updates))
         elif IS_LINUX:
             checks += [
                 ("Gobernador de CPU", self.check_linux_governor),
@@ -1596,6 +1604,53 @@ class Auditor:
                    "Las cuentas de fábrica deshabilitadas (Invitado, DefaultAccount) no "
                    "cuentan aquí y no hay que tocarlas"])
         return f"{len(abiertas)} sin contraseña"
+
+    # Severidades que Microsoft asigna a sus boletines. Solo las llevan las
+    # actualizaciones de seguridad: una de zona horaria viene sin ella, y
+    # contarla como riesgo sería inflar el hallazgo con lo que no toca.
+    _MSRC_GRAVES = ("critical",)
+    _MSRC_SERIAS = ("important",)
+
+    def check_security_updates(self) -> str:
+        rows = pending_security_updates()
+        if not rows.ok:
+            raise SinDato(f"no se ha podido consultar Windows Update ({rows.error})")
+        seguridad = []
+        for fila in rows:
+            nivel = str(fila.get("MsrcSeverity") or "").strip().lower()
+            if nivel:
+                seguridad.append((nivel, str(fila.get("Title") or "sin título")))
+        if not seguridad:
+            return f"{len(rows)} pendiente(s), ninguna de seguridad"
+
+        criticas = [t for n, t in seguridad if n in self._MSRC_GRAVES]
+        importantes = [t for n, t in seguridad if n in self._MSRC_SERIAS]
+        if criticas:
+            severidad, cuantas = "high", len(criticas)
+            resumen = f"{cuantas} crítica(s)"
+        elif importantes:
+            severidad, cuantas = "medium", len(importantes)
+            resumen = f"{cuantas} importante(s)"
+        else:
+            severidad, cuantas = "low", len(seguridad)
+            resumen = f"{cuantas} de severidad menor"
+        primeras = "; ".join(t[:70] for _, t in seguridad[:3])
+        self.add(
+            id="updates_pendientes",
+            title=f"{len(seguridad)} actualización(es) de seguridad sin instalar ({resumen})",
+            severity=severidad, category=SEGURIDAD, component="system",
+            detail=f"Windows Update tiene pendientes {len(seguridad)} actualizaciones que "
+                   f"Microsoft clasifica como de seguridad, {resumen}. Un parche publicado es "
+                   "también un aviso público de dónde está el fallo, así que el riesgo real de "
+                   "no instalarlo sube con el tiempo, no baja. Las primeras de la lista: "
+                   f"{primeras}.",
+            gain=0.0, gain_note="no es una optimización: son fallos ya conocidos y publicados",
+            effort="bajo", risk="bajo",
+            steps=["Configuración → Windows Update → Buscar actualizaciones",
+                   "Reinicia cuando lo pida: muchas no terminan de aplicarse hasta entonces",
+                   "Si llevan meses sin instalarse, mira que el servicio Windows Update no "
+                   "esté deshabilitado"])
+        return f"{len(seguridad)} de seguridad ({resumen})"
 
     def _check_proteccion_activa(self, rows) -> None:
         """Si queda alguien vigilando, y con las firmas al día.

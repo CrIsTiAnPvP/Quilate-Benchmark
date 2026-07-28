@@ -60,6 +60,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--check-drivers", action="store_true",
                    help="consultar en línea (Windows Update) si hay drivers más nuevos; "
                         "tarda 10-30 s")
+    p.add_argument("--check-updates", action="store_true",
+                   help="consultar en línea (Windows Update) si faltan actualizaciones de "
+                        "seguridad; tarda 10-30 s")
     p.add_argument("--no-files", action="store_true",
                    help="omitir el rastreo de archivos grandes")
     p.add_argument("--scan-path", metavar="RUTA", action="append", default=None,
@@ -260,7 +263,8 @@ def main() -> int:
               f"({', '.join(h for h, _, _ in NET_TARGETS)}). Se cronometra el saludo "
               f"TCP; no se envía ningún dato. Omítelas con --no-net.{C.RESET}")
 
-    auditor = Auditor(si, bench, scan, check_drivers=args.check_drivers, network=red)
+    auditor = Auditor(si, bench, scan, check_drivers=args.check_drivers, network=red,
+                      check_updates=args.check_updates)
     try:
         auditor.run()
     except KeyboardInterrupt:
