@@ -282,9 +282,37 @@ class SinDatosOpcionales(unittest.TestCase):
 class Marca(unittest.TestCase):
     """El isotipo va incrustado: ni .ico al lado, ni petición a ningún servidor."""
 
+    # Atributos entre comillas dobles Y simples, y las `url()` del CSS. Las
+    # comillas simples y el `url(` faltaban: hoy el grano del fondo es un `data:`
+    # incrustado, pero nada impedía que el siguiente no lo fuera y la criba no
+    # se habría enterado.
+    RECURSOS = re.compile(r"""(?:href|src)\s*=\s*"([^"]*)"|"""
+                          r"""(?:href|src)\s*=\s*'([^']*)'|"""
+                          r"""url\(\s*['"]?([^'")]*)""", re.I)
+
+    def _recursos_externos(self, html: str) -> list[str]:
+        """Todo lo que el documento cargaría solo, si no fuera autocontenido."""
+        # Fuera el script: dentro hay cadenas que construyen URLs en tiempo de
+        # ejecución y no son enlaces del documento.
+        marcado = re.sub(r"(?s)<script>.*?</script>", "", html)
+        fuera = []
+        for grupos in self.RECURSOS.findall(marcado):
+            objetivo = next((g for g in grupos if g), "").strip()
+            # Ancla interna, recurso incrustado o la web del autor —un enlace
+            # que el lector pulsa, no algo que el documento cargue solo—.
+            #
+            # `%23` es una almohadilla codificada: dentro de un `data:image/svg+xml`
+            # hay que escaparla, así que el degradado del logo y el filtro del
+            # grano se referencian como `url(%23g)`. Apuntan a algo definido en
+            # el mismo SVG y no salen del documento.
+            if (not objetivo or objetivo.startswith(("#", "%23", "data:"))
+                    or objetivo == WEBSITE_URL):
+                continue
+            fuera.append(objetivo)
+        return fuera
+
     def test_el_informe_no_pide_nada_a_ninguna_parte(self):
-        import re
-        from quilate.export.html_export import Seccion, export_html
+        from quilate.export.html_export import export_html
         with tempfile.TemporaryDirectory() as tmp:
             destino = Path(tmp) / "i.html"
             si = _sistema()
@@ -292,16 +320,49 @@ class Marca(unittest.TestCase):
             html = destino.read_text(encoding="utf-8")
         self.assertIn('rel="icon"', html, "el icono de pestaña no va incrustado")
         self.assertIn("data:image/svg+xml", html)
-        # Fuera el script: dentro hay cadenas que construyen URLs en tiempo de
-        # ejecución y no son enlaces del documento.
-        marcado = re.sub(r"(?s)<script>.*?</script>", "", html)
-        for destino_enlace in re.findall(r'(?:href|src)="([^"]*)"', marcado):
-            # Ancla interna, recurso incrustado o la web del autor —un enlace
-            # que el lector pulsa, no algo que el documento cargue solo—.
-            self.assertTrue(
-                destino_enlace.startswith(("#", "data:")) or destino_enlace == WEBSITE_URL,
-                f"«{destino_enlace}» es un recurso externo: el informe deja de "
-                "abrirse igual sin conexión")
+        self.assertEqual(self._recursos_externos(html), [],
+                         "el informe deja de abrirse igual sin conexión")
+
+    def test_tampoco_con_el_informe_lleno(self):
+        """El informe vacío no ejercita ni la mitad de las secciones.
+
+        `export_html(destino, si, None, Auditor(si, None), {})` no genera red, ni
+        archivos grandes, ni benchmark, ni plan, ni hallazgos: un
+        `<img src="https://…">` metido en cualquiera de esas pasaba la criba sin
+        que nadie se enterara, porque esas secciones ni llegaban a escribirse.
+        """
+        from quilate.export.html_export import export_html
+        si = _sistema()
+        bench = _benchmark()
+        auditor = _auditoria(si, bench)
+        with tempfile.TemporaryDirectory() as tmp:
+            destino = Path(tmp) / "i.html"
+            export_html(destino, si, bench, auditor,
+                        project_improvement(bench, auditor.findings))
+            html = destino.read_text(encoding="utf-8")
+
+        # Que las secciones que faltaban están de verdad en este informe: sin
+        # esto, el test volvería a cribar la mitad del documento sin decirlo.
+        for seccion in ('id="red"', 'id="archivos"', 'id="benchmark"',
+                        'id="plan"', 'id="hallazgos"', 'id="proyeccion"'):
+            self.assertIn(seccion, html, f"falta {seccion}: el informe sigue incompleto")
+
+        self.assertEqual(self._recursos_externos(html), [],
+                         "el informe deja de abrirse igual sin conexión")
+
+    def test_la_criba_encuentra_lo_que_busca(self):
+        # Un test que no falla nunca no protege de nada: aquí se comprueba que
+        # la regex ve las tres formas, incluidas las dos que se le escapaban.
+        muestras = {
+            'comillas dobles': '<img src="https://ejemplo.com/a.png">',
+            'comillas simples': "<img src='https://ejemplo.com/a.png'>",
+            'url() de CSS': 'body{background-image:url("https://ejemplo.com/a.png")}',
+            'url() sin comillas': "body{background:url(https://ejemplo.com/a.png)}",
+        }
+        for etiqueta, muestra in muestras.items():
+            with self.subTest(forma=etiqueta):
+                self.assertEqual(self._recursos_externos(muestra),
+                                 ["https://ejemplo.com/a.png"])
 
     def test_la_mascara_del_anillo_declara_sus_unidades(self):
         # Sin `maskUnits`, la región de la máscara es la caja del círculo
