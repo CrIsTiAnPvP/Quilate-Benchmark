@@ -13,7 +13,7 @@ from typing import Any
 import psutil
 
 from .const import IS_LINUX, IS_WINDOWS
-from .platform_utils import is_admin, ps_json, reg_read, winreg
+from .platform_utils import PSResult, _ps_raw, is_admin, reg_read, winreg
 from .sensors import gpu_telemetry
 
 
@@ -107,9 +107,95 @@ def collect_system_info() -> SystemInfo:
     return si
 
 
+# Las diez consultas del inventario, en un solo PowerShell.
+#
+# Cada `ps_json` levanta un powershell.exe entero, y arrancar PowerShell 5.1
+# cuesta entre 200 y 500 ms ANTES de ejecutar nada. Diez de ellas eran, con
+# diferencia, el mayor coste fijo de la herramienta. Son todas consultas
+# independientes que se lanzaban una detrás de otra, así que caben en un proceso.
+#
+# Lo que NO se puede perder al fusionarlas: `PSResult.ok` distingue hoy «esta
+# consulta falló» de «se ejecutó y no devolvió nada», y esa distinción es lo que
+# hace honesto al informe. Por eso cada bloque va en su propio try/catch y
+# devuelve su propio `ok`/`error`: un `Get-PhysicalDisk` denegado no puede
+# llevarse por delante la lectura de la BIOS.
+#
+# `sensors.py` no se toca: allí la cascada tiene estado (`_source_resolved`) y
+# cada consulta depende de que falle la anterior.
+_CONSULTAS_INVENTARIO = {
+    "os": "Get-CimInstance Win32_OperatingSystem | "
+          "Select-Object Caption,BuildNumber,Version,InstallDate,OSArchitecture",
+    "cpu": "Get-CimInstance Win32_Processor | "
+           "Select-Object Name,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors",
+    "mem": "Get-CimInstance Win32_PhysicalMemory | Select-Object BankLabel,DeviceLocator,"
+           "Capacity,Speed,ConfiguredClockSpeed,Manufacturer,PartNumber",
+    "gpus": "Get-CimInstance Win32_VideoController | "
+            "Select-Object Name,DriverVersion,DriverDate,AdapterRAM,"
+            "CurrentHorizontalResolution,CurrentVerticalResolution,CurrentRefreshRate",
+    "bios": "Get-CimInstance Win32_BIOS | "
+            "Select-Object ReleaseDate,SMBIOSBIOSVersion,Manufacturer",
+    "chassis": "Get-CimInstance Win32_SystemEnclosure | Select-Object ChassisTypes",
+    "logical": "Get-CimInstance Win32_LogicalDisk | "
+               "Select-Object DeviceID,DriveType,ProviderName,VolumeName,FileSystem",
+    "partitions": "Get-Partition | Where-Object DriveLetter | "
+                  "Select-Object DriveLetter,DiskNumber",
+    "physical": "Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,"
+                "BusType,Size,HealthStatus,SpindleSpeed",
+    # La única que necesita administrador. Va aquí igual: si falla, lo dice en
+    # su propio `error` y las otras nueve siguen valiendo.
+    "reliability": "Get-PhysicalDisk | ForEach-Object { $d = $_; "
+                   "$c = $d | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue; "
+                   "if ($c) { [PSCustomObject]@{ DeviceId = $d.DeviceId; Wear = $c.Wear; "
+                   "Temperature = $c.Temperature; PowerOnHours = $c.PowerOnHours; "
+                   "ReadErrorsUncorrected = $c.ReadErrorsUncorrected; "
+                   "WriteErrorsUncorrected = $c.WriteErrorsUncorrected } } }",
+}
+
+
+def _inventario_windows(timeout: int = 70) -> dict[str, PSResult]:
+    """Las diez consultas del inventario en un único proceso de PowerShell.
+
+    Devuelve un `PSResult` por clave, con el mismo significado que si cada una
+    se hubiera lanzado por separado. Si el proceso entero falla —PowerShell
+    ausente, política que lo bloquea, timeout— todas las claves salen con el
+    mismo motivo, que es exactamente lo que habría pasado una por una.
+    """
+    bloques = "".join(
+        f"$r['{clave}'] = Leer {{ {consulta} }};"
+        for clave, consulta in _CONSULTAS_INVENTARIO.items())
+    datos, error = _ps_raw(
+        "function Leer([scriptblock]$q) {"
+        "  try { @{ ok = $true; filas = @(& $q) } }"
+        "  catch { @{ ok = $false; error = $_.Exception.Message } } };"
+        "$r = [ordered]@{};"
+        + bloques +
+        "$r | ConvertTo-Json -Depth 8 -Compress",
+        timeout=timeout)
+    if not isinstance(datos, dict):
+        motivo = error or "el inventario no ha devuelto nada legible"
+        return {clave: PSResult((), ok=False, error=motivo)
+                for clave in _CONSULTAS_INVENTARIO}
+    return {clave: _bloque(datos.get(clave)) for clave in _CONSULTAS_INVENTARIO}
+
+
+def _bloque(crudo) -> PSResult:
+    """Un bloque del inventario, con la misma forma que devolvía `ps_json`."""
+    if not isinstance(crudo, dict):
+        return PSResult((), ok=False, error="el bloque no ha llegado en el JSON")
+    if not crudo.get("ok"):
+        return PSResult((), ok=False,
+                        error=str(crudo.get("error") or "error sin descripción")[:120])
+    filas = crudo.get("filas")
+    if isinstance(filas, dict):        # PowerShell 5.1 deshace las listas de uno
+        return PSResult([filas])
+    if isinstance(filas, list):
+        return PSResult(f for f in filas if isinstance(f, dict))
+    return PSResult()
+
+
 def _collect_windows_info(si: SystemInfo) -> None:
-    osinfo = ps_json("Get-CimInstance Win32_OperatingSystem | "
-                     "Select-Object Caption,BuildNumber,Version,InstallDate,OSArchitecture")
+    inventario = _inventario_windows()
+    osinfo = inventario["os"]
     if osinfo:
         d = osinfo[0]
         si.os_name = d.get("Caption") or si.os_name
@@ -120,14 +206,12 @@ def _collect_windows_info(si: SystemInfo) -> None:
             si.os_install_date = parsed.strftime("%Y-%m-%d")
             si.os_age_days = (datetime.now() - parsed).days
 
-    cpu = ps_json("Get-CimInstance Win32_Processor | "
-                  "Select-Object Name,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors")
+    cpu = inventario["cpu"]
     if cpu:
         si.cpu_name = (cpu[0].get("Name") or si.cpu_name).strip()
         si.cpu_max_mhz = float(cpu[0].get("MaxClockSpeed") or si.cpu_max_mhz)
 
-    mem = ps_json("Get-CimInstance Win32_PhysicalMemory | Select-Object BankLabel,DeviceLocator,"
-                  "Capacity,Speed,ConfiguredClockSpeed,Manufacturer,PartNumber")
+    mem = inventario["mem"]
     if mem:
         # En SMBIOS, Speed es la velocidad máxima que soporta el módulo y
         # ConfiguredClockSpeed la que está corriendo de verdad. Sin XMP/EXPO
@@ -147,9 +231,7 @@ def _collect_windows_info(si: SystemInfo) -> None:
         si.ram_speed_rated_mhz = max(rated) if rated else None
         si.ram_channels = len([s for s in si.ram_sticks if s["capacity"] > 0])
 
-    gpus = ps_json("Get-CimInstance Win32_VideoController | "
-                   "Select-Object Name,DriverVersion,DriverDate,AdapterRAM,CurrentHorizontalResolution,"
-                   "CurrentVerticalResolution,CurrentRefreshRate")
+    gpus = inventario["gpus"]
     vram_by_name = _vram_from_registry()
     telemetry = {str(t["name"]).lower(): t for t in gpu_telemetry()}
     for g in gpus:
@@ -193,14 +275,14 @@ def _collect_windows_info(si: SystemInfo) -> None:
                            f" @ {g.get('CurrentRefreshRate') or '?'}Hz") if width else None,
         })
 
-    _map_storage(si)
+    _map_storage(si, inventario)
 
-    bios = ps_json("Get-CimInstance Win32_BIOS | Select-Object ReleaseDate,SMBIOSBIOSVersion,Manufacturer")
+    bios = inventario["bios"]
     if bios:
         bd = _parse_cim_date(bios[0].get("ReleaseDate"))
         si.bios_date = bd.strftime("%Y-%m-%d") if bd else None
 
-    chassis = ps_json("Get-CimInstance Win32_SystemEnclosure | Select-Object ChassisTypes")
+    chassis = inventario["chassis"]
     if chassis:
         types = chassis[0].get("ChassisTypes") or []
         if isinstance(types, int):
@@ -245,7 +327,7 @@ def primary_gpu(gpus: list[dict]) -> dict | None:
                                     g.get("vram") or 0))
 
 
-def _storage_reliability() -> dict[int, dict]:
+def _storage_reliability(rows) -> dict[int, dict]:
     """Desgaste, horas de uso y errores acumulados de cada disco físico.
 
     Sale de Get-StorageReliabilityCounter, que es nativo de Windows y expone los
@@ -256,15 +338,6 @@ def _storage_reliability() -> dict[int, dict]:
     Un campo a None significa que ese disco no publica el atributo. Es habitual
     en discos USB y en algunos SATA antiguos.
     """
-    rows = ps_json(
-        "Get-PhysicalDisk | ForEach-Object { $d = $_; "
-        "$c = $d | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue; "
-        "if ($c) { [PSCustomObject]@{ DeviceId = $d.DeviceId; Wear = $c.Wear; "
-        "Temperature = $c.Temperature; PowerOnHours = $c.PowerOnHours; "
-        "ReadErrorsUncorrected = $c.ReadErrorsUncorrected; "
-        "WriteErrorsUncorrected = $c.WriteErrorsUncorrected } } }",
-        timeout=40)
-
     def num(value):
         try:
             return int(value)
@@ -326,7 +399,7 @@ KIND_LABELS = {"local": "local", "cloud": "nube (sincronizado)", "network": "uni
                "removable": "extraíble", "cdrom": "óptica", "virtual": "virtual"}
 
 
-def _map_storage(si: SystemInfo) -> None:
+def _map_storage(si: SystemInfo, inventario: dict) -> None:
     """Clasifica cada volumen y lo une con su disco físico.
 
     Hace falta porque psutil ve «un disco fijo de 930 GB con FAT32» donde en
@@ -335,23 +408,20 @@ def _map_storage(si: SystemInfo) -> None:
     tamaño es ficticio y no se puede liberar borrando archivos locales.
     """
     logical = {}
-    for row in ps_json("Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,"
-                       "DriveType,ProviderName,VolumeName,FileSystem"):
+    for row in inventario["logical"]:
         letter = str(row.get("DeviceID") or "")[:1].upper()
         if letter:
             logical[letter] = row
 
     letter_to_disk: dict[str, int] = {}
-    for row in ps_json("Get-Partition | Where-Object DriveLetter | "
-                       "Select-Object DriveLetter,DiskNumber"):
+    for row in inventario["partitions"]:
         letter = str(row.get("DriveLetter") or "")[:1].upper()
         number = row.get("DiskNumber")
         if letter and number is not None:
             letter_to_disk[letter] = int(number)
 
-    reliability = _storage_reliability()
-    for p in ps_json("Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,"
-                     "BusType,Size,HealthStatus,SpindleSpeed"):
+    reliability = _storage_reliability(inventario["reliability"])
+    for p in inventario["physical"]:
         media = p.get("MediaType")
         if isinstance(media, int):
             media = {3: "HDD", 4: "SSD", 5: "SCM"}.get(media, "Desconocido")
