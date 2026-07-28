@@ -205,6 +205,58 @@ def run_cmd_bytes(args: list[str], timeout: int = 25) -> CmdBytes:
     return CmdBytes(res.stdout)
 
 
+def _bloque(crudo) -> PSResult:
+    """Un bloque de un lote de consultas, con la forma que devolvía `ps_json`."""
+    if not isinstance(crudo, dict):
+        return PSResult((), ok=False, error="el bloque no ha llegado en el JSON")
+    if not crudo.get("ok"):
+        return PSResult((), ok=False,
+                        error=str(crudo.get("error") or "error sin descripción")[:120])
+    filas = crudo.get("filas")
+    if isinstance(filas, dict):        # PowerShell 5.1 deshace las listas de uno
+        return PSResult([filas])
+    if isinstance(filas, list):
+        return PSResult(f for f in filas if isinstance(f, dict))
+    return PSResult()
+
+
+def guion_de_bloques(consultas: dict[str, str]) -> str:
+    """El guion que deja cada consulta en `$r` dentro de su propio try/catch.
+
+    Es lo que permite meter varias consultas en un solo PowerShell sin perder la
+    distinción entre «esta falló» y «se ejecutó y no devolvió nada»: sin el
+    try/catch por bloque, un `Get-PhysicalDisk` denegado se llevaría por delante
+    la lectura de la BIOS y el informe daría por no comprobado lo que sí estaba.
+
+    Devuelve solo el preámbulo. Quien llame decide qué hacer con `$r`, que no es
+    lo mismo desde un proceso propio —donde se escribe por la salida estándar—
+    que desde uno elevado, que no tiene salida estándar que compartir.
+    """
+    bloques = "".join(f"$r['{clave}'] = Leer {{ {consulta} }};"
+                      for clave, consulta in consultas.items())
+    # Sin esto, la mitad de los fallos de PowerShell no son excepciones: una
+    # clase WMI que no existe escribe el error y devuelve vacío, el try/catch no
+    # se entera y el bloque sale con `ok=True` y cero filas. Es decir, «se
+    # ejecutó y no había nada», que es justo lo contrario de lo que ha pasado.
+    return ("$ErrorActionPreference = 'Stop';"
+            "function Leer([scriptblock]$q) {"
+            "  try { @{ ok = $true; filas = @(& $q) } }"
+            "  catch { @{ ok = $false; error = $_.Exception.Message } } };"
+            "$r = [ordered]@{};" + bloques)
+
+
+def trocear(datos, consultas, motivo: str) -> dict[str, PSResult]:
+    """Un `PSResult` por consulta, con el mismo valor que si fueran por separado.
+
+    Si el lote entero se fue al traste —PowerShell ausente, permisos denegados,
+    timeout— todas las claves salen con el mismo motivo, que es exactamente lo
+    que habría pasado lanzándolas una a una.
+    """
+    if not isinstance(datos, dict):
+        return {clave: PSResult((), ok=False, error=motivo) for clave in consultas}
+    return {clave: _bloque(datos.get(clave)) for clave in consultas}
+
+
 def ps(command: str, timeout: int = 30) -> Any:
     """Ejecuta PowerShell devolviendo JSON parseado (o None)."""
     return _ps_raw(command, timeout)[0]

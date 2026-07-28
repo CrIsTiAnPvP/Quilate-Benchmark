@@ -13,7 +13,8 @@ from typing import Any
 import psutil
 
 from .const import IS_LINUX, IS_WINDOWS
-from .platform_utils import PSResult, _ps_raw, is_admin, reg_read, winreg
+from .platform_utils import (PSResult, _bloque, _ps_raw, guion_de_bloques, is_admin,
+                             reg_read, trocear, winreg)
 from .sensors import gpu_telemetry
 
 
@@ -166,37 +167,12 @@ def _inventario_windows(timeout: int = 70) -> dict[str, PSResult]:
     ausente, política que lo bloquea, timeout— todas las claves salen con el
     mismo motivo, que es exactamente lo que habría pasado una por una.
     """
-    bloques = "".join(
-        f"$r['{clave}'] = Leer {{ {consulta} }};"
-        for clave, consulta in _CONSULTAS_INVENTARIO.items())
     datos, error = _ps_raw(
-        "function Leer([scriptblock]$q) {"
-        "  try { @{ ok = $true; filas = @(& $q) } }"
-        "  catch { @{ ok = $false; error = $_.Exception.Message } } };"
-        "$r = [ordered]@{};"
-        + bloques +
-        "$r | ConvertTo-Json -Depth 8 -Compress",
+        guion_de_bloques(_CONSULTAS_INVENTARIO)
+        + "$r | ConvertTo-Json -Depth 8 -Compress",
         timeout=timeout)
-    if not isinstance(datos, dict):
-        motivo = error or "el inventario no ha devuelto nada legible"
-        return {clave: PSResult((), ok=False, error=motivo)
-                for clave in _CONSULTAS_INVENTARIO}
-    return {clave: _bloque(datos.get(clave)) for clave in _CONSULTAS_INVENTARIO}
-
-
-def _bloque(crudo) -> PSResult:
-    """Un bloque del inventario, con la misma forma que devolvía `ps_json`."""
-    if not isinstance(crudo, dict):
-        return PSResult((), ok=False, error="el bloque no ha llegado en el JSON")
-    if not crudo.get("ok"):
-        return PSResult((), ok=False,
-                        error=str(crudo.get("error") or "error sin descripción")[:120])
-    filas = crudo.get("filas")
-    if isinstance(filas, dict):        # PowerShell 5.1 deshace las listas de uno
-        return PSResult([filas])
-    if isinstance(filas, list):
-        return PSResult(f for f in filas if isinstance(f, dict))
-    return PSResult()
+    return trocear(datos, _CONSULTAS_INVENTARIO,
+                   error or "el inventario no ha devuelto nada legible")
 
 
 def _collect_windows_info(si: SystemInfo) -> None:
