@@ -15,7 +15,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from ..audit import Auditor, SEVERITY_ORDER
+from ..audit import Auditor, SEVERITY_ORDER, security_findings
 from ..benchmark import (BUSY_CPU_PCT, Benchmark, REFERENCE, REFERENCE_DATE,
                          REFERENCE_MACHINE, REFERENCE_ORIGIN, reference_age_months,
                          reference_is_stale)
@@ -112,11 +112,11 @@ NAV_LABELS = {"componentes": "Componentes", "proyeccion": "Proyección",
 #   marca        la conclusión, en el color de la casa
 # Sin esta distinción, doce secciones idénticas compiten todas por igual.
 TONOS = {"plan": "accion", "hallazgos": "accion", "veredicto": "marca",
-         "inventario": "referencia"}
+         "seguridad": "accion", "inventario": "referencia"}
 
 # Grupos para los presets de exportación de la bandeja.
 GRUPOS = {"plan": "accion", "hallazgos": "accion", "veredicto": "accion",
-          "proyeccion": "accion tecnico"}
+          "seguridad": "accion", "proyeccion": "accion tecnico"}
 
 # Términos que el informe usa y que no todo el mundo tiene por qué saber. Se
 # explican donde aparecen por primera vez, no en un anexo que nadie abre.
@@ -2115,6 +2115,27 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         secs.append(Seccion("proyeccion", "Proyección de mejora", "i-trend",
                             _projection_tables(projection),
                             f"+{projection.get('headroom_pct', 0.0):.0f}% sintético"))
+
+    # Antes del plan y fuera de él: el plan ordena por retorno dividido por
+    # esfuerzo, y estos hallazgos no tienen retorno que ordenar.
+    riesgos = security_findings(auditor.findings)
+    if riesgos:
+        tarjetas = ""
+        for f in riesgos:
+            pasos = "".join(f"<li>{_e(p)}</li>" for p in f.steps)
+            tarjetas += (f'<div class="card finding" id="s-{_e(f.id)}">'
+                         f"<h3>{_e(f.title)}</h3>"
+                         f'<div class="tags">'
+                         f'<span class="badge b-{_e(f.severity)}">{_e(f.severity)}</span>'
+                         f" &nbsp; esfuerzo {_e(f.effort)} · riesgo {_e(f.risk)}</div>"
+                         f"<p>{_e(f.detail)}</p>"
+                         + (f"<ul>{pasos}</ul>" if pasos else "") + "</div>")
+        secs.append(Seccion("seguridad", "Seguridad", "i-alert",
+                            '<p class="hint">Esto no acelera el equipo: son riesgos. No '
+                            "entran en la proyección de mejora porque no hay mejora que "
+                            "proyectar.</p>" + tarjetas,
+                            f"{len(riesgos)} riesgos",
+                            _worst(riesgos), len(riesgos)))
 
     if actionable:
         trs = ""

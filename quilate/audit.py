@@ -47,6 +47,27 @@ SEVERITY_COLOR = {"critical": "RED", "high": "RED", "medium": "YELLOW",
                   "low": "CYAN", "info": "GREY"}
 
 
+# La categoría que no promete velocidad. Va aparte en las tres salidas.
+SEGURIDAD = "seguridad"
+
+
+def security_findings(findings: list[Finding]) -> list[Finding]:
+    """Los hallazgos de seguridad, del más grave al menos.
+
+    Van en un bloque propio y no en el plan de acción a propósito. El plan
+    ordena por retorno estimado dividido por esfuerzo y lo dice por escrito en
+    su encabezado; estos hallazgos no dan retorno —cifrar el disco no acelera
+    nada— así que meterlos ahí obligaría o a mentir sobre el criterio de orden,
+    o a enseñar un «+0%» en una columna de ganancia, que se lee como un error.
+
+    Son dos cosas que se miden con reglas distintas: una da rendimiento, la otra
+    evita un disgusto. Separarlas es lo único que permite ordenar cada una por
+    lo que de verdad importa en ella, que aquí es la severidad y nada más.
+    """
+    return sorted([f for f in findings if f.category == SEGURIDAD],
+                  key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.title))
+
+
 def sev_label(severity: str) -> str:
     """Se resuelve en tiempo de ejecución: si los colores están desactivados
     (--no-color o salida redirigida) no se cuelan códigos ANSI en el informe."""

@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from .audit import Auditor, SEVERITY_ORDER, sev_label
+from .audit import Auditor, SEVERITY_ORDER, security_findings, sev_label
 from .benchmark import (Benchmark, PY_ADJUST, REFERENCE_DATE, REFERENCE_MACHINE,
                         reference_age_months, reference_is_stale)
 from .components import ComponentCard, _no_score_text, build_component_cards
@@ -287,6 +287,23 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         for cat, gain in sorted(projection["category_gain"].items(), key=lambda x: -x[1]):
             print(f"    {cat.capitalize().ljust(18)} {C.GREEN}+{gain * 100:>5.0f}%{C.RESET} "
                   f"{bar(min(100, gain * 100), 20)}")
+
+    # --- Seguridad ---
+    # Antes del plan y no dentro: el plan promete retorno y estos hallazgos no
+    # lo dan. Van primero porque un disco sin cifrar importa más que ocho puntos
+    # de fluidez, aunque no haya forma de ponerle un porcentaje.
+    riesgos = security_findings(auditor.findings)
+    if riesgos:
+        section("Seguridad")
+        print(f"  {C.DIM}Esto no acelera el equipo: son riesgos. No entran en la "
+              f"proyección\n  de mejora porque no hay mejora que proyectar.{C.RESET}\n")
+        for f in riesgos:
+            print(f"  {sev_label(f.severity)}  {C.BOLD}{f.title}{C.RESET}")
+            for linea in _wrap(f.detail, BOX_W - 8):
+                print(f"      {C.DIM}{linea}{C.RESET}")
+            for paso in f.steps:
+                print(f"      {C.GREY}·{C.RESET} {paso}")
+            print()
 
     # --- Plan de acción ---
     section("Plan de acción priorizado")

@@ -10,7 +10,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from ..audit import Auditor
+from ..audit import Auditor, security_findings
 from ..benchmark import BUSY_CPU_PCT, Benchmark
 from ..components import ComponentCard, build_component_cards
 from ..console import human_bytes
@@ -416,10 +416,33 @@ def _plan_large_files(scan: ScanResult | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _plan_security(auditor: Auditor) -> str:
+    """Los riesgos, como comentario y por delante de todo lo automatizado.
+
+    Aqui no se automatiza nada a proposito: activar BitLocker sin haber guardado
+    antes la clave de recuperacion, o tocar la configuracion del antivirus desde
+    un script, son decisiones que tiene que tomar una persona sabiendo lo que
+    hace. Se enumeran y se dice como, que es lo util.
+    """
+    riesgos = security_findings(auditor.findings)
+    if not riesgos:
+        return ""
+    lines = ["\n# ==============================================================================",
+             "#  SEGURIDAD - REVISALO ANTES DE OPTIMIZAR NADA",
+             "#  Esto no acelera el equipo. Son riesgos, y aqui no se toca ninguno solo.",
+             "# =============================================================================="]
+    for f in riesgos:
+        lines.append(f"#  [{_comentario(f.severity).upper()}] {_comentario(f.title)}")
+        for paso in f.steps:
+            lines.append(f"#      - {_comentario(paso)}")
+    return "\n".join(lines) + "\n"
+
+
 def export_plan(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Auditor) -> int:
     blocks: list[str] = [_plan_system_summary(si, bench),
                          _plan_component_summary(build_component_cards(si, bench, auditor)),
-                         _plan_large_files(getattr(auditor, "scan", None))]
+                         _plan_large_files(getattr(auditor, "scan", None)),
+                         _plan_security(auditor)]
     n = 0
     for f in sorted([x for x in auditor.findings if x.gain > 0], key=priority_rank):
         action = PLAN_ACTIONS.get(f.id)
