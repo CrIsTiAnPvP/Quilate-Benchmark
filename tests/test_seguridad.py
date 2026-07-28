@@ -23,8 +23,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from quilate import audit
-from quilate.audit import (SEGURIDAD, Auditor, Finding, SinDato, _estado_antivirus,
-                           security_findings)
+from quilate.audit import (SEGURIDAD, Auditor, Finding, NoAplica, SinDato,
+                           _estado_antivirus, security_findings)
 from quilate.platform_utils import PSResult
 from quilate.export.html_export import export_html
 from quilate.export.plan_export import export_plan
@@ -325,6 +325,79 @@ class ProteccionEnTiempoReal(unittest.TestCase):
         with patched(audit, wmi=PSResult((), ok=False, error="acceso denegado")):
             with self.assertRaises(SinDato):
                 a.check_antivirus()
+
+
+class CifradoDelDisco(unittest.TestCase):
+    """BitLocker, y sobre todo cuándo NO hay que opinar.
+
+    En Windows Home el cmdlet no existe: eso es `NoAplica`, una pregunta que no
+    procede hacer, no un dato que falte. Sin privilegios sí existe pero rechaza
+    contestar, y eso sí es `SinDato`. Confundirlos haría que la mitad de los
+    equipos aparecieran como pendientes de revisar algo que no tienen.
+    """
+
+    def _auditar(self, filas, drive="C:"):
+        si = SystemInfo()
+        si.system_drive = drive
+        a = Auditor(si, None)
+        with patched(audit, wmi=filas):
+            return a, a.check_disk_encryption()
+
+    def volumen(self, mount="C:", proteccion=1, estado=1) -> dict:
+        return {"disponible": True, "MountPoint": mount,
+                "VolumeStatus": estado, "ProtectionStatus": proteccion}
+
+    def test_disco_cifrado(self):
+        a, resumen = self._auditar(PSResult([self.volumen()]))
+        self.assertEqual(a.findings, [])
+        self.assertIn("cifrado", resumen)
+
+    def test_disco_sin_cifrar(self):
+        a, resumen = self._auditar(PSResult([self.volumen(proteccion=0, estado=0)]))
+        self.assertEqual([f.id for f in a.findings], ["sin_cifrado"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("high", SEGURIDAD, 0.0))
+
+    def test_avisa_de_guardar_la_clave_antes_de_nada(self):
+        # Activar BitLocker sin guardar la clave de recuperación es la forma
+        # más rápida de perder todos los datos por intentar protegerlos.
+        a, _ = self._auditar(PSResult([self.volumen(proteccion=0)]))
+        pasos = " ".join(a.findings[0].steps).upper()
+        self.assertIn("CLAVE DE RECUPERACIÓN", pasos)
+
+    def test_en_windows_home_no_aplica(self):
+        # El cmdlet no existe. No es un dato que falte: es una pregunta que no
+        # procede, y no puede contar como comprobación pendiente.
+        with self.assertRaises(NoAplica):
+            self._auditar(PSResult([{"disponible": False}]))
+
+    def test_sin_privilegios_es_sin_dato(self):
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult((), ok=False, error="Acceso denegado"))
+
+    def test_solo_mira_el_volumen_de_sistema(self):
+        # Un disco de datos sin cifrar no es lo mismo que el del sistema.
+        a, _ = self._auditar(PSResult([self.volumen("C:", proteccion=1),
+                                       self.volumen("D:", proteccion=0)]))
+        self.assertEqual(a.findings, [])
+
+    def test_si_no_esta_el_de_sistema_no_se_opina(self):
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult([self.volumen("D:", proteccion=0)]))
+
+    def test_acepta_los_estados_por_nombre(self):
+        # Según la versión de PowerShell, ConvertTo-Json serializa la
+        # enumeración como entero o como texto.
+        a, _ = self._auditar(PSResult([self.volumen(proteccion="On", estado="FullyEncrypted")]))
+        self.assertEqual(a.findings, [])
+        b, _ = self._auditar(PSResult([self.volumen(proteccion="Off", estado="FullyDecrypted")]))
+        self.assertEqual([f.id for f in b.findings], ["sin_cifrado"])
+
+    def test_un_estado_desconocido_no_acusa_a_nadie(self):
+        # Decirle a alguien que su disco está desprotegido cuando sí lo está es
+        # como se consigue que deje de leer el informe.
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult([self.volumen(proteccion="Vete a saber", estado=None)]))
 
 
 class Decodificador(unittest.TestCase):

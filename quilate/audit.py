@@ -178,6 +178,7 @@ class Auditor:
                 ("Fragmentación / optimización", self.check_defrag),
                 ("Salud SMART de los discos", self.check_smart),
                 ("Antigüedad de la BIOS", self.check_bios_age),
+                ("Cifrado del disco (BitLocker)", self.check_disk_encryption),
             ]
         elif IS_LINUX:
             checks += [
@@ -1345,6 +1346,78 @@ class Auditor:
                    "Actualiza con el equipo enchufado a la corriente y sin apagarlo a medias",
                    "Si no hay ninguna posterior, no hay nada que hacer: no fuerces una igual"])
         return f"{self.si.bios_date} ({años:.0f} años)"
+
+    # `Get-BitLockerVolume` devuelve enumeraciones que `ConvertTo-Json` convierte
+    # en enteros, aunque alguna versión de PowerShell las serializa por nombre.
+    # Se aceptan las dos formas, y lo que no encaje en ninguna se trata como
+    # desconocido y no como «sin cifrar»: decirle a alguien que su disco está
+    # desprotegido cuando sí lo está es la clase de aviso que hace que se deje
+    # de leer el informe entero.
+    _CIFRADO_SI = {1, "1", "on", "fullyencrypted"}
+    _CIFRADO_NO = {0, "0", "off", "fullydecrypted"}
+
+    @staticmethod
+    def _estado_cifrado(valor) -> bool | None:
+        if isinstance(valor, bool):
+            return None
+        clave = valor.strip().lower() if isinstance(valor, str) else valor
+        if clave in Auditor._CIFRADO_SI:
+            return True
+        if clave in Auditor._CIFRADO_NO:
+            return False
+        return None
+
+    def check_disk_encryption(self) -> str:
+        # La disponibilidad se resuelve con `Get-Command` y no leyendo el texto
+        # del error: en Windows Home el cmdlet no existe y el mensaje viene
+        # traducido, así que buscarlo por su texto es exactamente el fallo que
+        # `check_filesystem_health` documenta y evita.
+        rows = ps_json(
+            "$( if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) {"
+            "     [PSCustomObject]@{ disponible = $false } } else {"
+            "     Get-BitLockerVolume | Select-Object @{n='disponible';e={$true}},"
+            "       MountPoint,VolumeStatus,ProtectionStatus } )")
+        if not rows.ok:
+            # Sin privilegios el cmdlet existe pero rechaza contestar. No es «no
+            # aplica»: es que no se ha podido mirar.
+            raise SinDato(f"no se ha podido consultar BitLocker ({rows.error})")
+        if not rows:
+            raise SinDato("BitLocker no ha devuelto ningún volumen")
+        if not rows[0].get("disponible"):
+            raise NoAplica("esta edición de Windows no incluye BitLocker "
+                           "(las ediciones Home no lo traen)")
+
+        unidad = (self.si.system_drive or "C:").rstrip("\\")
+        sistema = next((r for r in rows
+                        if str(r.get("MountPoint") or "").rstrip("\\").upper() == unidad.upper()),
+                       None)
+        if sistema is None:
+            raise SinDato(f"BitLocker no informa del volumen de sistema ({unidad})")
+        protegido = self._estado_cifrado(sistema.get("ProtectionStatus"))
+        if protegido is None:
+            protegido = self._estado_cifrado(sistema.get("VolumeStatus"))
+        if protegido is None:
+            raise SinDato(f"estado de BitLocker no reconocido en {unidad}: "
+                          f"«{sistema.get('ProtectionStatus')}»")
+        if protegido:
+            return f"{unidad} cifrado"
+
+        self.add(
+            id="sin_cifrado", title=f"El disco del sistema ({unidad}) no está cifrado",
+            severity="high", category=SEGURIDAD, component="disk",
+            detail="Sin cifrado, cualquiera que se lleve el equipo —o solo el disco— lee todos "
+                   "los archivos sin necesidad de tu contraseña: basta con arrancar desde un USB "
+                   "o poner la unidad en otro ordenador. La contraseña de Windows no protege los "
+                   "datos, solo la sesión. Importa sobre todo en portátiles, que es donde se "
+                   "pierden y se roban.",
+            gain=0.0, gain_note="no es una optimización: es confidencialidad de tus archivos",
+            effort="medio", risk="medio",
+            steps=["Panel de control → Cifrado de unidad BitLocker → Activar BitLocker",
+                   "GUARDA LA CLAVE DE RECUPERACIÓN antes de seguir, fuera de este equipo: "
+                   "sin ella, un fallo de la placa o del TPM deja los datos irrecuperables",
+                   "El cifrado inicial tarda y conviene hacerlo con el portátil enchufado",
+                   "Si tu edición de Windows no lo incluye, VeraCrypt hace lo mismo"])
+        return f"{unidad} SIN cifrar"
 
     def _check_proteccion_activa(self, rows) -> None:
         """Si queda alguien vigilando, y con las firmas al día.
