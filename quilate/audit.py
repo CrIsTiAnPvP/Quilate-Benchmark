@@ -6,6 +6,7 @@ import os
 import re
 import statistics
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 import psutil
@@ -148,6 +149,7 @@ class Auditor:
                 ("Antivirus y solapamientos", self.check_antivirus),
                 ("Fragmentación / optimización", self.check_defrag),
                 ("Salud SMART de los discos", self.check_smart),
+                ("Antigüedad de la BIOS", self.check_bios_age),
             ]
         elif IS_LINUX:
             checks += [
@@ -1271,6 +1273,49 @@ class Auditor:
                        "Windows Defender es suficiente para la mayoría de usuarios"])
             return f"{len(names)} productos ({', '.join(names)})"
         return ", ".join(names)
+
+    # -------------------------------------------------------- seguridad ------
+    # Estos hallazgos no aceleran el equipo, así que van todos con `gain=0.0` y
+    # una nota que lo dice. Emitirlos con ganancia los metería en la proyección
+    # y el informe acabaría prometiendo «+8% de fluidez por cifrar el disco»,
+    # que es falso. El patrón ya estaba en `smart_warn`.
+
+    # Cada cuánto se decide que una BIOS se ha quedado atrás. No se cruza con
+    # CVE concretas a propósito: eso exigiría una base de datos externa y
+    # rompería el «no envía nada a ninguna parte». Lo que sí es cierto sin
+    # consultar nada es que Intel y AMD han publicado microcódigo después.
+    BIOS_VIEJA_AÑOS = 3
+    BIOS_MUY_VIEJA_AÑOS = 5
+
+    def check_bios_age(self) -> str:
+        if not self.si.bios_date:
+            raise SinDato("el sistema no informa de la fecha de su BIOS")
+        try:
+            fecha = datetime.strptime(self.si.bios_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise SinDato(f"fecha de BIOS no reconocida: «{self.si.bios_date}»") from None
+        dias = (date.today() - fecha).days
+        años = dias / 365.25
+        if años < self.BIOS_VIEJA_AÑOS:
+            return f"{self.si.bios_date} ({años:.0f} años)"
+        severidad = "medium" if años >= self.BIOS_MUY_VIEJA_AÑOS else "low"
+        self.add(
+            id="bios_vieja", title=f"BIOS de {fecha.year}, con {años:.0f} años de antigüedad",
+            severity=severidad, category=SEGURIDAD, component="system",
+            detail=f"La BIOS de este equipo es del {self.si.bios_date}. Desde entonces Intel y "
+                   "AMD han publicado varias revisiones de microcódigo, que es la vía por la "
+                   "que se corrigen los fallos del propio procesador —los de la familia de "
+                   "Spectre entre ellos— y que solo llegan al equipo dentro de una "
+                   "actualización de BIOS. No se ha comprobado si a este modelo le falta "
+                   "alguna en concreto: eso exigiría consultar una base de datos externa, y "
+                   "este programa no envía nada a ninguna parte.",
+            gain=0.0, gain_note="no es una optimización: son correcciones del procesador",
+            effort="medio", risk="medio",
+            steps=["Mira el modelo exacto de tu placa o portátil en la web del fabricante",
+                   "Compara la versión publicada con la que tienes en el inventario de arriba",
+                   "Actualiza con el equipo enchufado a la corriente y sin apagarlo a medias",
+                   "Si no hay ninguna posterior, no hay nada que hacer: no fuerces una igual"])
+        return f"{self.si.bios_date} ({años:.0f} años)"
 
     def check_defrag(self) -> str:
         if "HDD" not in self.si.system_drive_media:

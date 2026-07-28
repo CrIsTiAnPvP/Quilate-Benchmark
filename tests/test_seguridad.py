@@ -19,9 +19,10 @@ import io
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import date, timedelta
 from pathlib import Path
 
-from quilate.audit import SEGURIDAD, Auditor, Finding, security_findings
+from quilate.audit import SEGURIDAD, Auditor, Finding, SinDato, security_findings
 from quilate.export.html_export import export_html
 from quilate.export.plan_export import export_plan
 from quilate.projection import project_improvement, priority_rank
@@ -176,6 +177,64 @@ class EnElPlanPowerShell(unittest.TestCase):
     def test_van_antes_del_primer_bloque_automatizado(self):
         texto = self._ps1(auditor_con(riesgo("sin_cifrado"), mejora("sysmain")))
         self.assertLess(texto.index(self.MARCA), texto.index("--- BLOQUE 1"))
+
+
+class BiosAntigua(unittest.TestCase):
+    """El dato ya se recogía y nadie lo auditaba: `si.bios_date`.
+
+    Es la comprobación más barata de todas las de seguridad, y la única que no
+    necesita preguntarle nada al sistema.
+    """
+
+    def _auditar(self, bios_date):
+        si = SystemInfo()
+        si.bios_date = bios_date
+        a = Auditor(si, None)
+        return a, a.check_bios_age()
+
+    def _hace(self, años: float) -> str:
+        return (date.today() - timedelta(days=round(años * 365.25))).strftime("%Y-%m-%d")
+
+    def test_una_bios_reciente_no_es_un_hallazgo(self):
+        a, resumen = self._auditar(self._hace(1))
+        self.assertEqual(a.findings, [])
+        self.assertIn(str(date.today().year - 1), resumen)
+
+    def test_a_partir_de_tres_años_avisa(self):
+        a, _ = self._auditar(self._hace(4))
+        self.assertEqual([f.id for f in a.findings], ["bios_vieja"])
+        self.assertEqual(a.findings[0].severity, "low")
+
+    def test_muy_antigua_sube_de_severidad(self):
+        a, _ = self._auditar(self._hace(7))
+        self.assertEqual(a.findings[0].severity, "medium")
+
+    def test_el_hallazgo_no_promete_velocidad(self):
+        a, _ = self._auditar(self._hace(7))
+        f = a.findings[0]
+        self.assertEqual(f.category, SEGURIDAD)
+        self.assertEqual(f.gain, 0.0)
+        self.assertIn("no es una optimización", f.gain_note)
+
+    def test_no_dice_de_que_cve_se_trata(self):
+        # Cruzarlo con CVE concretas exigiría una base de datos externa y
+        # rompería el «no envía nada a ninguna parte».
+        a, _ = self._auditar(self._hace(7))
+        self.assertNotIn("CVE", a.findings[0].detail)
+
+    def test_sin_fecha_no_se_opina(self):
+        with self.assertRaises(SinDato):
+            self._auditar(None)
+
+    def test_una_fecha_ilegible_tampoco(self):
+        # Un SMBIOS que devuelva basura no puede acusar a nadie de nada.
+        with self.assertRaises(SinDato):
+            self._auditar("vete a saber")
+
+    def test_el_año_del_titulo_es_el_de_la_bios(self):
+        fecha = self._hace(6)
+        a, _ = self._auditar(fecha)
+        self.assertIn(fecha[:4], a.findings[0].title)
 
 
 if __name__ == "__main__":
