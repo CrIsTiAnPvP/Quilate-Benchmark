@@ -5,6 +5,7 @@ caché de páginas. El componente de disco pesa un 34% de la nota global y se
 pegaba al techo en cualquier equipo con memoria de sobra.
 """
 
+import inspect
 import io
 import itertools
 import os
@@ -55,6 +56,23 @@ class PesoDelDisco(unittest.TestCase):
         # Y con la medida real del mismo disco, ya no.
         real = 73 * 0.25 + 151 * 0.3 + 56 * 0.45
         self.assertLess(real, SCORE_CAP)
+
+
+class DivisionesPorElCronometro(unittest.TestCase):
+    """Ninguna cifra se divide por un tiempo sin comprobar que no es cero.
+
+    `speedup` estaba protegido y `tps`, la línea de al lado, no. Haría falta que
+    `perf_counter` devolviera dos veces el mismo valor —prácticamente
+    imposible—, pero la asimetría entre dos líneas contiguas es un olvido, no una
+    decisión, y montar un `Pool` de verdad para probarlo costaría más de lo que
+    vale. Se comprueba sobre el código, que es donde está el criterio.
+    """
+
+    def test_ninguna_division_por_wall_va_desnuda(self):
+        fuente = inspect.getsource(benchmark.Benchmark.run_cpu_multi)
+        desnudas = [linea.strip() for linea in fuente.splitlines()
+                    if "/ wall" in linea and "if wall" not in linea]
+        self.assertEqual(desnudas, [], "una división por el cronómetro sin guarda")
 
 
 class ElFicheroDePruebaNoSeQueda(unittest.TestCase):

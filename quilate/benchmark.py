@@ -374,7 +374,7 @@ class Benchmark:
                   for i in range(0, len(per_task), threads)
                   if len(per_task[i:i + threads]) == threads]
         self._spread("cpu_multi", "Tandas de trabajo en paralelo", tandas)
-        tps = tasks / wall
+        tps = tasks / wall if wall else 0.0
         score = tps / REFERENCE["mp_tps"] * 100
         # Escalado real: cuánto trabajo en paralelo por unidad de trabajo en serie.
         # Se compara con los núcleos físicos, no con los hilos: con SMT, 24 hilos
