@@ -523,6 +523,9 @@ class Benchmark:
         size = self.disk_size_mb * 1024 * 1024
         block_size = 1024 * 1024
         chunk_size = 4 * 1024 * 1024
+        # Declarados antes del `try` para que el `finally` pueda cerrarlos aunque
+        # la excepción llegue a mitad de la prueba, antes de crear los siguientes.
+        writer = reader = iop_reader = None
         try:
             free = shutil.disk_usage(self.target_dir).free
             if free < size * 2.5:
@@ -665,6 +668,19 @@ class Benchmark:
         except Exception as exc:
             spinner_done(f"error: {exc}", ok=False)
         finally:
+            # Cerrar antes de borrar, y no al revés: en Windows un fichero con
+            # un handle abierto no se puede borrar. Si `WriteFile`/`ReadFile`
+            # fallaba a mitad —disco lleno, una unidad USB desconectada, un
+            # --disk-path en un recurso de red que se cae— el `unlink` de abajo
+            # moría con PermissionError, se lo tragaba el `except OSError`, y
+            # quedaba un .tmp de hasta 512 MB huérfano en %TEMP% hasta el final
+            # del proceso. Justo la basura que la propia herramienta denuncia.
+            for io in (writer, reader, iop_reader):
+                if io is not None:
+                    try:
+                        io.close()
+                    except OSError:
+                        pass
             try:
                 path.unlink(missing_ok=True)
             except OSError:

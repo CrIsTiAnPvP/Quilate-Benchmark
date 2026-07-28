@@ -5,10 +5,15 @@ caché de páginas. El componente de disco pesa un 34% de la nota global y se
 pegaba al techo en cualquier equipo con memoria de sobra.
 """
 
+import io
+import itertools
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 
+from quilate import benchmark
 from quilate.benchmark import CACHE_LATENCY_US, SCORE_CAP, WEIGHTS, cache_served
 from quilate.rawio import ALIGN, DiskIO
 
@@ -50,6 +55,72 @@ class PesoDelDisco(unittest.TestCase):
         # Y con la medida real del mismo disco, ya no.
         real = 73 * 0.25 + 151 * 0.3 + 56 * 0.45
         self.assertLess(real, SCORE_CAP)
+
+
+class ElFicheroDePruebaNoSeQueda(unittest.TestCase):
+    """Un fallo a mitad de la prueba no puede dejar 512 MB tirados en %TEMP%.
+
+    En Windows un fichero con un handle abierto no se puede borrar, así que si
+    `WriteFile`/`ReadFile` fallaba —disco lleno, una unidad USB desconectada, un
+    `--disk-path` en un recurso de red que se cae— el `unlink` moría con
+    PermissionError, se lo tragaba el `except OSError`, y quedaba un
+    `.quilate_<pid>.tmp` huérfano hasta el final del proceso. Es exactamente la
+    basura que la propia herramienta denuncia en «Archivos grandes».
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def _correr_fallando(self, tras: int) -> list:
+        """Ejecuta la prueba de disco haciendo que la E/S falle a mitad.
+
+        Devuelve los `DiskIO` que se llegaron a crear, para poder comprobar
+        después que ninguno se quedó abierto.
+        """
+        creados = []
+        escrituras = itertools.count()
+
+        class DiskIOQueFalla(DiskIO):
+            def write(self, n):
+                if next(escrituras) >= tras:
+                    raise OSError(28, "No queda espacio en el dispositivo")
+                return super().write(n)
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                creados.append(self)
+
+        original = benchmark.DiskIO
+        benchmark.DiskIO = DiskIOQueFalla
+        try:
+            b = benchmark.Benchmark(disk_size_mb=8, target_dir=self.dir.name)
+            with redirect_stdout(io.StringIO()):
+                b.run_disk()
+        finally:
+            benchmark.DiskIO = original
+        return creados
+
+    def test_no_queda_ningun_handle_abierto(self):
+        creados = self._correr_fallando(tras=2)
+        self.assertTrue(creados, "no se ha llegado a abrir nada: el test no prueba nada")
+        for i, disco in enumerate(creados):
+            with self.subTest(handle=i):
+                self.assertIsNone(disco._handle, "handle de Windows sin cerrar")
+                self.assertIsNone(disco._fd, "descriptor POSIX sin cerrar")
+
+    def test_el_temporal_se_borra_igual(self):
+        # La comprobación que ve el usuario: en Windows esto es imposible si
+        # queda un handle abierto, así que vale por las dos cosas.
+        self._correr_fallando(tras=2)
+        self.assertEqual(list(Path(self.dir.name).glob(".quilate_*.tmp")), [],
+                         "ha quedado el fichero de prueba sin borrar")
+
+    def test_sin_fallos_tampoco_queda_nada(self):
+        b = benchmark.Benchmark(disk_size_mb=8, target_dir=self.dir.name)
+        with redirect_stdout(io.StringIO()):
+            b.run_disk()
+        self.assertEqual(list(Path(self.dir.name).glob(".quilate_*.tmp")), [])
 
 
 class EntradaSalidaReal(unittest.TestCase):
