@@ -39,7 +39,32 @@ def load_run(path: Path) -> dict:
     if not isinstance(datos, dict) or "meta" not in datos or "scores" not in datos:
         raise RunLoadError(f"{path} no parece un export de Quilate "
                            "(falta «meta» o «scores»)")
+    datos["benchmark"] = _pruebas_utilizables(datos.get("benchmark"))
     return datos
+
+
+def _pruebas_utilizables(benchmark: Any) -> dict:
+    """Solo las pruebas que traen una cifra con la que se pueda operar.
+
+    A partir de aquí el módulo indexa a pelo, y el fichero viene de fuera: se
+    trunca por un corte de luz a media escritura, se edita a mano, o lo genera
+    una versión con otro esquema. Cualquiera de las tres cosas convertía la
+    comparación entera en una traza de Python. Es el mismo criterio que
+    `history.load()` aplica a las líneas corruptas: se descarta lo que no sirve
+    y lo demás se compara igual.
+    """
+    if not isinstance(benchmark, dict):
+        return {}
+    utilizables = {}
+    for clave, prueba in benchmark.items():
+        if not isinstance(prueba, dict):
+            continue
+        raw = prueba.get("raw")
+        # `bool` es subclase de `int` y no es la medida de nada.
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        utilizables[clave] = prueba
+    return utilizables
 
 
 def _margen(run: dict, clave: str) -> float | None:
@@ -140,10 +165,20 @@ def comparar_componentes(antes: dict, despues: dict) -> list[dict]:
     return filas
 
 
+def _por_id(run: dict) -> dict[str, dict]:
+    """Hallazgos indexados por identificador, saltándose los que no lo traen.
+
+    Sin `id` no hay forma de casar un hallazgo con el de la otra ejecución, así
+    que descartarlo es lo único que se puede hacer con él —y desde luego mejor
+    que dejar la comparación entera sin hacer.
+    """
+    return {f["id"]: f for f in run.get("findings") or []
+            if isinstance(f, dict) and f.get("id")}
+
+
 def comparar_hallazgos(antes: dict, despues: dict) -> dict[str, list[dict]]:
     """Qué se arregló, qué sigue y qué ha aparecido nuevo."""
-    fa = {f["id"]: f for f in antes.get("findings") or []}
-    fd = {f["id"]: f for f in despues.get("findings") or []}
+    fa, fd = _por_id(antes), _por_id(despues)
     return {
         "resueltos": [fa[i] for i in sorted(set(fa) - set(fd))],
         "persisten": [fd[i] for i in sorted(set(fa) & set(fd))],

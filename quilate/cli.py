@@ -162,13 +162,26 @@ def _run_comparison(rutas: list[str]) -> int:
     antes_path, despues_path = Path(rutas[0]), Path(rutas[1])
     try:
         antes, despues = load_run(antes_path), load_run(despues_path)
+        comparacion = compare_runs(antes, despues)
     except RunLoadError as exc:
-        print(f"\n  {C.RED}No se puede comparar: {exc}{C.RESET}")
-        print(f"  {C.DIM}Genera los ficheros con `quilate --json antes.json`, aplica los "
-              f"cambios y vuelve a ejecutar con otro nombre.{C.RESET}\n")
-        return 2
-    print_comparison(compare_runs(antes, despues), antes_path.name, despues_path.name)
+        return _no_se_puede_comparar(str(exc))
+    except (KeyError, TypeError, ValueError) as exc:
+        # `load_run` criba lo que sabe cribar, pero el fichero viene de fuera y
+        # puede faltarle cualquier otra cosa. Que eso salga como una traza de
+        # Python, justo debajo del mensaje cuidado que ya existe para el fichero
+        # que no es de Quilate, no tiene defensa.
+        campo = exc.args[0] if isinstance(exc, KeyError) else exc
+        return _no_se_puede_comparar(f"el fichero es de Quilate pero le faltan "
+                                     f"datos: {campo}")
+    print_comparison(comparacion, antes_path.name, despues_path.name)
     return 0
+
+
+def _no_se_puede_comparar(motivo: str) -> int:
+    print(f"\n  {C.RED}No se puede comparar: {motivo}{C.RESET}")
+    print(f"  {C.DIM}Genera los ficheros con `quilate --json antes.json`, aplica los "
+          f"cambios y vuelve a ejecutar con otro nombre.{C.RESET}\n")
+    return 2
 
 
 def main() -> int:

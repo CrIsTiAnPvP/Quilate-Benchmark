@@ -9,11 +9,14 @@ buen aspecto.
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
+from quilate.cli import _run_comparison
 from quilate.compare import (MARGEN_DESCONOCIDO_PCT, RunLoadError, calibracion,
                              comparar_hallazgos, comparar_pruebas, compare_runs,
                              load_run, mismo_equipo)
@@ -69,6 +72,123 @@ class CargaDeFicheros(unittest.TestCase):
             p = Path(d) / "ok.json"
             p.write_text(json.dumps(ejecucion()), encoding="utf-8")
             self.assertEqual(load_run(p)["scores"]["overall"], 100.0)
+
+
+class FicherosIncompletos(unittest.TestCase):
+    """Un JSON al que le faltan datos no puede acabar en una traza de Python.
+
+    `--compare` es el único camino que acepta ficheros de fuera, y esos ficheros
+    se truncan por un corte de luz, se editan a mano —cosa que el proyecto da
+    por buena en el histórico— y los generan versiones con otro esquema. El mimo
+    de `history.load()`, que se salta las líneas corruptas, faltaba aquí.
+    """
+
+    def _cargar(self, run: dict) -> dict:
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "run.json"
+            p.write_text(json.dumps(run), encoding="utf-8")
+            return load_run(p)
+
+    def _comparar(self, roto: dict) -> dict:
+        return compare_runs(self._cargar(roto), self._cargar(ejecucion()))
+
+    def test_una_prueba_sin_raw(self):
+        run = ejecucion()
+        del run["benchmark"]["disk_read"]["raw"]
+        self._comparar(run)          # antes: KeyError: 'raw'
+
+    def test_una_prueba_con_raw_nulo(self):
+        run = ejecucion()
+        run["benchmark"]["disk_read"]["raw"] = None
+        self._comparar(run)          # antes: TypeError en float(None)
+
+    def test_una_prueba_con_raw_que_no_es_numero(self):
+        run = ejecucion()
+        run["benchmark"]["disk_read"]["raw"] = "mil"
+        self._comparar(run)
+
+    def test_una_entrada_de_benchmark_que_no_es_un_diccionario(self):
+        run = ejecucion()
+        run["benchmark"]["disk_read"] = "basura"
+        self._comparar(run)
+
+    def test_un_benchmark_que_no_es_un_diccionario(self):
+        run = ejecucion()
+        run["benchmark"] = ["disk_read"]
+        self._comparar(run)
+
+    def test_la_prueba_descartada_no_se_compara_a_medias(self):
+        # Descartarla y luego enseñar una fila con «before: None» sería peor que
+        # el fallo: parecería que la prueba no se ejecutó.
+        run = ejecucion()
+        run["benchmark"]["disk_read"]["raw"] = None
+        self.assertEqual(self._cargar(run)["benchmark"], {})
+
+    def test_lo_que_esta_bien_sigue_pasando(self):
+        # La criba no puede llevarse por delante las pruebas buenas del mismo
+        # fichero: solo se descarta la que no tiene cifra.
+        run = ejecucion()
+        run["benchmark"]["cpu_single"] = {"name": "CPU", "unit": "pts", "raw": None}
+        cargado = self._cargar(run)
+        self.assertEqual(set(cargado["benchmark"]), {"disk_read"})
+        self.assertEqual(cargado["benchmark"]["disk_read"]["raw"], 1000.0)
+
+    def test_un_hallazgo_sin_id(self):
+        run = ejecucion()
+        run["findings"] = [{"title": "algo sin identificar"}]
+        self._comparar(run)          # antes: KeyError: 'id'
+
+    def test_los_hallazgos_con_id_se_siguen_casando(self):
+        antes, despues = ejecucion(), ejecucion()
+        antes["findings"] = [{"title": "sin id"}, {"id": "trim_off", "title": "TRIM"}]
+        despues["findings"] = [{"id": "trim_off", "title": "TRIM"},
+                               {"id": "fs_dirty", "title": "Sucio"}]
+        hallazgos = comparar_hallazgos(antes, despues)
+        self.assertEqual([f["id"] for f in hallazgos["persisten"]], ["trim_off"])
+        self.assertEqual([f["id"] for f in hallazgos["nuevos"]], ["fs_dirty"])
+        self.assertEqual(hallazgos["resueltos"], [])
+
+
+class ElMensajeQueVeElUsuario(unittest.TestCase):
+    """Lo que `--compare` hace cuando el fichero no da para comparar.
+
+    El mensaje cuidado ya existía dos líneas más abajo del `except`; el problema
+    era que solo lo veía quien pasaba un fichero que no era de Quilate.
+    """
+
+    def _comparar(self, antes: dict, despues: dict) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as d:
+            rutas = []
+            for nombre, run in (("antes.json", antes), ("despues.json", despues)):
+                p = Path(d) / nombre
+                p.write_text(json.dumps(run), encoding="utf-8")
+                rutas.append(str(p))
+            salida = io.StringIO()
+            with redirect_stdout(salida):
+                codigo = _run_comparison(rutas)
+        return codigo, salida.getvalue()
+
+    def test_dos_ficheros_buenos_se_comparan(self):
+        codigo, salida = self._comparar(ejecucion(), ejecucion())
+        self.assertEqual(codigo, 0)
+        self.assertNotIn("No se puede comparar", salida)
+
+    def test_un_dato_de_otro_tipo_no_saca_una_traza(self):
+        roto = ejecucion()
+        roto["scores"]["overall"] = "bastante"
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("le faltan datos", salida)
+
+    def test_un_fichero_que_no_es_de_quilate(self):
+        # El mensaje de siempre no puede haberse perdido por el camino.
+        codigo, salida = self._comparar({"cualquier": "cosa"}, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("no parece un export de Quilate", salida)
+
+    def test_siempre_se_explica_como_generarlos(self):
+        _, salida = self._comparar({"cualquier": "cosa"}, ejecucion())
+        self.assertIn("--json", salida)
 
 
 class ElMargenDecide(unittest.TestCase):
