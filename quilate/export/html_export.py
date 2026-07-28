@@ -1222,7 +1222,16 @@ class Seccion:
     icon: str
     inner: str
     count: str = ""
-    severity: str = ""          # peor severidad de los hallazgos que trae
+    severity: str = ""          # peor severidad de los hallazgos que trae: pinta
+                                # el punto de color de la navegación
+    # Cuántos hallazgos hay detrás de esa severidad. NO se renderiza, y es a
+    # propósito: las cuatro secciones que lo rellenan cuentan cosas distintas y
+    # solapadas —«componentes» recibe TODOS los hallazgos, «red» solo los suyos,
+    # «plan» los accionables y «hallazgos» todos otra vez—, así que sumarlas o
+    # enseñarlas juntas daría un total inflado. El único recuento total del
+    # informe es el del hero, y el panel lateral desglosa ese mismo conjunto por
+    # severidad. Queda escrito aquí, y no borrado, para que quien lo encuentre
+    # sepa que no pintarlo fue una decisión y no un descuido.
     findings: int = 0
 
     @property

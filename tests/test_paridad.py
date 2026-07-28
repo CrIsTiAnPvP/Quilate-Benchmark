@@ -16,6 +16,7 @@ quiere cazar.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,7 +25,7 @@ from quilate.audit import Auditor
 from quilate.benchmark import Benchmark
 from quilate.const import WEBSITE_URL
 from quilate.components import build_component_cards
-from quilate.export.html_export import export_html
+from quilate.export.html_export import Seccion, export_html
 from quilate.export.json_export import build_payload
 from quilate.export.plan_export import export_plan
 from quilate.projection import project_improvement
@@ -283,7 +284,7 @@ class Marca(unittest.TestCase):
 
     def test_el_informe_no_pide_nada_a_ninguna_parte(self):
         import re
-        from quilate.export.html_export import export_html
+        from quilate.export.html_export import Seccion, export_html
         with tempfile.TemporaryDirectory() as tmp:
             destino = Path(tmp) / "i.html"
             si = _sistema()
@@ -347,7 +348,7 @@ class JavaScriptDelInforme(unittest.TestCase):
 
     def test_el_script_del_informe_es_un_solo_bloque(self):
         import re
-        from quilate.export.html_export import export_html
+        from quilate.export.html_export import Seccion, export_html
         with tempfile.TemporaryDirectory() as tmp:
             destino = Path(tmp) / "i.html"
             si = _sistema()
@@ -388,6 +389,51 @@ class SinEtiquetasHuerfanas(unittest.TestCase):
         agrupados = {c for _k, _l, comps, _b in COMPONENT_GROUPS for c in comps}
         self.assertEqual(set(WEIGHTS) - agrupados, set(),
                          "un componente con nota que no aparece en ninguna ficha")
+
+
+class RecuentoDeHallazgos(unittest.TestCase):
+    """El informe da un único total de hallazgos, y no lo suma de trozos.
+
+    `Seccion.findings` se rellena en cuatro sitios con cifras que se solapan
+    —«componentes» recibe todos los hallazgos, «red» solo los suyos, «plan» los
+    accionables y «hallazgos» todos otra vez—, así que enseñarlas juntas daría
+    un total inflado. El comentario junto a la declaración lo explica; esto lo
+    hace comprobable.
+    """
+
+    def _informe(self) -> tuple[Auditor, str]:
+        si = _sistema()
+        bench = _benchmark()
+        auditor = _auditoria(si, bench)
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "informe.html"
+            export_html(destino, si, bench, auditor,
+                        project_improvement(bench, auditor.findings))
+            return auditor, destino.read_text(encoding="utf-8")
+
+    def test_el_total_se_da_una_sola_vez(self):
+        auditor, html = self._informe()
+        self.assertTrue(auditor.findings, "sin hallazgos esto no comprueba nada")
+        total = (f'<div class="n">{len(auditor.findings)}</div>'
+                 f'<div class="l">Hallazgos en')
+        self.assertEqual(html.count(total), 1,
+                         "el recuento total de hallazgos aparece más de una vez")
+
+    def test_el_campo_muerto_sigue_sin_pintarse(self):
+        # `Seccion.findings` guarda cuatro cifras que se solapan. Que ninguna
+        # llegue al HTML es lo que impide que alguien las sume creyendo que el
+        # resultado significa algo.
+        self.assertIn("findings", Seccion.__dataclass_fields__)
+        auditor, html = self._informe()
+        campos = re.findall(r'data-findings|class="findings"', html)
+        self.assertEqual(campos, [], "el recuento por sección ha llegado al HTML")
+
+    def test_la_severidad_si_se_usa(self):
+        # El otro campo opcional de Seccion sí se pinta: el punto de color de la
+        # navegación. Documentar uno como muerto no puede sugerir que el otro
+        # también lo esté.
+        _, html = self._informe()
+        self.assertIn('<span class="sev s-high"></span>', html)
 
 
 if __name__ == "__main__":
