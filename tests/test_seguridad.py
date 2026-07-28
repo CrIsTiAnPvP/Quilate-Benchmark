@@ -479,6 +479,108 @@ class ChipTpm(unittest.TestCase):
             self._auditar(PSResult([{"disponible": False}]))
 
 
+class ProtocoloSmb1(unittest.TestCase):
+    def _auditar(self, filas):
+        a = Auditor(SystemInfo(), None)
+        with patched(audit, wmi=filas):
+            return a, a.check_smb1()
+
+    def test_desactivado(self):
+        for estado in ("Disabled", "disabled", 2, "DisabledWithPayloadRemoved"):
+            with self.subTest(estado=estado):
+                a, resumen = self._auditar(
+                    PSResult([{"disponible": True, "State": estado}]))
+                self.assertEqual(a.findings, [])
+
+    def test_activo(self):
+        for estado in ("Enabled", 1):
+            with self.subTest(estado=estado):
+                a, _ = self._auditar(PSResult([{"disponible": True, "State": estado}]))
+                self.assertEqual([f.id for f in a.findings], ["smb1_activo"])
+                self.assertEqual(a.findings[0].severity, "high")
+                self.assertEqual(a.findings[0].gain, 0.0)
+
+    def test_avisa_de_lo_que_puede_dejar_de_funcionar(self):
+        # Quitarlo puede tirar un NAS viejo, y decirlo antes evita el susto.
+        a, _ = self._auditar(PSResult([{"disponible": True, "State": "Enabled"}]))
+        pasos = " ".join(a.findings[0].steps)
+        self.assertIn("NAS", pasos)
+
+    def test_un_estado_desconocido_no_lo_da_por_desactivado(self):
+        # Dar por apagado un SMB1 encendido es el único error que importa aquí.
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult([{"disponible": True, "State": "Vete a saber"}]))
+
+    def test_sin_privilegios_es_sin_dato(self):
+        # Verificado en un equipo real: «La operación solicitada requiere elevación».
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult((), ok=False, error="requiere elevación"))
+
+
+class CuentasLocales(unittest.TestCase):
+    """El filtro por `Enabled` no es un detalle: es lo que evita el falso positivo.
+
+    Un Windows recién instalado trae `Invitado`, `DefaultAccount` y
+    `WDAGUtilityAccount` sin exigir contraseña y deshabilitadas. Contarlas
+    convertiría cualquier equipo del mundo en tres hallazgos graves.
+    """
+
+    # Salida literal de `Get-LocalUser` en un Windows 11 en español.
+    DE_FABRICA = [
+        {"disponible": True, "Name": "Administrador", "Enabled": False, "PasswordRequired": True},
+        {"disponible": True, "Name": "DefaultAccount", "Enabled": False, "PasswordRequired": False},
+        {"disponible": True, "Name": "Invitado", "Enabled": False, "PasswordRequired": False},
+        {"disponible": True, "Name": "WDAGUtilityAccount", "Enabled": False,
+         "PasswordRequired": True},
+    ]
+
+    def _auditar(self, filas):
+        a = Auditor(SystemInfo(), None)
+        with patched(audit, wmi=PSResult(filas)):
+            return a, a.check_local_accounts()
+
+    def test_un_equipo_normal_no_da_hallazgos(self):
+        usuario = {"disponible": True, "Name": "Cristian", "Enabled": True,
+                   "PasswordRequired": True}
+        a, resumen = self._auditar(self.DE_FABRICA + [usuario])
+        self.assertEqual(a.findings, [], "las cuentas de fábrica no cuentan")
+        self.assertIn("todas con contraseña", resumen)
+
+    def test_una_cuenta_activa_sin_contraseña(self):
+        abierta = {"disponible": True, "Name": "Taller", "Enabled": True,
+                   "PasswordRequired": False}
+        a, _ = self._auditar(self.DE_FABRICA + [abierta])
+        self.assertEqual([f.id for f in a.findings], ["cuenta_sin_clave"])
+        f = a.findings[0]
+        self.assertIn("Taller", f.title)
+        self.assertEqual((f.severity, f.category, f.gain), ("high", SEGURIDAD, 0.0))
+
+    def test_no_delata_las_de_fabrica_en_el_titulo(self):
+        abierta = {"disponible": True, "Name": "Taller", "Enabled": True,
+                   "PasswordRequired": False}
+        a, _ = self._auditar(self.DE_FABRICA + [abierta])
+        for nombre in ("Invitado", "DefaultAccount"):
+            self.assertNotIn(nombre, a.findings[0].title)
+
+    def test_varias_cuentas_abiertas(self):
+        abiertas = [{"disponible": True, "Name": n, "Enabled": True,
+                     "PasswordRequired": False} for n in ("Taller", "Caja")]
+        a, resumen = self._auditar(self.DE_FABRICA + abiertas)
+        self.assertIn("Taller", a.findings[0].title)
+        self.assertIn("Caja", a.findings[0].title)
+        self.assertIn("2", resumen)
+
+    def test_aclara_que_no_va_de_pin_ni_cuenta_de_microsoft(self):
+        abierta = {"disponible": True, "Name": "Taller", "Enabled": True,
+                   "PasswordRequired": False}
+        a, _ = self._auditar([abierta])
+        self.assertIn("PIN", a.findings[0].detail)
+
+    def test_sin_el_cmdlet_no_aplica(self):
+        with self.assertRaises(NoAplica):
+            self._auditar([{"disponible": False}])
+
+
 class Decodificador(unittest.TestCase):
     def test_los_dos_bytes_que_importan(self):
         self.assertEqual(_estado_antivirus(0x061100), (True, True))

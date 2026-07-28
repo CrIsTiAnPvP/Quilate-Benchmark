@@ -181,6 +181,8 @@ class Auditor:
                 ("Cifrado del disco (BitLocker)", self.check_disk_encryption),
                 ("Arranque seguro (Secure Boot)", self.check_secure_boot),
                 ("Chip TPM", self.check_tpm),
+                ("Protocolo SMB1", self.check_smb1),
+                ("Cuentas locales sin contraseña", self.check_local_accounts),
             ]
         elif IS_LINUX:
             checks += [
@@ -1510,6 +1512,90 @@ class Auditor:
                        "Comprueba después con `tpm.msc`"])
             return "presente pero desactivado"
         return "presente y activo"
+
+    # `Get-WindowsOptionalFeature` devuelve una enumeración que, según la
+    # versión, llega como texto o como el entero de DISM. Lo que no encaje en
+    # ninguna de las dos formas se declara desconocido: dar por desactivado un
+    # SMB1 que está activo sería justo el error que importa evitar.
+    _SMB1_ACTIVO = {1, "enabled"}
+    _SMB1_INACTIVO = {2, "disabled", "disabledwithpayloadremoved"}
+
+    def check_smb1(self) -> str:
+        rows = ps_json(
+            "$( if (-not (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue)) {"
+            "     [PSCustomObject]@{ disponible = $false } } else {"
+            "     Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol |"
+            "       Select-Object @{n='disponible';e={$true}},State } )")
+        if not rows.ok:
+            raise SinDato(f"no se ha podido consultar SMB1 ({rows.error})")
+        if not rows:
+            raise SinDato("Windows no ha informado del estado de SMB1")
+        if not rows[0].get("disponible"):
+            raise NoAplica("este Windows no permite consultar las características opcionales")
+        estado = rows[0].get("State")
+        clave = estado.strip().lower() if isinstance(estado, str) else estado
+        if clave in self._SMB1_INACTIVO:
+            return "desactivado"
+        if clave not in self._SMB1_ACTIVO:
+            raise SinDato(f"estado de SMB1 no reconocido: «{estado}»")
+        self.add(
+            id="smb1_activo", title="SMB1 sigue activo, un protocolo retirado en 2014",
+            severity="high", category=SEGURIDAD, component="system",
+            detail="SMB1 es la versión antigua del protocolo de archivos compartidos de Windows. "
+                   "Microsoft lo dejó de instalar por defecto porque no se puede asegurar: no "
+                   "firma los mensajes ni cifra nada, y es por donde entró WannaCry. Windows lo "
+                   "deja activo cuando se ha actualizado desde una versión vieja o cuando algo "
+                   "lo pidió: una impresora de red antigua o un NAS de hace años.",
+            gain=0.0, gain_note="no es una optimización: es la puerta que usó WannaCry",
+            effort="bajo", risk="bajo",
+            steps=["Características de Windows → desmarca «Compatibilidad con el protocolo "
+                   "para compartir archivos SMB 1.0/CIFS»",
+                   "Antes de reiniciar, comprueba si algún NAS o impresora de red vieja "
+                   "dependía de él: si deja de verse, casi siempre se arregla actualizando "
+                   "su firmware",
+                   "Nada de lo que se comparte hoy entre equipos Windows lo necesita"])
+        return "ACTIVO"
+
+    def check_local_accounts(self) -> str:
+        rows = ps_json(
+            "$( if (-not (Get-Command Get-LocalUser -ErrorAction SilentlyContinue)) {"
+            "     [PSCustomObject]@{ disponible = $false } } else {"
+            "     Get-LocalUser | Select-Object @{n='disponible';e={$true}},"
+            "       Name,Enabled,PasswordRequired } )")
+        if not rows.ok:
+            raise SinDato(f"no se han podido enumerar las cuentas locales ({rows.error})")
+        if not rows:
+            raise SinDato("no se ha devuelto ninguna cuenta local")
+        if not rows[0].get("disponible"):
+            raise NoAplica("este Windows no trae la consulta de cuentas locales")
+
+        # Solo las cuentas habilitadas. `Invitado`, `DefaultAccount` y
+        # `WDAGUtilityAccount` vienen de fábrica sin exigir contraseña y
+        # deshabilitadas: contarlas convertiría un Windows recién instalado en
+        # tres hallazgos graves.
+        abiertas = [str(r.get("Name")) for r in rows
+                    if r.get("Enabled") is True and r.get("PasswordRequired") is False]
+        if not abiertas:
+            habilitadas = sum(1 for r in rows if r.get("Enabled") is True)
+            return f"{habilitadas} cuenta(s) activa(s), todas con contraseña"
+        self.add(
+            id="cuenta_sin_clave",
+            title=f"Cuenta local que no exige contraseña ({', '.join(abiertas)})",
+            severity="high", category=SEGURIDAD, component="system",
+            detail="Windows informa de que "
+                   f"{'estas cuentas están habilitadas y no exigen' if len(abiertas) > 1 else 'esta cuenta está habilitada y no exige'} "
+                   "contraseña. Cualquiera con acceso físico al equipo entra sin más, y en una "
+                   "red local también sirve para conectarse a los recursos compartidos. No "
+                   "afecta al inicio de sesión con cuenta de Microsoft o PIN, que sí llevan "
+                   "credencial detrás.",
+            gain=0.0, gain_note="no es una optimización: es quién puede entrar en tu equipo",
+            effort="bajo", risk="bajo",
+            steps=["Ponle contraseña: `net user NOMBRE *` en una consola de administrador",
+                   "O deshabilita la cuenta si no se usa: Administración de equipos → "
+                   "Usuarios y grupos locales",
+                   "Las cuentas de fábrica deshabilitadas (Invitado, DefaultAccount) no "
+                   "cuentan aquí y no hay que tocarlas"])
+        return f"{len(abiertas)} sin contraseña"
 
     def _check_proteccion_activa(self, rows) -> None:
         """Si queda alguien vigilando, y con las firmas al día.
