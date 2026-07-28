@@ -18,7 +18,8 @@ import unittest
 from pathlib import Path
 
 from quilate.const import IS_WINDOWS
-from quilate.platform_utils import _SYSTEM32, _sys_exe, run_cmd, run_cmd_bytes
+from quilate.platform_utils import (_SYSTEM32, _sys_exe, _system32, run_cmd,
+                                    run_cmd_bytes)
 from quilate import sensors
 
 
@@ -66,6 +67,18 @@ class RutaAbsoluta(_EnDirectorioTrampa):
         self.plantar("powershell.exe")
         os.environ["PATH"] = str(self.trampa)
         self.assertEqual(_sys_exe("powershell.exe"), ruta)
+
+    def test_system32_no_sale_del_entorno(self):
+        """`%SystemRoot%` lo puede cambiar cualquiera que arranque el proceso.
+
+        Mientras Quilate solo se lanzaba a sí mismo, eso era el problema de 1.3.
+        Desde que hay un `powershell.exe` que se lanza **con permisos de
+        administrador**, quien controle esa variable elegiría qué binario se
+        ejecuta elevado, y eso es una escalada de privilegios.
+        """
+        os.environ["SystemRoot"] = str(self.trampa)
+        self.assertEqual(_system32(), _SYSTEM32)
+        self.assertNotIn(str(self.trampa).lower(), _sys_exe("powershell.exe").lower())
 
     def test_los_demas_binarios_salen_de_system32(self):
         for nombre in ("powercfg.exe", "fsutil.exe", "netsh.exe"):

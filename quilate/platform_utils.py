@@ -22,7 +22,34 @@ else:
 # Como este programa se ofrece a elevarse por UAC, un `powercfg.exe` cualquiera
 # dejado en la carpeta desde la que se hace doble clic acabaría ejecutándose como
 # Administrador. Los binarios del sistema se piden siempre por ruta absoluta.
-_SYSTEM32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+def _system32() -> str:
+    """System32 según Windows, no según el entorno.
+
+    `%SystemRoot%` lo puede cambiar cualquiera que arranque este proceso: una
+    tarea programada del propio usuario, un `.bat` previo, un `setx`. Mientras
+    Quilate solo se lanzaba a sí mismo eso era el problema de 1.3, que se
+    resolvió validando la ruta del histórico. Desde que hay un proceso que se
+    lanza **con permisos de administrador**, es otra cosa: quien controle esa
+    variable elegiría qué `powershell.exe` se ejecuta elevado, que es una
+    escalada de privilegios con todas las letras.
+
+    `GetSystemDirectoryW` lo pregunta al sistema y no mira el entorno. Se
+    comprueba: con `SystemRoot` apuntando a una carpeta del usuario, la API
+    sigue devolviendo `C:\\WINDOWS\\system32`.
+    """
+    if not IS_WINDOWS:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(260)
+        if ctypes.windll.kernel32.GetSystemDirectoryW(buf, 260) and buf.value:
+            return buf.value
+    except Exception:
+        pass
+    # Si hasta eso falla, la ruta literal antes que una que venga del entorno.
+    return r"C:\Windows\System32"
+
+
+_SYSTEM32 = _system32()
 
 # PowerShell 5.1 es el único que no cuelga directamente de System32.
 _SUBDIR = {"powershell.exe": os.path.join("WindowsPowerShell", "v1.0")}
