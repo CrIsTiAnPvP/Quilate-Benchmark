@@ -466,10 +466,15 @@ importaciones circulares. También funciona como módulo: `python -m quilate`.
 ### Tests
 
 ```powershell
-python -m unittest discover -s tests
+pip install -r requirements-dev.txt
+pytest
 ```
 
-Solo biblioteca estándar y sin red. Las capturas de WMI y del registro viven en
+La única dependencia de test es **pytest** (`requirements-dev.txt`); en producción
+sigue habiendo una sola, `psutil`, y el `.exe` no lleva ninguna de las dos. Lo que
+no cambia es lo que de verdad importaba de «solo biblioteca estándar»: los tests
+**no tocan la red ni el hardware real**, así que se reproducen igual en cualquier
+máquina. Las capturas de WMI y del registro viven en
 `tests/fixtures/` con los SID, los nombres de usuario, los nombres de equipo y
 las rutas de perfil ya quitados, así que la lógica se puede probar en cualquier
 sistema —también en Linux— sin depender de la máquina que los generó. Los que

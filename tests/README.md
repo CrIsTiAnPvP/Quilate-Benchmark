@@ -1,12 +1,22 @@
 # Tests
 
 ```bash
-python -m unittest discover -s tests -t .
+pip install -r requirements-dev.txt
+pytest
 ```
 
-Sin dependencias: `unittest` de la biblioteca estándar. No hacen falta permisos
-de administrador ni estar en Windows — el acceso al registro y a WMI se sustituye
-por los fixtures de `fixtures/`.
+Una sola dependencia de test, **pytest**, declarada en `requirements-dev.txt`.
+No hacen falta permisos de administrador ni estar en Windows — el acceso al
+registro y a WMI se sustituye por los fixtures de `fixtures/`. Tampoco hace
+falta red: ningún test la toca — tampoco `test_red.py`, que audita datos de
+adaptadores servidos como diccionarios, sin abrir un socket.
+
+La configuración está en `[tool.pytest.ini_options]` de `pyproject.toml`, y ahí
+hay un detalle que conviene leer antes de tocar una clase de test: las clases de
+esta suite llevan nombre descriptivo en español y **ninguna empieza por `Test`**,
+así que pytest las recoge solo porque heredan de `unittest.TestCase`. Quitarle
+esa herencia a una clase sin convertir sus métodos en funciones a nivel de módulo
+hace que sus tests dejen de ejecutarse en silencio, sin fallo ni aviso.
 
 La única excepción es `test_elevacion.ElCanalDeVerdad`, que sí lanza PowerShell
 de verdad para probar la tubería por la que vuelve el lote con permisos: se salta

@@ -1,0 +1,15 @@
+# Dependencias para desarrollar y ejecutar los tests.
+# Producción sigue siendo solo `requirements.txt` (psutil): pytest no se
+# empaqueta nunca en el .exe, `build.ps1` parte de `quilate.py`.
+-r requirements.txt
+
+# 8.4 y no 8.0: la suite usa `self.subTest` en 82 sitios y hasta 8.4 pytest no
+# informaba de cada subcaso fallido por separado (`SUBFAILED`). Con un mínimo
+# más bajo, un `pip install` que resolviera a 8.3 seguiría en verde pero
+# contaría varios subcasos rotos como un solo fallo, y se perdería el detalle
+# de cuál.
+#
+# En Python 3.9 —la mínima de la matriz de CI— pip resolverá a la última 8.4.x,
+# que es la última rama que lo soporta; en 3.10+ sube a 9.x. La configuración de
+# `pyproject.toml` vale para ambas.
+pytest>=8.4

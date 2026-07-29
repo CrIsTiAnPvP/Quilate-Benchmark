@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import io
 import subprocess
-import unittest
 from contextlib import redirect_stdout
+
+import pytest
 
 from quilate import console
 
@@ -26,37 +27,38 @@ class _SalidaFalsa(io.StringIO):
         return self._terminal
 
 
-class LimpiarPantalla(unittest.TestCase):
-    def setUp(self):
-        # Cualquier intento de crear un proceso hijo, venga de donde venga, tiene
-        # que hacer fallar el test: es justo lo que se ha quitado.
-        self.popen_original = subprocess.Popen
-        subprocess.Popen = self._prohibido
+@pytest.fixture(autouse=True)
+def sin_procesos_hijo(monkeypatch):
+    """Cualquier intento de crear un proceso hijo hace fallar el test.
 
-    def tearDown(self):
-        subprocess.Popen = self.popen_original
+    Es justo lo que se ha quitado del módulo. Va con `monkeypatch` y no con
+    `setUp`/`tearDown` porque `subprocess.Popen` es estado global del intérprete:
+    si el test reventara entre el parcheo y la restauración, el `tearDown` de
+    antes tampoco se saltaría, pero `monkeypatch` deshace el cambio sin que haya
+    que acordarse de escribirlo.
+    """
+    def prohibido(*args, **kwargs):
+        raise AssertionError(
+            f"se ha lanzado un proceso para limpiar la pantalla: {args}")
 
-    @staticmethod
-    def _prohibido(*args, **kwargs):
-        raise AssertionError(f"se ha lanzado un proceso para limpiar la pantalla: {args}")
-
-    def _limpiar(self, terminal: bool) -> str:
-        salida = _SalidaFalsa(terminal)
-        with redirect_stdout(salida):
-            console.clear_screen()
-        return salida.getvalue()
-
-    def test_en_un_terminal_se_borra_con_vt100(self):
-        self.assertEqual(self._limpiar(terminal=True), BORRAR)
-
-    def test_con_la_salida_redirigida_no_se_escribe_nada(self):
-        # El código de control ensuciaría el fichero o el proceso de destino.
-        self.assertEqual(self._limpiar(terminal=False), "")
-
-    def test_el_modulo_ya_no_necesita_subprocess(self):
-        self.assertFalse(hasattr(console, "subprocess"),
-                         "queda un import de subprocess sin usar")
+    monkeypatch.setattr(subprocess, "Popen", prohibido)
 
 
-if __name__ == "__main__":
-    unittest.main()
+def limpiar(terminal: bool) -> str:
+    salida = _SalidaFalsa(terminal)
+    with redirect_stdout(salida):
+        console.clear_screen()
+    return salida.getvalue()
+
+
+def test_en_un_terminal_se_borra_con_vt100():
+    assert limpiar(terminal=True) == BORRAR
+
+
+def test_con_la_salida_redirigida_no_se_escribe_nada():
+    # El código de control ensuciaría el fichero o el proceso de destino.
+    assert limpiar(terminal=False) == ""
+
+
+def test_el_modulo_ya_no_necesita_subprocess():
+    assert not hasattr(console, "subprocess"), "queda un import de subprocess sin usar"

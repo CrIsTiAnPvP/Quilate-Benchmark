@@ -34,10 +34,10 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Instalar dependencias
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Tests
-        run: python -m unittest discover -s tests -t . -v
+        run: pytest -v
 
   # El paquete tiene que seguir importándose en Windows, que es su plataforma
   # real: los tests no cubren las rutas que dependen de winreg de verdad.
@@ -51,7 +51,7 @@ jobs:
           python-version: "3.13"
 
       - name: Instalar dependencias
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Comprobar que importa y compila
         run: |
@@ -59,4 +59,4 @@ jobs:
           python -c "import quilate.audit, quilate.benchmark, quilate.rawio, quilate.sensors, quilate.sysinfo"
 
       - name: Tests
-        run: python -m unittest discover -s tests -t .
+        run: pytest

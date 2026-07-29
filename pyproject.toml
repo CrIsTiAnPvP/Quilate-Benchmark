@@ -1,0 +1,30 @@
+# Este fichero existe solo para configurar las herramientas de desarrollo.
+# Quilate no se instala como paquete —se ejecuta desde `quilate.py` y se
+# empaqueta con `build.ps1`—, así que a propósito no lleva `[project]` ni
+# `[build-system]`.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# `python_files` y `python_functions` se quedan en su valor por defecto
+# (`test_*.py` y `test_*`), que es justo la convención que ya sigue el
+# directorio: comprobado, la suite entera se recoge sin tocarlos.
+#
+# `python_classes` también se queda en el defecto (`Test*`), y conviene saber
+# lo que eso implica aquí: ninguna clase de esta suite empieza por `Test` —van
+# con nombre descriptivo en español (`CapturaDeWindows11`, `SinDatos`)— así que
+# pytest las recoge *solo* porque heredan de `unittest.TestCase`. Quitarle esa
+# herencia a una clase sin más haría que sus tests dejaran de ejecutarse sin un
+# fallo ni un aviso. Por eso los tests migrados a estilo pytest puro son
+# funciones a nivel de módulo, que sí encajan con `python_functions`, y las
+# clases que se conservan siguen siendo `TestCase`.
+#
+# Poner `python_classes = "*"` sería la otra salida, pero se probó y no vale:
+# pytest empieza a intentar recoger las clases de producción importadas en cada
+# módulo de test (`Auditor`, `SystemInfo`, `SinDato`) y llena el informe de
+# `PytestCollectionWarning`.
+
+# Un marcador mal escrito (`@pytest.mark.skipif_sin_opencl`) sería un aviso que
+# nadie lee y un test que se ejecuta cuando no debía, o al revés. Con esto es
+# un error.
+addopts = "--strict-markers"
