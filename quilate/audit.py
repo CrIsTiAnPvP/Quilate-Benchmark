@@ -451,10 +451,32 @@ class Auditor:
             return f"{len(sticks)} módulos a {speed} MT/s (XMP sin activar)"
         return f"{len(sticks)} módulos" + (f" a {speed} MT/s" if speed else "")
 
-    def check_thermals(self) -> str:
+    def _pico_termico(self) -> tuple[float | None, str]:
+        """La temperatura más representativa que haya, y de qué momento es.
+
+        Por orden: el muestreo continuo durante la carga, la foto tomada al
+        terminar la carga, y como último recurso el reposo de ahora. Las tres
+        son medidas reales de un sensor —aquí no se estima nada—; lo que cambia
+        es cuándo se tomaron, y por eso la procedencia viaja con la cifra hasta
+        el título del hallazgo.
+
+        El muestreo continuo no existe en Windows: `_sample_sensors` se salta
+        entero por la frecuencia, que ahí es nominal. La foto sí, y es la misma
+        que ya se pinta en el informe y se apunta en el histórico.
+        """
         samples = self.bench.thermal_samples if self.bench else []
-        current = cpu_temperature()
-        peak = max(samples) if samples else current
+        if samples:
+            return max(samples), "bajo carga"
+        fotos = self.bench.load_snapshots if self.bench else []
+        # Hacen falta las dos fotos: `run_cpu_multi` toma la de antes y se va sin
+        # tomar la de después si el Pool no arranca. Quedarse con la última a
+        # ciegas sería llamar «bajo carga» a un reposo previo al benchmark.
+        if len(fotos) >= 2 and fotos[-1].get("cpu_temp") is not None:
+            return float(fotos[-1]["cpu_temp"]), "bajo carga"
+        return cpu_temperature(), "en reposo"
+
+    def check_thermals(self) -> str:
+        peak, momento = self._pico_termico()
         gpu = gpu_temperature()
 
         if peak is None:
@@ -505,7 +527,7 @@ class Auditor:
                               f"(fuente: nvidia-smi).")
         if peak >= 95:
             self.add(
-                id="thermal_critical", title=f"Throttling térmico severo ({peak:.0f} °C bajo carga)",
+                id="thermal_critical", title=f"Throttling térmico severo ({peak:.0f} °C {momento})",
                 severity="critical", category="térmico", component="cpu_multi",
                 detail="A partir de ~95-100 °C la CPU reduce frecuencia para protegerse. Estás "
                        "perdiendo rendimiento de forma permanente y el equipo tiene un problema "
@@ -521,7 +543,7 @@ class Auditor:
             return f"{peak:.0f} °C (crítico)"
         if peak >= 85:
             self.add(
-                id="thermal_high", title=f"Temperaturas elevadas ({peak:.0f} °C bajo carga)",
+                id="thermal_high", title=f"Temperaturas elevadas ({peak:.0f} °C {momento})",
                 severity="high", category="térmico", component="cpu_multi",
                 detail="Todavía por debajo del límite, pero con poco margen. En verano o en cargas "
                        "sostenidas entrará en throttling. Limpieza y pasta térmica devuelven "
