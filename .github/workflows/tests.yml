@@ -8,8 +8,11 @@ on:
 
 jobs:
   test:
-    # Los tests no tocan el registro ni WMI —todo va por fixtures— así que se
-    # ejecutan igual en Linux, que arranca mucho más rápido.
+    # Los tests no tocan el registro ni WMI —todo va por fixtures— así que la
+    # mayoría se ejecutan igual en Linux, que arranca mucho más rápido. La
+    # excepción son los que miran el aviso de UAC y la tubería con nombre: eso
+    # es de Windows y fuera de él se omite, con `FueraDeWindows` afirmando a
+    # cambio que el atajo hace lo correcto. Lo cubre de verdad el job de abajo.
     #
     # La matriz empieza en 3.9 porque es la mínima que prometen el README y
     # `quilate.py`. Hasta ahora empezaba en 3.10, así que la versión mínima era
