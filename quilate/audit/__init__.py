@@ -1,88 +1,36 @@
-"""Auditoria del sistema: comprobaciones de configuracion y hallazgos."""
+"""Auditoria del sistema: comprobaciones de configuracion y hallazgos.
+
+La fachada del paquete. Reexporta lo que el resto del programa importa de
+`audit` —el vocabulario de `modelo`, y el `Auditor` que se arma aquí— para que
+dividir esto por dentro no obligue a tocar ni un import de fuera.
+"""
 
 from __future__ import annotations
 
 import os
 import re
 import statistics
-from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
 import psutil
 
-from .benchmark import Benchmark
-from .sensors import cpu_temperature, gpu_temperature, temperature_report, temperature_source
-from .storage_scan import ScanResult, candidate_bytes
-from .console import C, human_bytes, section, spinner_done, spinner_step
-from .const import IS_LINUX, IS_WINDOWS
-from . import elevacion
-from .platform_utils import (_sys_exe, boot_performance, pending_driver_updates,
-                             pending_security_updates, ps_json, reg_key_readable,
-                             reg_list_values, reg_read, run_cmd, winreg)
-from .network import WIFI_TECHO, wifi_capability
-from .sysinfo import (KIND_LABELS, SystemInfo, _parse_cim_date, local_volumes,
-                      primary_gpu)
+from ..benchmark import Benchmark
+from ..sensors import cpu_temperature, gpu_temperature, temperature_report, temperature_source
+from ..storage_scan import ScanResult, candidate_bytes
+from ..console import C, human_bytes, section, spinner_done, spinner_step
+from ..const import IS_LINUX, IS_WINDOWS
+from .. import elevacion
+from ..platform_utils import (_sys_exe, boot_performance, pending_driver_updates,
+                              pending_security_updates, ps_json, reg_key_readable,
+                              reg_list_values, reg_read, run_cmd, winreg)
+from ..network import WIFI_TECHO, wifi_capability
+from ..sysinfo import (KIND_LABELS, SystemInfo, _parse_cim_date, local_volumes,
+                       primary_gpu)
 
-
-class SinDato(Exception):
-    """La comprobación no pudo leer lo que necesitaba para opinar.
-
-    Existe porque devolver un mensaje neutro cuando falta el dato hace que el
-    informe dé por bueno algo que nadie ha llegado a mirar. Es el mismo error
-    de fondo que leer la velocidad nominal de la RAM en vez de la real, pero
-    aplicado al propio veredicto: sin dato no hay veredicto, y decirlo es la
-    única respuesta honesta.
-    """
-
-
-class NoAplica(Exception):
-    """La comprobación no tiene sentido en este equipo.
-
-    TRIM en un disco mecánico o la desfragmentación en un SSD no son datos que
-    falten: son preguntas que no procede hacer. No cuentan como pendientes.
-    """
-
-
-SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-
-# Los identificadores de hallazgo acaban en un `id=` del HTML y en un enlace que
-# apunta a él, sin pasar por `_e()`. Restringirlos aquí convierte esa convención
-# en una garantía: ver `Auditor.add`.
-_ID_VALIDO = re.compile(r"^[a-z0-9_]+$")
-
-# Los otros dos campos de conjunto cerrado. Se declaran igual que la severidad y
-# por el mismo motivo: acaban interpolados en el `.ps1` que se ejecuta como
-# Administrador, dentro de unas comillas dobles donde una comilla parte la cadena.
-# `gain_note` no puede entrar aquí —es prosa libre— y se escapa en su destino.
-_ESFUERZOS = ("bajo", "medio", "alto")
-_RIESGOS = ("nulo", "bajo", "medio", "alto")
-
-SEVERITY_TEXT = {"critical": "CRÍTICO", "high": "ALTO", "medium": "MEDIO",
-                 "low": "BAJO", "info": "INFO"}
-SEVERITY_COLOR = {"critical": "RED", "high": "RED", "medium": "YELLOW",
-                  "low": "CYAN", "info": "GREY"}
-
-
-# La categoría que no promete velocidad. Va aparte en las tres salidas.
-SEGURIDAD = "seguridad"
-
-
-def security_findings(findings: list[Finding]) -> list[Finding]:
-    """Los hallazgos de seguridad, del más grave al menos.
-
-    Van en un bloque propio y no en el plan de acción a propósito. El plan
-    ordena por retorno estimado dividido por esfuerzo y lo dice por escrito en
-    su encabezado; estos hallazgos no dan retorno —cifrar el disco no acelera
-    nada— así que meterlos ahí obligaría o a mentir sobre el criterio de orden,
-    o a enseñar un «+0%» en una columna de ganancia, que se lee como un error.
-
-    Son dos cosas que se miden con reglas distintas: una da rendimiento, la otra
-    evita un disgusto. Separarlas es lo único que permite ordenar cada una por
-    lo que de verdad importa en ella, que aquí es la severidad y nada más.
-    """
-    return sorted([f for f in findings if f.category == SEGURIDAD],
-                  key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.title))
+from .modelo import (SEGURIDAD, SEVERITY_COLOR, SEVERITY_ORDER, SEVERITY_TEXT,
+                     Finding, NoAplica, SinDato, _ESFUERZOS, _ID_VALIDO,
+                     _RIESGOS, security_findings, sev_label)
 
 
 # `productState` es un entero de 32 bits que el Centro de seguridad de Windows
@@ -145,28 +93,6 @@ _PNP_DELIBERADO = frozenset({22, 32, 45, 47})
 # Cinco años. Por debajo hay demasiado driver que sencillamente está terminado y
 # no necesita más versiones: un lector de tarjetas de 2022 funciona igual hoy.
 _DRIVER_VIEJO_DIAS = round(5 * 365.25)
-
-
-def sev_label(severity: str) -> str:
-    """Se resuelve en tiempo de ejecución: si los colores están desactivados
-    (--no-color o salida redirigida) no se cuelan códigos ANSI en el informe."""
-    color = getattr(C, SEVERITY_COLOR.get(severity, "GREY"), "")
-    return f"{color}{SEVERITY_TEXT.get(severity, severity.upper())}{C.RESET}"
-
-
-@dataclass
-class Finding:
-    id: str
-    title: str
-    severity: str
-    category: str            # arranque | fluidez | almacenamiento | térmico | memoria | cpu | dispositivos | seguridad
-    component: str           # cpu_single | cpu_multi | memory | disk | system
-    detail: str
-    gain: float              # mejora estimada (fracción, 0.10 = 10%)
-    gain_note: str
-    effort: str              # bajo | medio | alto
-    risk: str                # nulo | bajo | medio | alto
-    steps: list[str] = field(default_factory=list)
 
 
 class Auditor:
