@@ -16,6 +16,17 @@ Solo stdlib. Nada de aquí sabe que existe un `Auditor`.
 
 from __future__ import annotations
 
+
+def _clave(valor):
+    """Un valor de Windows listo para buscarlo en una de estas tablas.
+
+    El texto se normaliza —PowerShell devuelve «Enabled», «enabled» y a veces
+    con espacios—; lo que no es texto se deja tal cual, porque los enteros de
+    las enumeraciones se buscan por su valor.
+    """
+    return valor.strip().lower() if isinstance(valor, str) else valor
+
+
 # --- Antivirus ----------------------------------------------------------------
 # `productState` es un entero de 32 bits que el Centro de seguridad de Windows
 # no documenta en ninguna parte oficial, pero cuyo reparto es estable desde
@@ -95,6 +106,19 @@ _SUCIO = ("dirty", "sucio", "sujo", "verschmutzt", "sporco", "vuil")
 # de aviso que hace que se deje de leer el informe entero.
 _CIFRADO_SI = {1, "1", "on", "fullyencrypted"}
 _CIFRADO_NO = {0, "0", "off", "fullydecrypted"}
+
+
+# --- Cortafuegos --------------------------------------------------------------
+# `Get-NetFirewallProfile` devuelve `Enabled` como la enumeración GpoBoolean,
+# que `ConvertTo-Json` serializa unas veces como entero y otras por nombre.
+# Mismo criterio que en BitLocker: lo que no encaje no se interpreta.
+_FIREWALL_ACTIVO = {1: True, "1": True, "true": True, "enabled": True,
+                    0: False, "0": False, "false": False, "notconfigured": False}
+
+# Los perfiles donde no hay nada más entre el equipo e internet. Dominio queda
+# fuera: aplica en redes de empresa, donde suele haber politica central y un
+# cortafuegos perimetral delante.
+_PERFILES_EXPUESTOS = frozenset({"public", "private", "público", "publico", "privado"})
 
 
 # --- SMB1 ---------------------------------------------------------------------

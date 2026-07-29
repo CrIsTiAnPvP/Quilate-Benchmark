@@ -19,8 +19,9 @@ from datetime import date, datetime
 from .. import elevacion
 from ..platform_utils import pending_security_updates, ps_json
 from .modelo import SEGURIDAD, NoAplica, SinDato
-from .tablas import (_CIFRADO_NO, _CIFRADO_SI, _MSRC_GRAVES, _MSRC_SERIAS,
-                     _SMB1_ACTIVO, _SMB1_INACTIVO, _estado_antivirus)
+from .tablas import (_CIFRADO_NO, _CIFRADO_SI, _FIREWALL_ACTIVO, _MSRC_GRAVES,
+                     _MSRC_SERIAS, _PERFILES_EXPUESTOS, _SMB1_ACTIVO,
+                     _SMB1_INACTIVO, _clave, _estado_antivirus)
 
 
 class ChecksSeguridad:
@@ -287,6 +288,65 @@ class ChecksSeguridad:
                    "Nada de lo que se comparte hoy entre equipos Windows lo necesita"])
         return "ACTIVO"
 
+
+    def check_firewall(self) -> str:
+        """El cortafuegos de Windows, perfil por perfil.
+
+        No basta con «está encendido»: Windows tiene tres perfiles y aplica el
+        de la red a la que estés conectado. Un portátil con el perfil Público
+        desactivado va sin cortafuegos en la wifi del aeropuerto y con él en
+        casa, y desde el panel de control eso se ve como dos de tres en verde.
+
+        Público y Privado pesan más que Dominio a propósito. Dominio solo
+        aplica en una red corporativa con controlador, donde casi siempre hay
+        una política central que lo gestiona y un cortafuegos perimetral
+        delante; los otros dos son la red de casa y la del bar.
+        """
+        rows = ps_json("Get-NetFirewallProfile -ErrorAction SilentlyContinue | "
+                       "Select-Object Name,Enabled")
+        if not getattr(rows, "ok", True):
+            raise SinDato(f"no se ha podido consultar el cortafuegos ({rows.error})")
+        if not rows:
+            raise SinDato("Windows no ha informado de ningún perfil de cortafuegos")
+
+        apagados = []
+        for fila in rows:
+            activo = _FIREWALL_ACTIVO.get(_clave(fila.get("Enabled")))
+            if activo is None:
+                # Un valor que no se reconoce no es un perfil apagado: callarse
+                # es lo único honesto, igual que en `_estado_cifrado`.
+                raise SinDato(f"estado de cortafuegos no reconocido en el perfil "
+                              f"«{fila.get('Name')}»: «{fila.get('Enabled')}»")
+            if not activo:
+                apagados.append(str(fila.get("Name") or "?"))
+        if not apagados:
+            return f"activo en los {len(rows)} perfiles"
+
+        expuestos = [p for p in apagados if p.strip().lower() in _PERFILES_EXPUESTOS]
+        cuales = ", ".join(apagados)
+        self.add(
+            id="firewall_off",
+            title=f"El cortafuegos está desactivado ({cuales})",
+            severity="high" if expuestos else "medium",
+            category=SEGURIDAD, component="system",
+            detail="El cortafuegos de Windows decide qué puede conectarse a este equipo desde "
+                   "la red. Windows aplica un perfil distinto según dónde estés, así que tenerlo "
+                   "apagado en uno solo ya deja el equipo descubierto en esas redes."
+                   + (" Los perfiles Público y Privado son la wifi de un aeropuerto y la red de "
+                      "casa: ahí no hay nada más entre este equipo e internet."
+                      if expuestos else
+                      " Solo está apagado el perfil de Dominio, que se usa en redes de empresa "
+                      "donde suele haber una política central y un cortafuegos perimetral "
+                      "delante. Conviene mirarlo, pero no es lo mismo."),
+            gain=0.0,
+            gain_note="no es una optimización: es lo que filtra lo que entra por la red",
+            effort="bajo", risk="bajo",
+            steps=["Seguridad de Windows → Firewall y protección de red",
+                   "Activa el cortafuegos en los perfiles que aparezcan apagados",
+                   "Si lo apagó un programa —algunas VPN y antivirus lo hacen— revisa que "
+                   "ese programa siga instalado y siga filtrando por su cuenta",
+                   "Nunca lo dejes apagado «para que funcione algo»: abre la regla concreta"])
+        return f"DESACTIVADO en {cuales}"
 
     def check_local_accounts(self) -> str:
         rows = ps_json(

@@ -434,6 +434,84 @@ class ProteccionEnTiempoReal(unittest.TestCase):
                 a.check_antivirus()
 
 
+class Cortafuegos(unittest.TestCase):
+    """Tres perfiles, no uno.
+
+    Windows aplica el perfil de la red a la que estés conectado. Un portátil
+    con el perfil Público apagado va sin cortafuegos en la wifi del aeropuerto
+    y con él en casa, y desde el panel de control eso se ve como dos de tres en
+    verde. Por eso Público y Privado pesan más que Dominio, que solo aplica en
+    una red de empresa donde suele haber una política central delante.
+    """
+
+    def _auditar(self, perfiles):
+        a = Auditor(SystemInfo(), None)
+        with patched(audit.seguridad, ps_json=lambda *a_, **k: perfiles):
+            return a, a.check_firewall()
+
+    def perfil(self, nombre, activo=1):
+        return {"Name": nombre, "Enabled": activo}
+
+    def todos(self, activo=1):
+        return [self.perfil(n, activo) for n in ("Domain", "Private", "Public")]
+
+    def test_los_tres_activos_no_generan_nada(self):
+        a, resumen = self._auditar(self.todos())
+        self.assertEqual(a.findings, [])
+        self.assertIn("3 perfiles", resumen)
+
+    def test_publico_apagado_es_grave(self):
+        a, _ = self._auditar([self.perfil("Domain"), self.perfil("Private"),
+                              self.perfil("Public", 0)])
+        self.assertEqual([f.id for f in a.findings], ["firewall_off"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("high", SEGURIDAD, 0.0))
+        self.assertIn("Public", f.title)
+
+    def test_privado_apagado_tambien_es_grave(self):
+        a, _ = self._auditar([self.perfil("Domain"), self.perfil("Private", 0),
+                              self.perfil("Public")])
+        self.assertEqual(a.findings[0].severity, "high")
+
+    def test_solo_dominio_apagado_es_medio(self):
+        # No es lo mismo: en una red con controlador suele haber politica
+        # central y un cortafuegos perimetral delante.
+        a, _ = self._auditar([self.perfil("Domain", 0), self.perfil("Private"),
+                              self.perfil("Public")])
+        self.assertEqual(a.findings[0].severity, "medium")
+        self.assertIn("Dominio", a.findings[0].detail)
+
+    def test_los_apagados_se_nombran_todos(self):
+        a, resumen = self._auditar(self.todos(activo=0))
+        for nombre in ("Domain", "Private", "Public"):
+            self.assertIn(nombre, a.findings[0].title)
+            self.assertIn(nombre, resumen)
+
+    def test_acepta_las_dos_formas_de_contestar(self):
+        # `ConvertTo-Json` serializa la enumeración GpoBoolean unas veces como
+        # entero y otras por nombre, según la versión de PowerShell.
+        for apagado in (0, "0", False, "False", "NotConfigured"):
+            with self.subTest(valor=apagado):
+                a, _ = self._auditar([self.perfil("Public", apagado)])
+                self.assertEqual([f.id for f in a.findings], ["firewall_off"])
+        for encendido in (1, "1", True, "True", "Enabled"):
+            with self.subTest(valor=encendido):
+                a, _ = self._auditar([self.perfil("Public", encendido)])
+                self.assertEqual(a.findings, [])
+
+    def test_un_estado_desconocido_no_acusa_a_nadie(self):
+        with self.assertRaises(SinDato):
+            self._auditar([self.perfil("Public", "QuizasQuizas")])
+
+    def test_sin_respuesta_es_sin_dato(self):
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult((), ok=False, error="no existe el cmdlet"))
+
+    def test_una_lista_vacia_no_es_un_equipo_sin_cortafuegos(self):
+        with self.assertRaises(SinDato):
+            self._auditar([])
+
+
 class CifradoDelDisco(unittest.TestCase):
     """BitLocker, y sobre todo cuándo NO hay que opinar.
 

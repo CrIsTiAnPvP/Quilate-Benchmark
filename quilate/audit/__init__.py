@@ -147,6 +147,7 @@ class Auditor(ChecksRendimiento, ChecksSeguridad,
                 ("Arranque seguro (Secure Boot)", self.check_secure_boot),
                 ("Chip TPM", self.check_tpm),
                 ("Protocolo SMB1", self.check_smb1),
+                ("Cortafuegos de Windows", self.check_firewall),
                 ("Cuentas locales sin contraseña", self.check_local_accounts),
             ]
             # Detrás de un flag, igual que --check-drivers y por lo mismo: la
