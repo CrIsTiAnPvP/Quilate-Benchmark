@@ -9,10 +9,15 @@ umbrales, no que el esquema real coincida — para eso hace falta un volcado con
 privilegios de administrador.
 """
 
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
 from quilate import audit
+from quilate.export.html_export import export_html
 from quilate.platform_utils import PSResult
+from quilate.projection import project_improvement
 from quilate.sysinfo import SystemInfo
 from tests.support import FixtureCase, patched
 
@@ -208,6 +213,54 @@ class EsquemaInesperado(FixtureCase):
                                           "DegradationTime": "6000"}}])
         hallazgo = next(f for f in a.findings if f.id == "boot_slow")
         self.assertIn("PorNombreAmable", hallazgo.detail)
+
+
+class ElInformeAguantaUnRetrasoMalDeclarado(FixtureCase):
+    """Un campo con texto donde iban milisegundos no puede tirar la exportación.
+
+    `check_boot_time` ya descartaba esos valores con `_event_ms`, pero el HTML
+    reimplementaba el parseo con `float()` a pelo y sin guarda, sobre los mismos
+    datos crudos del log. El resultado era que un solo elemento de arranque mal
+    declarado dejaba al usuario sin informe entero, con traza, después de haber
+    ejecutado el benchmark completo.
+    """
+
+    def _exportar(self, delays):
+        si = SystemInfo()
+        si.is_admin = True
+        with patched(audit, boot_performance=lambda *a, **k: informe(
+                [arranque(95_000)], delays)):
+            a = self.auditor(si)
+            a.check_boot_time()
+        destino = Path(tempfile.mkdtemp()) / "informe.html"
+        self.addCleanup(shutil.rmtree, destino.parent, True)
+        export_html(destino, si, None, a, project_improvement(None, a.findings))
+        return destino.read_text(encoding="utf-8")
+
+    def test_un_totaltime_con_texto_no_tira_el_informe(self):
+        html = self._exportar([
+            retraso("ElBueno", 9000),
+            {"time": "t", "kind": "aplicación",
+             "fields": {"Name": "ElRoto", "TotalTime": "n/d"}}])
+        # El informe existe, que es lo que estaba en juego.
+        self.assertIn("Arranque medido por Windows", html)
+        # Y el retraso legible sigue ahí con su cifra: descartar el malo no
+        # puede llevarse por delante al resto de la tabla.
+        self.assertIn("ElBueno", html)
+        self.assertIn("9.0 s", html)
+
+    def test_el_retraso_ilegible_no_se_pinta_como_cero(self):
+        html = self._exportar([
+            retraso("ElBueno", 9000),
+            {"time": "t", "kind": "aplicación",
+             "fields": {"Name": "ElRoto", "TotalTime": "n/d"}}])
+        self.assertNotIn("ElRoto", html)
+
+    def test_todos_ilegibles_deja_la_tabla_vacia_sin_reventar(self):
+        html = self._exportar([{"time": "t", "kind": "aplicación",
+                                "fields": {"Name": "ElRoto", "TotalTime": ""}}])
+        self.assertIn("Arranque medido por Windows", html)
+        self.assertNotIn("Lo que más lo retrasa", html)
 
 
 if __name__ == "__main__":

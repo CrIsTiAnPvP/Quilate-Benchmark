@@ -1784,18 +1784,23 @@ def _system_state_block(auditor: Auditor, bench: Benchmark | None) -> str:
                              if str(b["fields"].get("BootIsRebootAfterInstall") or "0") != "1"])
             cuerpo = (f'<div class="kvs"><div class="k">Duración</div>'
                       f"<div><b>{segundos:.0f} s</b> de mediana sobre {arranques} arranques</div>")
+            # El mismo lector que usa la auditoría, y por el mismo motivo: los
+            # campos vienen de un XML del registro de eventos y uno puede llegar
+            # vacío o con texto donde debería haber milisegundos. `_event_ms`
+            # descarta lo que no sea un número en vez de reventar el informe
+            # entero por un elemento de arranque mal declarado.
             retrasos = sorted(
                 ((str(d["fields"].get("Name") or d["fields"].get("FriendlyName") or ""),
-                  d["fields"].get("TotalTime") or d["fields"].get("DegradationTime"),
+                  Auditor._event_ms(d["fields"], "TotalTime", "DegradationTime"),
                   d.get("kind") or "") for d in boot.get("delays", [])),
-                key=lambda x: -float(x[1] or 0))
+                key=lambda x: -(x[1] or 0.0))
             vistos, filas = set(), ""
             for nombre, ms, tipo in retrasos:
                 if not nombre or nombre in vistos or not ms:
                     continue
                 vistos.add(nombre)
                 filas += (f"<tr><td>{_e(nombre)}</td><td>{_e(tipo)}</td>"
-                          f"<td>{float(ms) / 1000:.1f} s</td></tr>")
+                          f"<td>{ms / 1000:.1f} s</td></tr>")
                 if len(vistos) >= 12:
                     break
             cuerpo += "</div>"
