@@ -35,7 +35,7 @@ from quilate.export.html_export import export_html
 from quilate.export.plan_export import export_plan
 from quilate.projection import project_improvement, priority_rank
 from quilate.sysinfo import SystemInfo
-from tests.support import patched
+from tests.support import fuente_completa, patched
 
 
 def riesgo(id_: str, severity: str = "high", title: str = "") -> Finding:
@@ -777,7 +777,7 @@ class LoQueLasSalidasNoEscapan(unittest.TestCase):
     def test_todos_los_hallazgos_del_auditor_cumplen(self):
         # Sobre el código, no sobre lo que los tests ejerciten: una comprobación
         # que solo salta en un equipo concreto no puede reventar allí.
-        fuente = inspect.getsource(audit)
+        fuente = fuente_completa(audit)
         for identificador in re.findall(r'id="([^"]+)"', fuente):
             with self.subTest(id=identificador):
                 self.assertRegex(identificador, r"^[a-z0-9_]+$")
