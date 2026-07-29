@@ -121,6 +121,14 @@ _FIREWALL_ACTIVO = {1: True, "1": True, "true": True, "enabled": True,
 _PERFILES_EXPUESTOS = frozenset({"public", "private", "público", "publico", "privado"})
 
 
+# --- Escritorio remoto --------------------------------------------------------
+# Dos valores del registro y ningún privilegio. `fDenyTSConnections` vale 0
+# cuando RDP acepta conexiones —la doble negación es de Microsoft, no nuestra— y
+# `UserAuthentication` vale 1 cuando se exige NLA.
+_RDP_CLAVE = r"SYSTEM\CurrentControlSet\Control\Terminal Server"
+_RDP_TCP_CLAVE = _RDP_CLAVE + r"\WinStations\RDP-Tcp"
+
+
 # --- SMB1 ---------------------------------------------------------------------
 _SMB1_ACTIVO = {1, "enabled"}
 _SMB1_INACTIVO = {2, "disabled", "disabledwithpayloadremoved"}

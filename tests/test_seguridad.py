@@ -29,13 +29,14 @@ from quilate import audit
 from quilate.audit import (SEGURIDAD, SEVERITY_ORDER, Auditor, Finding, NoAplica,
                            SinDato, _ESFUERZOS, _RIESGOS, _estado_antivirus,
                            security_findings)
+from quilate.audit.tablas import _RDP_CLAVE, _RDP_TCP_CLAVE
 from quilate.const import IS_WINDOWS
 from quilate.platform_utils import PSResult, _system_drive
 from quilate.export.html_export import export_html
 from quilate.export.plan_export import export_plan
 from quilate.projection import project_improvement, priority_rank
 from quilate.sysinfo import SystemInfo
-from tests.support import fuente_completa, patched
+from tests.support import FakeRegistry, fuente_completa, patched
 
 
 def riesgo(id_: str, severity: str = "high", title: str = "") -> Finding:
@@ -510,6 +511,142 @@ class Cortafuegos(unittest.TestCase):
     def test_una_lista_vacia_no_es_un_equipo_sin_cortafuegos(self):
         with self.assertRaises(SinDato):
             self._auditar([])
+
+
+class EscritorioRemoto(unittest.TestCase):
+    """Dos preguntas distintas: si RDP está abierto, y si autentica primero.
+
+    Que RDP esté activo no es un fallo —hay quien lo usa a diario— pero sí una
+    puerta que mucha gente tiene abierta sin saberlo. Lo que sí es un fallo es
+    tenerlo activo sin NLA: sin autenticación a nivel de red, Windows levanta la
+    sesión antes de saber quién llama, que es la condición de BlueKeep.
+    """
+
+    def _auditar(self, deny=None, nla=None):
+        arbol = {}
+        if deny is not None:
+            arbol[f"HKLM\\{_RDP_CLAVE}"] = {"fDenyTSConnections": deny}
+        if nla is not None:
+            arbol[f"HKLM\\{_RDP_TCP_CLAVE}"] = {"UserAuthentication": nla}
+        a = Auditor(SystemInfo(), None)
+        with patched(audit.seguridad, registry=FakeRegistry(arbol)):
+            return a, a.check_escritorio_remoto()
+
+    def test_desactivado_no_genera_nada(self):
+        a, resumen = self._auditar(deny=1)
+        self.assertEqual(a.findings, [])
+        self.assertIn("desactivado", resumen)
+
+    def test_activo_con_nla_es_un_aviso_leve(self):
+        a, _ = self._auditar(deny=0, nla=1)
+        self.assertEqual([f.id for f in a.findings], ["rdp_activo"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("low", SEGURIDAD, 0.0))
+
+    def test_activo_sin_nla_es_grave(self):
+        a, resumen = self._auditar(deny=0, nla=0)
+        self.assertEqual([f.id for f in a.findings], ["rdp_sin_nla"])
+        self.assertEqual(a.findings[0].severity, "high")
+        self.assertIn("BlueKeep", a.findings[0].detail)
+        self.assertIn("sin NLA", resumen)
+
+    def test_sin_el_valor_de_nla_se_trata_como_que_no_lo_exige(self):
+        # Ausente equivale a no exigirlo, y se dice en el detalle en vez de
+        # dejar al usuario suponiendo.
+        a, _ = self._auditar(deny=0)
+        self.assertEqual([f.id for f in a.findings], ["rdp_sin_nla"])
+        self.assertIn("no está en el registro", a.findings[0].detail)
+
+    def test_sin_poder_leer_la_rama_es_sin_dato(self):
+        # El valor existe en cualquier Windows de escritorio: que no esté
+        # significa que no se ha podido leer, no que RDP esté apagado.
+        with self.assertRaises(SinDato):
+            self._auditar()
+
+    def test_no_lanza_ningun_proceso(self):
+        # Dos valores del registro: ni PowerShell ni privilegios.
+        fuente = inspect.getsource(Auditor.check_escritorio_remoto)
+        self.assertNotIn("ps_json", fuente)
+        self.assertNotIn("elevacion", fuente)
+
+
+class CuentaAdministradorDeFabrica(unittest.TestCase):
+    """La del RID -500, reconocida por SID y nunca por nombre.
+
+    «Administrador», «Administrator» y el nombre que le haya puesto quien la
+    renombrase son la misma cuenta. Buscarla por texto falla en cuanto el
+    Windows no está en inglés, que es el error que documenta
+    `check_filesystem_health`.
+    """
+
+    def _auditar(self, cuentas):
+        respuesta = cuentas if isinstance(cuentas, PSResult) else PSResult(cuentas)
+        a = Auditor(SystemInfo(), None)
+        with patched(audit.seguridad, ps_json=lambda *a_, **k: respuesta):
+            return a, a.check_cuenta_administrador()
+
+    def cuenta(self, nombre, sid, habilitada=True):
+        return {"disponible": True, "Name": nombre, "SID": sid,
+                "Enabled": habilitada, "PasswordRequired": True}
+
+    def test_deshabilitada_es_lo_normal(self):
+        a, resumen = self._auditar([self.cuenta("Administrador", "S-1-5-21-1-2-3-500",
+                                                habilitada=False)])
+        self.assertEqual(a.findings, [])
+        self.assertIn("de fábrica", resumen)
+
+    def test_habilitada_es_un_hallazgo(self):
+        a, _ = self._auditar([self.cuenta("Administrador", "S-1-5-21-1-2-3-500")])
+        self.assertEqual([f.id for f in a.findings], ["admin_integrado_activo"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("medium", SEGURIDAD, 0.0))
+
+    def test_se_reconoce_aunque_este_renombrada(self):
+        # Es lo que gana identificarla por SID: renombrarla no la esconde.
+        a, _ = self._auditar([self.cuenta("Paco", "S-1-5-21-1-2-3-500")])
+        self.assertEqual([f.id for f in a.findings], ["admin_integrado_activo"])
+        self.assertIn("Paco", a.findings[0].title)
+
+    def test_una_cuenta_que_se_llame_administrador_no_cuela(self):
+        # Al revés que lo anterior: el nombre no basta para acusar. Una cuenta
+        # creada a mano y llamada «Administrador» no es la del RID -500.
+        a, _ = self._auditar([self.cuenta("Administrador", "S-1-5-21-1-2-3-1001")])
+        self.assertEqual(a.findings, [])
+
+    def test_un_sid_que_acabe_en_500_de_otro_modo_no_confunde(self):
+        for sid in ("S-1-5-21-1-2-3-1500", "S-1-5-21-1-2-3-5000"):
+            with self.subTest(sid=sid):
+                a, _ = self._auditar([self.cuenta("X", sid)])
+                self.assertEqual(a.findings, [])
+
+    def test_sin_sid_no_se_opina(self):
+        # Distinto de «los SID han llegado y la integrada no está entre ellos»:
+        # aquí no se ha podido identificar a nadie, así que no se afirma nada.
+        for cuentas in ([{"disponible": True, "Name": "A", "Enabled": True}],
+                        [self.cuenta("A", "")],
+                        [self.cuenta("A", None)]):
+            with self.subTest(cuentas=cuentas):
+                with self.assertRaises(SinDato):
+                    self._auditar(cuentas)
+
+    def test_en_un_windows_sin_el_cmdlet_no_aplica(self):
+        with self.assertRaises(NoAplica):
+            self._auditar([{"disponible": False}])
+
+    def test_comparte_la_consulta_con_las_cuentas_sin_contrasena(self):
+        # Coste marginal cero: es la misma respuesta, pedida una sola vez.
+        llamadas = []
+
+        def contar(*a_, **k):
+            llamadas.append(1)
+            return PSResult([self.cuenta("Administrador", "S-1-5-21-1-2-3-500",
+                                         habilitada=False)])
+
+        a = Auditor(SystemInfo(), None)
+        with patched(audit.seguridad, ps_json=contar):
+            a.check_local_accounts()
+            a.check_cuenta_administrador()
+        self.assertEqual(len(llamadas), 1, "se ha lanzado Get-LocalUser dos veces")
 
 
 class CifradoDelDisco(unittest.TestCase):

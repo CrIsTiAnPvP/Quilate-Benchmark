@@ -62,6 +62,8 @@ class Auditor(ChecksRendimiento, ChecksSeguridad,
         # mismo que «rápido»: el log pide privilegios de administrador.
         self.boot_report: dict = {}
         self.boot_seconds: float | None = None
+        # `Get-LocalUser` la piden dos comprobaciones seguidas. Se lanza una vez.
+        self._cuentas = None
 
 
     def add(self, **kwargs) -> None:
@@ -148,7 +150,9 @@ class Auditor(ChecksRendimiento, ChecksSeguridad,
                 ("Chip TPM", self.check_tpm),
                 ("Protocolo SMB1", self.check_smb1),
                 ("Cortafuegos de Windows", self.check_firewall),
+                ("Escritorio remoto (RDP)", self.check_escritorio_remoto),
                 ("Cuentas locales sin contraseña", self.check_local_accounts),
+                ("Cuenta Administrador de fábrica", self.check_cuenta_administrador),
             ]
             # Detrás de un flag, igual que --check-drivers y por lo mismo: la
             # consulta a Windows Update tarda entre 10 y 30 segundos. No se

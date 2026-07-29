@@ -17,11 +17,12 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from .. import elevacion
-from ..platform_utils import pending_security_updates, ps_json
+from ..platform_utils import pending_security_updates, ps_json, reg_read, winreg
 from .modelo import SEGURIDAD, NoAplica, SinDato
 from .tablas import (_CIFRADO_NO, _CIFRADO_SI, _FIREWALL_ACTIVO, _MSRC_GRAVES,
-                     _MSRC_SERIAS, _PERFILES_EXPUESTOS, _SMB1_ACTIVO,
-                     _SMB1_INACTIVO, _clave, _estado_antivirus)
+                     _MSRC_SERIAS, _PERFILES_EXPUESTOS, _RDP_CLAVE,
+                     _RDP_TCP_CLAVE, _SMB1_ACTIVO, _SMB1_INACTIVO, _clave,
+                     _estado_antivirus)
 
 
 class ChecksSeguridad:
@@ -348,18 +349,145 @@ class ChecksSeguridad:
                    "Nunca lo dejes apagado «para que funcione algo»: abre la regla concreta"])
         return f"DESACTIVADO en {cuales}"
 
-    def check_local_accounts(self) -> str:
-        rows = ps_json(
-            "$( if (-not (Get-Command Get-LocalUser -ErrorAction SilentlyContinue)) {"
-            "     [PSCustomObject]@{ disponible = $false } } else {"
-            "     Get-LocalUser | Select-Object @{n='disponible';e={$true}},"
-            "       Name,Enabled,PasswordRequired } )")
+    def check_escritorio_remoto(self) -> str:
+        """Si el equipo acepta conexiones de Escritorio remoto, y con qué puerta.
+
+        Se lee del registro y no con PowerShell: son dos valores, no cuesta un
+        proceso nuevo y no hace falta ningún privilegio.
+
+        Las dos preguntas no son la misma. Que RDP esté activo no es un fallo
+        —hay quien lo usa a diario— pero sí es una superficie expuesta que
+        mucha gente tiene encendida sin saberlo, porque la activó un programa
+        de asistencia remota y nadie la volvió a apagar. Lo que sí es un fallo
+        es tenerlo activo **sin NLA**: sin autenticación a nivel de red, el
+        equipo levanta una sesión y pinta la pantalla de acceso antes de saber
+        quién llama, que es justo lo que explotó BlueKeep.
+        """
+        denegado = reg_read(winreg.HKEY_LOCAL_MACHINE, _RDP_CLAVE, "fDenyTSConnections")
+        if denegado is None:
+            # El valor existe en cualquier Windows de escritorio. Que no esté
+            # significa que no se ha podido leer la rama, no que RDP esté
+            # apagado: dar por buena su ausencia sería el error de siempre.
+            raise SinDato("no se ha podido leer la configuración de Escritorio remoto")
+        if denegado != 0:
+            return "desactivado"
+
+        nla = reg_read(winreg.HKEY_LOCAL_MACHINE, _RDP_TCP_CLAVE, "UserAuthentication")
+        if nla == 1:
+            self.add(
+                id="rdp_activo",
+                title="Escritorio remoto activo (con autenticación previa)",
+                severity="low", category=SEGURIDAD, component="system",
+                detail="Este equipo acepta conexiones de Escritorio remoto. No está mal "
+                       "configurado —exige autenticación antes de abrir sesión— pero es una "
+                       "puerta abierta, y mucha gente la tiene encendida sin saberlo porque la "
+                       "activó un programa de asistencia remota que nadie volvió a apagar. Si no "
+                       "lo usas, ciérralo; si lo usas, que no sea directamente desde internet.",
+                gain=0.0,
+                gain_note="no es una optimización: es una puerta de entrada al equipo",
+                effort="bajo", risk="bajo",
+                steps=["Si no lo usas: Configuración → Sistema → Escritorio remoto → desactivar",
+                       "Si lo usas, no abras el puerto 3389 en el router: entra por VPN",
+                       "Revisa quién está en el grupo «Usuarios de escritorio remoto»"])
+            return "activo (con NLA)"
+
+        self.add(
+            id="rdp_sin_nla",
+            title="Escritorio remoto activo y sin autenticación a nivel de red",
+            severity="high", category=SEGURIDAD, component="system",
+            detail="El equipo acepta conexiones de Escritorio remoto y no exige NLA "
+                   "(autenticación a nivel de red). Sin NLA, Windows levanta una sesión y pinta "
+                   "la pantalla de acceso ANTES de saber quién está llamando: cualquiera que "
+                   "alcance el puerto consume recursos del equipo sin haberse identificado, y es "
+                   "la condición que hizo explotable BlueKeep. Con NLA, quien llama se "
+                   "autentica primero y solo entonces se crea la sesión."
+                   + ("" if nla is not None else
+                      " El valor de NLA no está en el registro, lo que en la práctica equivale a "
+                      "no exigirlo."),
+            gain=0.0,
+            gain_note="no es una optimización: es autenticar antes de abrir la puerta",
+            effort="bajo", risk="bajo",
+            steps=["Configuración → Sistema → Escritorio remoto → activa «Requerir que los "
+                   "equipos usen la autenticación a nivel de red»",
+                   "Si algún cliente antiguo deja de conectar, actualízalo antes que quitar NLA",
+                   "Si no usas Escritorio remoto, desactívalo entero y te ahorras las dos cosas"])
+        return "ACTIVO sin NLA"
+
+    def check_cuenta_administrador(self) -> str:
+        """La cuenta Administrador de fábrica, la del RID -500.
+
+        Se reconoce por el final del SID y no por el nombre: «Administrador»,
+        «Administrator» y el nombre que le haya puesto quien la renombrara son
+        la misma cuenta, y buscarla por texto falla en cuanto el Windows no
+        está en inglés — el error que `check_filesystem_health` documenta.
+
+        Windows la deja deshabilitada de fábrica desde Vista. Encontrarla
+        habilitada significa que alguien la encendió, casi siempre un manual de
+        internet para «arreglar» algo, y lo que queda es una cuenta de
+        administrador con nombre conocido y sin las protecciones de UAC que sí
+        tiene la cuenta de administrador normal.
+        """
+        rows = self._cuentas_locales()
+        con_sid = [r for r in rows if str(r.get("SID") or "").strip()]
+        if not con_sid:
+            # Sin SID no se puede identificar, y por nombre no se busca: es
+            # mejor decir que no se ha mirado que mirar mal.
+            raise SinDato("Windows no ha devuelto el SID de ninguna cuenta local")
+        de_fabrica = [r for r in con_sid
+                      if str(r["SID"]).strip().endswith("-500")]
+        if not de_fabrica:
+            # Distinto del caso de arriba: los SID sí han llegado, y entre ellos
+            # no está la integrada. El riesgo que se busca no existe aquí.
+            return "no aparece la cuenta integrada"
+        cuenta = de_fabrica[0]
+        if cuenta.get("Enabled") is not True:
+            return "deshabilitada, como viene de fábrica"
+        self.add(
+            id="admin_integrado_activo",
+            title=f"La cuenta Administrador de fábrica está habilitada "
+                  f"({cuenta.get('Name')})",
+            severity="medium", category=SEGURIDAD, component="system",
+            detail="Windows trae una cuenta de administrador integrada y la deja deshabilitada "
+                   "desde Vista, por dos motivos: su identificador es el mismo en todos los "
+                   "equipos del mundo —así que quien ataque no tiene que adivinar el nombre— y "
+                   "no pasa por el aviso de UAC, de modo que todo lo que se ejecuta desde ella "
+                   "va con permisos totales y sin preguntar. Que esté habilitada casi siempre "
+                   "viene de un manual de internet para arreglar otra cosa.",
+            gain=0.0,
+            gain_note="no es una optimización: es una cuenta de administrador sin UAC",
+            effort="bajo", risk="medio",
+            steps=["Comprueba antes que tu cuenta habitual es administradora, o te quedas fuera",
+                   "Deshabilítala: Administración de equipos → Usuarios y grupos locales → "
+                   "Administrador → propiedades → «La cuenta está deshabilitada»",
+                   "O desde consola de administrador: `net user Administrador /active:no`",
+                   "Si la usas a diario, crea una cuenta propia de administrador y usa esa"])
+        return "HABILITADA"
+
+    def _cuentas_locales(self):
+        """Las cuentas locales, con su SID. Una sola consulta para las dos
+        comprobaciones que las necesitan.
+
+        `Get-LocalUser` ya se lanzaba para las cuentas sin contraseña; añadirle
+        el SID no cuesta ni un proceso más. Se cachea en la instancia porque
+        `run()` llama a las dos comprobaciones seguidas.
+        """
+        if self._cuentas is None:
+            self._cuentas = ps_json(
+                "$( if (-not (Get-Command Get-LocalUser -ErrorAction SilentlyContinue)) {"
+                "     [PSCustomObject]@{ disponible = $false } } else {"
+                "     Get-LocalUser | Select-Object @{n='disponible';e={$true}},"
+                "       Name,Enabled,PasswordRequired,@{n='SID';e={$_.SID.Value}} } )")
+        rows = self._cuentas
         if not rows.ok:
             raise SinDato(f"no se han podido enumerar las cuentas locales ({rows.error})")
         if not rows:
             raise SinDato("no se ha devuelto ninguna cuenta local")
         if not rows[0].get("disponible"):
             raise NoAplica("este Windows no trae la consulta de cuentas locales")
+        return rows
+
+    def check_local_accounts(self) -> str:
+        rows = self._cuentas_locales()
 
         # Solo las cuentas habilitadas. `Invitado`, `DefaultAccount` y
         # `WDAGUtilityAccount` vienen de fábrica sin exigir contraseña y
