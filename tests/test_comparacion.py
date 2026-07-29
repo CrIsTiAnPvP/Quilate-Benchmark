@@ -9,8 +9,10 @@ buen aspecto.
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -347,16 +349,18 @@ class MensajesParaQuienNoPrograma(unittest.TestCase):
 class NoPoderEscribirElInforme(unittest.TestCase):
     """Tras intentarlo en dos sitios, el usuario merece saber cuáles."""
 
-    def _fallar(self, excepcion) -> str:
-        original = cli.export_html
-        cli.export_html = lambda *a, **k: (_ for _ in ()).throw(excepcion)
+    def _fallar(self, excepcion, kind: str = "html") -> str:
+        funcion = {"html": "export_html", "json": "export_json",
+                   "plan": "export_plan"}[kind]
+        original = getattr(cli, funcion)
+        setattr(cli, funcion, lambda *a, **k: (_ for _ in ()).throw(excepcion))
         C.disable()
         salida = io.StringIO()
         try:
             with redirect_stdout(salida):
-                resultado = cli._write_export("html", None, None, None, {})
+                resultado = cli._write_export(kind, None, None, None, {})
         finally:
-            cli.export_html = original
+            setattr(cli, funcion, original)
         self.assertIsNone(resultado)
         return salida.getvalue()
 
@@ -375,6 +379,23 @@ class NoPoderEscribirElInforme(unittest.TestCase):
         texto = self._fallar(OSError(28, "No queda espacio"))
         self.assertIn("--html", texto)
         self.assertIn("quilate_informe.html", texto)
+
+    def test_la_bandera_que_propone_existe_de_verdad(self):
+        # Proponía `--plan`, que no es ninguna opción de Quilate: quien copiara
+        # el mensaje se llevaba un «unrecognized arguments» encima del fallo que
+        # ya tenía. Se comprueba contra las opciones que declara `parse_args`, y
+        # no contra una lista escrita aquí, para que renombrar una bandera no
+        # deje esto obsoleto en silencio.
+        declaradas = set(re.findall(r'add_argument\(\s*"(--[\w-]+)"',
+                                    inspect.getsource(cli.parse_args)))
+        self.assertIn("--export-plan", declaradas, "el fuente ya no se puede leer así")
+        for kind in ("html", "json", "plan"):
+            with self.subTest(tipo=kind):
+                texto = self._fallar(OSError(28, "No queda espacio"), kind)
+                propuestas = re.findall(r"`(--[\w-]+)", texto)
+                self.assertTrue(propuestas, "el mensaje no propone ninguna bandera")
+                for bandera in propuestas:
+                    self.assertIn(bandera, declaradas)
 
 
 class ExportarPorBandera(unittest.TestCase):

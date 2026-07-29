@@ -414,7 +414,9 @@ def _write_export(kind: str, si, bench, auditor, projection) -> tuple[Path, str]
     # Nombrar las dos ubicaciones intentadas: tras dos fallos, decir solo «no se
     # pudo escribir» deja al usuario sin saber dónde se probó ni qué hacer.
     probadas = "\n".join(f"      · {ruta}" for ruta in seen)
-    bandera = {"html": "--html", "json": "--json", "plan": "--plan"}[kind]
+    # La bandera es «--export-plan», no «--plan»: el mensaje solo sirve si lo
+    # que propone se puede copiar y pegar.
+    bandera = {"html": "--html", "json": "--json", "plan": "--export-plan"}[kind]
     print(f"{C.RED}✗{C.RESET}\n    No se ha podido escribir {name}: {_motivo(error)}.")
     print(f"    {C.DIM}Se ha intentado en:\n{probadas}\n"
           f"      Dile tú dónde con `{bandera} C:\\ruta\\que\\elijas\\{name}`.{C.RESET}")
