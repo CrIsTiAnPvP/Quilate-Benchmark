@@ -76,6 +76,15 @@ _CONSULTAS_ELEVADAS: dict[str, str] = {
             "     [PSCustomObject]@{ disponible = $false } } else {"
             "     Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol |"
             "       Select-Object @{n='disponible';e={$true}},State } )",
+    # Clave hermana de la anterior: mismo cmdlet, otra caracteristica. Va en el
+    # lote y no aparte precisamente por eso — el lote entero se pregunta en un
+    # solo proceso, asi que esto no anade ni un aviso de UAC ni un arranque de
+    # PowerShell mas. Preguntar por ella suelta habria costado las dos cosas.
+    "powershell2": "$( if (-not (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue)) {"
+                   "     [PSCustomObject]@{ disponible = $false } } else {"
+                   "     Get-WindowsOptionalFeature -Online "
+                   "       -FeatureName MicrosoftWindowsPowerShellV2Root |"
+                   "       Select-Object @{n='disponible';e={$true}},State } )",
     # El log de arranque tiene una ACL propia que pide permisos hasta para leer.
     # Los eventos de duración (100) y los de culpables (101-103) se piden por
     # separado: con muchos retrasos, un único -MaxEvents sobre los cuatro

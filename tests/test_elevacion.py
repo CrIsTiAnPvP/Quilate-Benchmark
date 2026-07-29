@@ -144,6 +144,10 @@ class ElLoteQueSeEjecutaConPermisos(unittest.TestCase):
         "secureboot": "Confirm-SecureBootUEFI",
         "tpm": "Get-Tpm",
         "smb1": "Get-WindowsOptionalFeature",
+        # Misma consulta que la anterior, otra característica. Solo pregunta si
+        # el motor de PowerShell 2.0 está instalado; quitarlo lo hace el usuario
+        # desde Características de Windows, nunca este programa.
+        "powershell2": "Get-WindowsOptionalFeature",
         "arranque": "Get-WinEvent",
         "fsdirty": "dirty query",
     }

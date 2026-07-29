@@ -599,6 +599,66 @@ class VersionDeWindowsConSoporte(unittest.TestCase):
             f"ha caducado: revísala y actualiza la fecha")
 
 
+class MotorDePowerShell2(unittest.TestCase):
+    """El intérprete que no deja registro.
+
+    Lo que importa de PowerShell 2.0 no es que sea de 2009: es que no registra
+    los bloques de script, no deja transcripción y no pasa por AMSI. Mientras
+    esté instalado, `powershell -Version 2` ejecuta lo mismo sin rastro.
+    """
+
+    def _auditar(self, estado):
+        a = Auditor(SystemInfo(), None)
+        with patched(audit.seguridad, elevado={"powershell2": estado}):
+            return a, a.check_powershell_v2()
+
+    def test_desinstalado_no_genera_nada(self):
+        a, resumen = self._auditar(PSResult([{"disponible": True, "State": "Disabled"}]))
+        self.assertEqual(a.findings, [])
+        self.assertIn("desinstalado", resumen)
+
+    def test_instalado_es_un_hallazgo(self):
+        a, resumen = self._auditar(PSResult([{"disponible": True, "State": "Enabled"}]))
+        self.assertEqual([f.id for f in a.findings], ["powershell_v2"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("medium", SEGURIDAD, 0.0))
+        self.assertIn("AMSI", f.detail)
+        self.assertEqual(resumen, "INSTALADO")
+
+    def test_acepta_el_estado_como_entero_o_como_nombre(self):
+        for valor in (2, "Disabled", "DisabledWithPayloadRemoved"):
+            with self.subTest(valor=valor):
+                a, _ = self._auditar(PSResult([{"disponible": True, "State": valor}]))
+                self.assertEqual(a.findings, [])
+        for valor in (1, "Enabled"):
+            with self.subTest(valor=valor):
+                a, _ = self._auditar(PSResult([{"disponible": True, "State": valor}]))
+                self.assertEqual([f.id for f in a.findings], ["powershell_v2"])
+
+    def test_un_estado_desconocido_no_acusa_a_nadie(self):
+        with self.assertRaises(SinDato):
+            self._auditar(PSResult([{"disponible": True, "State": "Vaya"}]))
+
+    def test_sin_el_cmdlet_no_aplica(self):
+        with self.assertRaises(NoAplica):
+            self._auditar(PSResult([{"disponible": False}]))
+
+    def test_sin_permisos_es_sin_dato(self):
+        # Sin privilegios no se sabe, y no saber no es «está desinstalado».
+        a = Auditor(SystemInfo(), None)
+        with patched(audit.seguridad):
+            with self.assertRaises(SinDato):
+                a.check_powershell_v2()
+
+    def test_viaja_en_el_lote_que_ya_existia(self):
+        # La condición que pone el informe: ni un proceso ni un aviso de UAC
+        # nuevos. Se cumple por estar en el lote, que se pregunta de una vez.
+        from quilate.elevacion import _CONSULTAS_ELEVADAS
+        self.assertIn("powershell2", _CONSULTAS_ELEVADAS)
+        self.assertIn("MicrosoftWindowsPowerShellV2Root",
+                      _CONSULTAS_ELEVADAS["powershell2"])
+
+
 class EscritorioRemoto(unittest.TestCase):
     """Dos preguntas distintas: si RDP está abierto, y si autentica primero.
 

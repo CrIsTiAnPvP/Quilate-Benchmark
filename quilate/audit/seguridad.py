@@ -557,6 +557,55 @@ class ChecksSeguridad:
             raise NoAplica("este Windows no trae la consulta de cuentas locales")
         return rows
 
+    def check_powershell_v2(self) -> str:
+        """El motor de PowerShell 2.0, que sigue instalable y no debería estar.
+
+        Es la versión de 2009, y lo que importa de ella no es que sea vieja:
+        es que **no tiene ninguno de los registros de seguridad** que trae
+        PowerShell 5 —ni transcripción, ni registro de bloques de script, ni
+        AMSI—. Con el motor v2 presente, basta con `powershell -Version 2` para
+        ejecutar exactamente lo mismo sin dejar rastro en ningún log. Es de los
+        primeros movimientos de cualquier manual de intrusión y no lo usa nadie
+        más: no queda software que necesite v2 y no funcione con 5.
+
+        Sale del mismo lote con permisos que SMB1 y con el mismo cmdlet, así
+        que no cuesta ni un proceso ni un aviso de UAC más.
+        """
+        rows = elevacion.recoger()["powershell2"]
+        if not rows.ok:
+            raise SinDato(f"no se ha podido consultar PowerShell 2.0 ({rows.error})")
+        if not rows:
+            raise SinDato("Windows no ha informado del estado de PowerShell 2.0")
+        if not rows[0].get("disponible"):
+            raise NoAplica("este Windows no permite consultar las características opcionales")
+        estado = rows[0].get("State")
+        clave = _clave(estado)
+        if clave in _SMB1_INACTIVO:
+            return "desinstalado"
+        if clave not in _SMB1_ACTIVO:
+            raise SinDato(f"estado de PowerShell 2.0 no reconocido: «{estado}»")
+        self.add(
+            id="powershell_v2",
+            title="El motor de PowerShell 2.0 sigue instalado",
+            severity="medium", category=SEGURIDAD, component="system",
+            detail="PowerShell 2.0 es la versión de 2009 y sigue disponible en muchos equipos "
+                   "por compatibilidad. El problema no es su edad: es que no tiene ninguna de "
+                   "las protecciones que sí trae PowerShell 5 —no registra los bloques de "
+                   "script que ejecuta, no deja transcripción y no pasa por el antivirus vía "
+                   "AMSI—. Mientras esté, cualquier programa puede pedir `powershell "
+                   "-Version 2` y hacer lo mismo sin dejar rastro. Hoy no queda software que "
+                   "lo necesite: todo lo que corre en v2 corre en 5.",
+            gain=0.0,
+            gain_note="no es una optimización: es un intérprete que no deja registro",
+            effort="bajo", risk="bajo",
+            steps=["Características de Windows → desmarca «Compatibilidad con PowerShell 2.0»",
+                   "O desde una consola de administrador: `Disable-WindowsOptionalFeature "
+                   "-Online -FeatureName MicrosoftWindowsPowerShellV2Root`",
+                   "No hace falta reiniciar y PowerShell 5 sigue funcionando igual",
+                   "Si algún programa muy antiguo protesta, se puede volver a activar desde "
+                   "el mismo sitio"])
+        return "INSTALADO"
+
     def check_local_accounts(self) -> str:
         rows = self._cuentas_locales()
 
