@@ -141,6 +141,73 @@ class ElFicheroDePruebaNoSeQueda(unittest.TestCase):
         self.assertEqual(list(Path(self.dir.name).glob(".quilate_*.tmp")), [])
 
 
+class UnaFaseQueFallaNoSeLlevaALasOtras(unittest.TestCase):
+    """Las tres fases de disco fallan por separado.
+
+    El `except Exception` envolvía las tres: si la lectura reventaba, las IOPS
+    ni se intentaban, y la escritura —que ya se había medido y puntuado— se
+    quedaba sin llegar al informe. Un solo error convertía tres pruebas en
+    ninguna, y el usuario solo veía «error: …» sin saber cuál de las tres.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def _correr(self, falla_en: int):
+        """Ejecuta run_disk haciendo que el N-ésimo DiskIO reviente al leer.
+
+        El orden de creación es escritor, lector, lector de IOPS: apuntando al
+        segundo o al tercero se elige qué fase se rompe.
+        """
+        creados = itertools.count()
+
+        class DiskIOQueFallaAlLeer(DiskIO):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._malo = next(creados) == falla_en
+
+            def read(self, n):
+                if self._malo:
+                    raise OSError(5, "Error de dispositivo de E/S")
+                return super().read(n)
+
+        original = benchmark.DiskIO
+        benchmark.DiskIO = DiskIOQueFallaAlLeer
+        try:
+            b = benchmark.Benchmark(disk_size_mb=8, target_dir=self.dir.name)
+            with redirect_stdout(io.StringIO()):
+                b.run_disk()
+        finally:
+            benchmark.DiskIO = original
+        return b
+
+    def test_si_falla_la_lectura_las_iops_se_miden_igual(self):
+        b = self._correr(falla_en=1)
+        self.assertIn("disk_write", b.results, "la escritura ya estaba medida")
+        self.assertNotIn("disk_read", b.results)
+        self.assertIn("disk_iops", b.results, "las IOPS no dependen de la lectura")
+
+    def test_la_fase_que_falla_queda_anotada_como_no_medida(self):
+        b = self._correr(falla_en=1)
+        self.assertIn("disk_read_error", b.metrics)
+        self.assertIn("no medida", b.metrics["disk_read_error"]["label"])
+        self.assertNotIn("disk_write_error", b.metrics)
+
+    def test_si_fallan_las_iops_lo_demas_se_conserva(self):
+        b = self._correr(falla_en=2)
+        self.assertIn("disk_write", b.results)
+        self.assertIn("disk_read", b.results)
+        self.assertNotIn("disk_iops", b.results)
+        self.assertIn("disk_iops_error", b.metrics)
+
+    def test_el_temporal_se_borra_aunque_falle_una_fase(self):
+        # El `finally` de limpieza sigue siendo uno solo, y sigue haciendo su
+        # trabajo: partir el `try` no podía tocarlo.
+        self._correr(falla_en=1)
+        self.assertEqual(list(Path(self.dir.name).glob(".quilate_*.tmp")), [])
+
+
 class EntradaSalidaReal(unittest.TestCase):
     """DiskIO contra un fichero de verdad: alineación, escritura y lectura."""
 

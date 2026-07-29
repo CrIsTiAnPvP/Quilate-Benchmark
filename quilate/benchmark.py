@@ -273,6 +273,21 @@ class Benchmark:
         """Dato medido que no entra en la nota pero sí en el diagnóstico."""
         self.metrics[key] = {"label": label, "value": value, "unit": unit, "note": note}
 
+    def _disco_no_medido(self, clave: str, etiqueta: str, exc: Exception) -> None:
+        """Una de las tres fases de disco que no ha llegado a completarse.
+
+        Se anota como métrica y no solo en pantalla, igual que hace
+        `disk_cached` con la medida servida desde caché. El motivo es el mismo:
+        el informe se lee después, y sin esto el JSON enseñaría dos cifras de
+        disco donde debería haber tres, sin decir en ninguna parte que la
+        tercera se intentó y falló. Una prueba que no se ha podido hacer no es
+        una prueba que no exista.
+        """
+        self._metric(f"{clave}_error", f"{etiqueta}: no medida",
+                     type(exc).__name__, "",
+                     f"la prueba no llegó a completarse: {exc}")
+        spinner_done(f"error: {exc}", ok=False)
+
     def _snapshot(self, moment: str) -> dict:
         """Foto de frecuencia, temperatura y GPU en un instante de la sesión."""
         mhz, freq_source = cpu_frequency_mhz()
@@ -526,138 +541,155 @@ class Benchmark:
         # Declarados antes del `try` para que el `finally` pueda cerrarlos aunque
         # la excepción llegue a mitad de la prueba, antes de crear los siguientes.
         writer = reader = iop_reader = None
+        # Tres `try` y no uno: el bloque unico envolvia las tres fases, asi
+        # que un fallo al leer se llevaba por delante las IOPS —y la
+        # escritura, ya medida, se quedaba sin registrar—. Cada fase falla
+        # sola y dice cual ha sido. El `finally` de limpieza sigue siendo uno.
         try:
-            free = shutil.disk_usage(self.target_dir).free
-            if free < size * 2.5:
-                spinner_step("Disco · test".ljust(38))
-                spinner_done("omitido: espacio libre insuficiente", ok=False)
+            try:
+                free = shutil.disk_usage(self.target_dir).free
+                if free < size * 2.5:
+                    spinner_step("Disco · test".ljust(38))
+                    spinner_done("omitido: espacio libre insuficiente", ok=False)
+                    return
+
+                # --- Escritura secuencial ---
+                spinner_step(f"Disco · escritura secuencial ({self.disk_size_mb} MB)".ljust(38))
+                writer = DiskIO(str(path), write=True, block=block_size)
+                writer.fill_random()
+                # Se cronometra por tramos del mismo trabajo, sin repetirlo: es
+                # gratis y es justo donde se ve la caché SLC agotarse a mitad de
+                # escritura, que a una sola cifra le pasa desapercibido.
+                tramos_w: list[float] = []
+                corte = max(block_size, size // 3)
+                t0 = time.perf_counter()
+                written = 0
+                marca, escrito_tramo = t0, 0
+                while written < size:
+                    n = writer.write(block_size)
+                    written += n
+                    escrito_tramo += n
+                    if escrito_tramo >= corte:
+                        ahora = time.perf_counter()
+                        tramos_w.append((escrito_tramo / 1e6) / (ahora - marca))
+                        marca, escrito_tramo = ahora, 0
+                # El último tramo se cierra ANTES del sync: el vaciado del búfer es
+                # un coste único de la prueba, no de ese tramo, y metérselo dentro
+                # lo haría parecer lentísimo e inventaría dispersión que no existe.
+                if escrito_tramo:
+                    tramos_w.append((escrito_tramo / 1e6) / max(1e-9, time.perf_counter() - marca))
+                writer.sync()
+                wt = time.perf_counter() - t0
+                self._spread("disk_write", "Escritura secuencial", tramos_w)
+                self.disk_unbuffered = writer.unbuffered
+                dropped = writer.drop_cache() if not writer.unbuffered else False
+                writer.close()
+                wmbs = (written / 1e6) / wt
+                wscore = wmbs / REFERENCE["disk_write_mbs"] * 100
+                self._register("disk_write", "Disco · escritura", "MB/s", wmbs, wscore)
+                spinner_done(f"{wmbs:.0f} MB/s → {wscore:.0f} pts")
+
+                # Si la lectura no esquiva la caché de páginas, lo que se mide es la
+                # RAM: el fichero acaba de escribirse y sigue entero en memoria. Esos
+                # números no pueden puntuar. El disco pesa un 34% de la nota global y
+                # se pegaba al techo en cualquier equipo con RAM de sobra, midiera lo
+                # que midiera el disco de verdad.
+                direct = self.disk_unbuffered or dropped
+                source = ("sin caché del SO" if self.disk_unbuffered
+                          else "caché descartada" if dropped else "con caché del SO")
+                # Una sonda de unas pocas lecturas aleatorias basta para saberlo, y
+                # decide por igual la lectura secuencial y las IOPS: leen el mismo
+                # fichero, así que o las dos salen del disco o ninguna. Comparar la
+                # lectura contra la escritura no vale: la escritura también puede ir
+                # inflada por la caché SLC del SSD y entonces la razón no delata nada.
+                cached = False
+                if not direct:   # con E/S directa no hay nada que sondear
+                    cached = cache_served(self._cache_probe(path, size), direct=False)
+            except Exception as exc:
+                self._disco_no_medido("disk_write", "Escritura secuencial", exc)
+                # Sin fichero escrito no hay nada que leer: las otras dos no
+                # se intentan siquiera, para no anotarlas como fallidas por
+                # un motivo que no es suyo.
                 return
 
-            # --- Escritura secuencial ---
-            spinner_step(f"Disco · escritura secuencial ({self.disk_size_mb} MB)".ljust(38))
-            writer = DiskIO(str(path), write=True, block=block_size)
-            writer.fill_random()
-            # Se cronometra por tramos del mismo trabajo, sin repetirlo: es
-            # gratis y es justo donde se ve la caché SLC agotarse a mitad de
-            # escritura, que a una sola cifra le pasa desapercibido.
-            tramos_w: list[float] = []
-            corte = max(block_size, size // 3)
-            t0 = time.perf_counter()
-            written = 0
-            marca, escrito_tramo = t0, 0
-            while written < size:
-                n = writer.write(block_size)
-                written += n
-                escrito_tramo += n
-                if escrito_tramo >= corte:
-                    ahora = time.perf_counter()
-                    tramos_w.append((escrito_tramo / 1e6) / (ahora - marca))
-                    marca, escrito_tramo = ahora, 0
-            # El último tramo se cierra ANTES del sync: el vaciado del búfer es
-            # un coste único de la prueba, no de ese tramo, y metérselo dentro
-            # lo haría parecer lentísimo e inventaría dispersión que no existe.
-            if escrito_tramo:
-                tramos_w.append((escrito_tramo / 1e6) / max(1e-9, time.perf_counter() - marca))
-            writer.sync()
-            wt = time.perf_counter() - t0
-            self._spread("disk_write", "Escritura secuencial", tramos_w)
-            self.disk_unbuffered = writer.unbuffered
-            dropped = writer.drop_cache() if not writer.unbuffered else False
-            writer.close()
-            wmbs = (written / 1e6) / wt
-            wscore = wmbs / REFERENCE["disk_write_mbs"] * 100
-            self._register("disk_write", "Disco · escritura", "MB/s", wmbs, wscore)
-            spinner_done(f"{wmbs:.0f} MB/s → {wscore:.0f} pts")
+            try:
+                # --- Lectura secuencial ---
+                spinner_step("Disco · lectura secuencial".ljust(38))
+                reader = DiskIO(str(path), write=False, block=chunk_size)
+                tramos_r: list[float] = []
+                corte_r = max(chunk_size, size // 3)
+                t0 = time.perf_counter()
+                read_total = 0
+                marca, leido_tramo = t0, 0
+                while read_total < size:
+                    got = reader.read(chunk_size)
+                    if not got:
+                        break
+                    read_total += got
+                    leido_tramo += got
+                    if leido_tramo >= corte_r:
+                        ahora = time.perf_counter()
+                        tramos_r.append((leido_tramo / 1e6) / (ahora - marca))
+                        marca, leido_tramo = ahora, 0
+                rt = time.perf_counter() - t0
+                if leido_tramo:
+                    tramos_r.append((leido_tramo / 1e6) / max(1e-9, time.perf_counter() - marca))
+                reader.close()
+                self._spread("disk_read", "Lectura secuencial", tramos_r)
+                rmbs = (read_total / 1e6) / rt
+                if cached:
+                    self.disk_cache_suspect = True
+                    spinner_done(f"{rmbs:,.0f} MB/s: servido desde la caché del SO, no puntúa",
+                                 ok=False)
+                else:
+                    rscore = rmbs / REFERENCE["disk_read_mbs"] * 100
+                    self._register("disk_read", "Disco · lectura", "MB/s", rmbs, rscore, source)
+                    spinner_done(f"{rmbs:.0f} MB/s → {rscore:.0f} pts")
+            except Exception as exc:
+                self._disco_no_medido("disk_read", "Lectura secuencial", exc)
 
-            # Si la lectura no esquiva la caché de páginas, lo que se mide es la
-            # RAM: el fichero acaba de escribirse y sigue entero en memoria. Esos
-            # números no pueden puntuar. El disco pesa un 34% de la nota global y
-            # se pegaba al techo en cualquier equipo con RAM de sobra, midiera lo
-            # que midiera el disco de verdad.
-            direct = self.disk_unbuffered or dropped
-            source = ("sin caché del SO" if self.disk_unbuffered
-                      else "caché descartada" if dropped else "con caché del SO")
-            # Una sonda de unas pocas lecturas aleatorias basta para saberlo, y
-            # decide por igual la lectura secuencial y las IOPS: leen el mismo
-            # fichero, así que o las dos salen del disco o ninguna. Comparar la
-            # lectura contra la escritura no vale: la escritura también puede ir
-            # inflada por la caché SLC del SSD y entonces la razón no delata nada.
-            cached = False
-            if not direct:   # con E/S directa no hay nada que sondear
-                cached = cache_served(self._cache_probe(path, size), direct=False)
-
-            # --- Lectura secuencial ---
-            spinner_step("Disco · lectura secuencial".ljust(38))
-            reader = DiskIO(str(path), write=False, block=chunk_size)
-            tramos_r: list[float] = []
-            corte_r = max(chunk_size, size // 3)
-            t0 = time.perf_counter()
-            read_total = 0
-            marca, leido_tramo = t0, 0
-            while read_total < size:
-                got = reader.read(chunk_size)
-                if not got:
-                    break
-                read_total += got
-                leido_tramo += got
-                if leido_tramo >= corte_r:
-                    ahora = time.perf_counter()
-                    tramos_r.append((leido_tramo / 1e6) / (ahora - marca))
-                    marca, leido_tramo = ahora, 0
-            rt = time.perf_counter() - t0
-            if leido_tramo:
-                tramos_r.append((leido_tramo / 1e6) / max(1e-9, time.perf_counter() - marca))
-            reader.close()
-            self._spread("disk_read", "Lectura secuencial", tramos_r)
-            rmbs = (read_total / 1e6) / rt
-            if cached:
-                self.disk_cache_suspect = True
-                spinner_done(f"{rmbs:,.0f} MB/s: servido desde la caché del SO, no puntúa",
-                             ok=False)
-            else:
-                rscore = rmbs / REFERENCE["disk_read_mbs"] * 100
-                self._register("disk_read", "Disco · lectura", "MB/s", rmbs, rscore, source)
-                spinner_done(f"{rmbs:.0f} MB/s → {rscore:.0f} pts")
-
-            # --- IOPS aleatorias 4K ---
-            spinner_step("Disco · IOPS aleatorias 4K".ljust(38))
-            ops = 4000 if self.quick else 12000
-            max_off = max(0, size - 4096)
-            rnd = random.Random(7)
-            offsets = [rnd.randrange(0, max_off, 4096) for _ in range(ops)]
-            iop_reader = DiskIO(str(path), write=False, block=4096)
-            tramos_i: list[float] = []
-            por_tramo = max(1, ops // 3)
-            t0 = time.perf_counter()
-            marca, hechas = t0, 0
-            for off in offsets:
-                iop_reader.seek(off)
-                iop_reader.read(4096)
-                hechas += 1
-                if hechas >= por_tramo:
-                    ahora = time.perf_counter()
-                    tramos_i.append(hechas / (ahora - marca))
-                    marca, hechas = ahora, 0
-            it = time.perf_counter() - t0
-            if hechas:
-                tramos_i.append(hechas / max(1e-9, time.perf_counter() - marca))
-            iop_reader.close()
-            self._spread("disk_iops", "IOPS aleatorias 4K", tramos_i)
-            iops = ops / it
-            latency_us = it / ops * 1e6
-            if cached:
-                self.disk_cache_suspect = True
-                spinner_done(f"{iops:,.0f} IOPS · {latency_us:.1f} µs: caché del SO, no puntúa",
-                             ok=False)
-            else:
-                iscore = iops / REFERENCE["disk_iops_4k"] * 100
-                self._register("disk_iops", "Disco · IOPS 4K", "IOPS", iops, iscore, source)
-                spinner_done(f"{iops:,.0f} IOPS → {iscore:.0f} pts")
-                # La latencia por operación es lo que se percibe al abrir programas:
-                # más representativa que las IOPS agregadas, y comparable entre equipos.
-                self._metric("disk_latency", "Latencia media 4K", round(latency_us, 1), "µs",
-                             "tiempo de una lectura aleatoria con cola 1: <100 µs NVMe, "
-                             f"~200 µs SATA, >5.000 µs disco mecánico · medido {source}")
+            try:
+                # --- IOPS aleatorias 4K ---
+                spinner_step("Disco · IOPS aleatorias 4K".ljust(38))
+                ops = 4000 if self.quick else 12000
+                max_off = max(0, size - 4096)
+                rnd = random.Random(7)
+                offsets = [rnd.randrange(0, max_off, 4096) for _ in range(ops)]
+                iop_reader = DiskIO(str(path), write=False, block=4096)
+                tramos_i: list[float] = []
+                por_tramo = max(1, ops // 3)
+                t0 = time.perf_counter()
+                marca, hechas = t0, 0
+                for off in offsets:
+                    iop_reader.seek(off)
+                    iop_reader.read(4096)
+                    hechas += 1
+                    if hechas >= por_tramo:
+                        ahora = time.perf_counter()
+                        tramos_i.append(hechas / (ahora - marca))
+                        marca, hechas = ahora, 0
+                it = time.perf_counter() - t0
+                if hechas:
+                    tramos_i.append(hechas / max(1e-9, time.perf_counter() - marca))
+                iop_reader.close()
+                self._spread("disk_iops", "IOPS aleatorias 4K", tramos_i)
+                iops = ops / it
+                latency_us = it / ops * 1e6
+                if cached:
+                    self.disk_cache_suspect = True
+                    spinner_done(f"{iops:,.0f} IOPS · {latency_us:.1f} µs: caché del SO, no puntúa",
+                                 ok=False)
+                else:
+                    iscore = iops / REFERENCE["disk_iops_4k"] * 100
+                    self._register("disk_iops", "Disco · IOPS 4K", "IOPS", iops, iscore, source)
+                    spinner_done(f"{iops:,.0f} IOPS → {iscore:.0f} pts")
+                    # La latencia por operación es lo que se percibe al abrir programas:
+                    # más representativa que las IOPS agregadas, y comparable entre equipos.
+                    self._metric("disk_latency", "Latencia media 4K", round(latency_us, 1), "µs",
+                                 "tiempo de una lectura aleatoria con cola 1: <100 µs NVMe, "
+                                 f"~200 µs SATA, >5.000 µs disco mecánico · medido {source}")
+            except Exception as exc:
+                self._disco_no_medido("disk_iops", "IOPS aleatorias 4K", exc)
 
             if self.disk_cache_suspect:
                 self._metric("disk_cached", "Medida de disco incompleta", "caché del SO", "",
@@ -665,8 +697,6 @@ class Benchmark:
                              "la caché de páginas, así que parte del test medía RAM y se ha "
                              "excluido de la nota. Usa --disk-path en otra unidad o un "
                              "--disk-size mayor que la RAM libre")
-        except Exception as exc:
-            spinner_done(f"error: {exc}", ok=False)
         finally:
             # Cerrar antes de borrar, y no al revés: en Windows un fichero con
             # un handle abierto no se puede borrar. Si `WriteFile`/`ReadFile`
