@@ -31,68 +31,10 @@ from ..sysinfo import (KIND_LABELS, SystemInfo, _parse_cim_date, local_volumes,
 from .modelo import (SEGURIDAD, SEVERITY_COLOR, SEVERITY_ORDER, SEVERITY_TEXT,
                      Finding, NoAplica, SinDato, _ESFUERZOS, _ID_VALIDO,
                      _RIESGOS, security_findings, sev_label)
-
-
-# `productState` es un entero de 32 bits que el Centro de seguridad de Windows
-# no documenta en ninguna parte oficial, pero cuyo reparto es estable desde
-# Vista: 0xAABBCC, donde BB dice si el motor está vigilando (0x10 u 0x11) y CC
-# si las firmas están al día (0x00) o caducadas (0x10). AA es el tipo de
-# producto y aquí no interesa.
-#
-# Precisamente por no estar documentado, un valor que no encaje en ninguno de
-# los dos juegos conocidos no se interpreta: se calla. Es la misma decisión que
-# toma `check_filesystem_health` cuando no reconoce la respuesta de fsutil.
-_AV_MOTOR = {0x00: False, 0x01: False, 0x10: True, 0x11: True}   # {byte: vigilando}
-_AV_FIRMAS = {0x00: True, 0x10: False}                           # {byte: al día}
-
-
-def _estado_antivirus(state) -> tuple[bool, bool] | None:
-    """(vigilando, firmas al día), o None si el entero no se reconoce.
-
-    Los dos bytes se traducen por tabla y no por comparación: así, un valor
-    nuevo que Microsoft empiece a devolver algún día cae por su propio peso en
-    «no lo reconozco» en vez de colarse como uno de los conocidos.
-    """
-    if isinstance(state, bool) or not isinstance(state, int):
-        return None
-    motor, firmas = (state >> 8) & 0xFF, state & 0xFF
-    if motor not in _AV_MOTOR or firmas not in _AV_FIRMAS:
-        return None
-    return _AV_MOTOR[motor], _AV_FIRMAS[firmas]
-
-
-# El «código de problema» del Administrador de dispositivos: el número que hay
-# detrás del signo de exclamación amarillo, que Windows enseña en una ventana que
-# nadie abre. `ConfigManagerErrorCode` lo expone tal cual, y estos son los que
-# significan que el dispositivo no está haciendo su trabajo.
-_PNP_PROBLEMA = {
-    1: "Windows no tiene su configuración",
-    3: "su driver está dañado, o falta memoria",
-    10: "no puede arrancar",
-    12: "no hay recursos libres suficientes para él",
-    14: "necesita que reinicies para terminar de configurarse",
-    18: "hay que reinstalar sus drivers",
-    19: "su configuración en el registro está dañada",
-    21: "Windows lo está quitando",
-    24: "no está presente, o no funciona bien",
-    28: "no tiene drivers instalados",
-    31: "Windows no puede cargar los drivers que necesita",
-    35: "la BIOS no le ha reservado recursos",
-    37: "su driver ha fallado al inicializarlo",
-    39: "su driver falta o está dañado",
-    43: "Windows lo ha parado porque el propio dispositivo avisó de un fallo",
-    48: "su software está bloqueado por incompatible",
-    52: "no se puede verificar la firma de su driver",
-}
-
-# Estos códigos también son distintos de cero y ninguno es una avería: los tres
-# primeros los provoca quien usa el equipo y el último es un estado de paso. Van
-# aparte para no acusar de estropeado a lo que alguien apagó a propósito.
-_PNP_DELIBERADO = frozenset({22, 32, 45, 47})
-
-# Cinco años. Por debajo hay demasiado driver que sencillamente está terminado y
-# no necesita más versiones: un lector de tarjetas de 2022 funciona igual hoy.
-_DRIVER_VIEJO_DIAS = round(5 * 365.25)
+from .tablas import (_AV_FIRMAS, _AV_MOTOR, _CIFRADO_NO, _CIFRADO_SI,
+                     _DRIVER_VIEJO_DIAS, _MSRC_GRAVES, _MSRC_SERIAS,
+                     _NEGACIONES, _PNP_DELIBERADO, _PNP_PROBLEMA, _SMB1_ACTIVO,
+                     _SMB1_INACTIVO, _SUCIO, _estado_antivirus)
 
 
 class Auditor:
@@ -1450,8 +1392,6 @@ class Auditor:
     # alguien que su sistema de ficheros está corrupto —y mandarle un chkdsk /r
     # de horas— por no saber leer la respuesta es mucho peor que no decir nada,
     # así que ante la duda no se informa.
-    _NEGACIONES = {"not", "no", "nicht", "non", "pas", "niet", "nao", "não"}
-    _SUCIO = ("dirty", "sucio", "sujo", "verschmutzt", "sporco", "vuil")
 
     def check_filesystem_health(self) -> str:
         rows = elevacion.recoger()["fsdirty"]
@@ -1471,9 +1411,9 @@ class Auditor:
         if not out:
             raise SinDato("fsutil no ha respondido")
         lowered = out.lower()
-        if set(re.split(r"[^\w]+", lowered)) & self._NEGACIONES:
+        if set(re.split(r"[^\w]+", lowered)) & _NEGACIONES:
             return "limpio"
-        if not any(termino in lowered for termino in self._SUCIO):
+        if not any(termino in lowered for termino in _SUCIO):
             raise SinDato(f"respuesta de fsutil no reconocida: «{out[:60]}»")
         self.add(
             id="fs_dirty", title="El volumen de sistema está marcado como «sucio»",
@@ -1558,23 +1498,16 @@ class Auditor:
                    "Si no hay ninguna posterior, no hay nada que hacer: no fuerces una igual"])
         return f"{self.si.bios_date} ({años:.0f} años)"
 
-    # `Get-BitLockerVolume` devuelve enumeraciones que `ConvertTo-Json` convierte
-    # en enteros, aunque alguna versión de PowerShell las serializa por nombre.
-    # Se aceptan las dos formas, y lo que no encaje en ninguna se trata como
-    # desconocido y no como «sin cifrar»: decirle a alguien que su disco está
-    # desprotegido cuando sí lo está es la clase de aviso que hace que se deje
-    # de leer el informe entero.
-    _CIFRADO_SI = {1, "1", "on", "fullyencrypted"}
-    _CIFRADO_NO = {0, "0", "off", "fullydecrypted"}
-
     @staticmethod
     def _estado_cifrado(valor) -> bool | None:
+        # Las dos formas en las que `Get-BitLockerVolume` puede contestar, y el
+        # criterio de qué hacer con lo que no sea ninguna, están en `tablas`.
         if isinstance(valor, bool):
             return None
         clave = valor.strip().lower() if isinstance(valor, str) else valor
-        if clave in Auditor._CIFRADO_SI:
+        if clave in _CIFRADO_SI:
             return True
-        if clave in Auditor._CIFRADO_NO:
+        if clave in _CIFRADO_NO:
             return False
         return None
 
@@ -1715,8 +1648,6 @@ class Auditor:
     # versión, llega como texto o como el entero de DISM. Lo que no encaje en
     # ninguna de las dos formas se declara desconocido: dar por desactivado un
     # SMB1 que está activo sería justo el error que importa evitar.
-    _SMB1_ACTIVO = {1, "enabled"}
-    _SMB1_INACTIVO = {2, "disabled", "disabledwithpayloadremoved"}
 
     def check_smb1(self) -> str:
         rows = elevacion.recoger()["smb1"]
@@ -1728,9 +1659,9 @@ class Auditor:
             raise NoAplica("este Windows no permite consultar las características opcionales")
         estado = rows[0].get("State")
         clave = estado.strip().lower() if isinstance(estado, str) else estado
-        if clave in self._SMB1_INACTIVO:
+        if clave in _SMB1_INACTIVO:
             return "desactivado"
-        if clave not in self._SMB1_ACTIVO:
+        if clave not in _SMB1_ACTIVO:
             raise SinDato(f"estado de SMB1 no reconocido: «{estado}»")
         self.add(
             id="smb1_activo", title="SMB1 sigue activo, un protocolo retirado en 2014",
@@ -1794,8 +1725,6 @@ class Auditor:
     # Severidades que Microsoft asigna a sus boletines. Solo las llevan las
     # actualizaciones de seguridad: una de zona horaria viene sin ella, y
     # contarla como riesgo sería inflar el hallazgo con lo que no toca.
-    _MSRC_GRAVES = ("critical",)
-    _MSRC_SERIAS = ("important",)
 
     def check_security_updates(self) -> str:
         rows = pending_security_updates()
@@ -1809,8 +1738,8 @@ class Auditor:
         if not seguridad:
             return f"{len(rows)} pendiente(s), ninguna de seguridad"
 
-        criticas = [t for n, t in seguridad if n in self._MSRC_GRAVES]
-        importantes = [t for n, t in seguridad if n in self._MSRC_SERIAS]
+        criticas = [t for n, t in seguridad if n in _MSRC_GRAVES]
+        importantes = [t for n, t in seguridad if n in _MSRC_SERIAS]
         if criticas:
             severidad, cuantas = "high", len(criticas)
             resumen = f"{cuantas} crítica(s)"
