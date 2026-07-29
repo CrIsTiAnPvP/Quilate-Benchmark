@@ -254,7 +254,63 @@ class ChecksAlmacenamiento:
             return f"degradado: {names}"
 
         extra = self._check_disk_wear()
+        self._check_disco_enlace()
         return extra or f"{len(rows)} disco(s) sano(s)"
+
+    def _check_disco_enlace(self) -> None:
+        """Errores de enlace: primero el cable, y solo después el disco.
+
+        Los atributos 199 (errores de comprobación en la transmisión) y 188
+        (comandos que expiran sin respuesta) no dicen que el disco esté
+        estropeado: dicen que lo que viaja entre el disco y la placa se corrompe
+        o no llega. La causa más frecuente con diferencia es un cable SATA mal
+        encajado, de mala calidad o pinzado al cerrar la caja, y cambiarlo
+        cuesta dos euros. Por eso van aparte de los sectores y con su propio
+        identificador: mandar a alguien a comprar un disco por esto sería
+        hacerle tirar el dinero y no arreglarle el problema.
+
+        Va en su propio método y no dentro de `_check_disk_wear` a propósito.
+        Esa función ya recorre cuatro listas a la vez y tiene la complejidad al
+        límite; meterle una quinta rama la habría dejado sin poder tocar.
+        """
+        afectados = []
+        for disk in self.si.physical_disks:
+            crc = disk.get("crc_errors") or 0
+            expirados = disk.get("command_timeout") or 0
+            if crc or expirados:
+                afectados.append((str(disk.get("name") or "disco"), crc, expirados))
+        if not afectados:
+            return
+
+        def cuenta(crc: int, expirados: int) -> str:
+            partes = []
+            if crc:
+                partes.append(f"{crc} de transmisión")
+            if expirados:
+                partes.append(f"{expirados} comandos expirados")
+            return ", ".join(partes)
+
+        lista = "; ".join(f"{n} ({cuenta(c, t)})" for n, c, t in afectados)
+        self.add(
+            id="disco_cable",
+            title=f"Errores de comunicación con el disco ({lista})",
+            severity="medium", category="almacenamiento", component="disk",
+            detail="El disco y la placa no se están entendiendo bien: hay datos que llegan "
+                   "corruptos y hay que reenviarlos, o comandos que no obtienen respuesta a "
+                   "tiempo. Ojo con la conclusión, porque es la parte que más se equivoca: "
+                   "esto casi nunca significa que el disco esté estropeado. Lo normal es un "
+                   "cable SATA mal encajado, de mala calidad o pinzado al cerrar la caja, y a "
+                   "veces una alimentación justa. El síntoma que se nota es el equipo "
+                   "congelándose unos segundos sin motivo aparente. Estos contadores no bajan "
+                   "nunca aunque se arregle la causa, así que lo que importa es si suben.",
+            gain=0.0,
+            gain_note="no es una optimización: son datos que viajan mal entre el disco y la placa",
+            effort="bajo", risk="bajo",
+            steps=["Apaga, desenchufa y vuelve a encajar el cable SATA por los dos extremos",
+                   "Si tienes otro cable, cámbialo: es la causa más habitual con diferencia",
+                   "Prueba otro conector SATA de la placa y otro cable de alimentación",
+                   "Apunta el valor actual y míralo dentro de unos días: si no sube, ya está "
+                   "resuelto; si sigue subiendo con otro cable, entonces sí sospecha del disco"])
 
 
     def _check_disk_wear(self) -> str:
@@ -275,7 +331,8 @@ class ChecksAlmacenamiento:
             # con desgaste y sin ellos, y un HDD al revés si el contador de
             # fiabilidad no contestó. Cualquiera de los dos cuenta como medido.
             sectores = {campo: disk.get(campo)
-                        for campo in ("reallocated", "pending", "uncorrectable")
+                        for campo in ("reallocated", "pending", "uncorrectable",
+                                      "reported_uncorrectable")
                         if disk.get(campo) is not None}
             if (desgaste is None and grados is None and not sectores
                     and disk.get("power_on_hours") is None):
@@ -283,7 +340,8 @@ class ChecksAlmacenamiento:
             medidos += 1
             # Los pendientes son sectores que el disco ya no consigue leer y aún
             # no ha sustituido: son los que más avisan y los que peor van a más.
-            if sectores.get("pending") or sectores.get("uncorrectable"):
+            if (sectores.get("pending") or sectores.get("uncorrectable")
+                    or sectores.get("reported_uncorrectable")):
                 con_sectores.append((nombre, sectores, True))
             elif sectores.get("reallocated"):
                 con_sectores.append((nombre, sectores, False))
@@ -323,6 +381,8 @@ class ChecksAlmacenamiento:
                     partes.append(f"{datos['reallocated']} reasignados")
                 if datos.get("uncorrectable"):
                     partes.append(f"{datos['uncorrectable']} irrecuperables")
+                if datos.get("reported_uncorrectable"):
+                    partes.append(f"{datos['reported_uncorrectable']} no corregidos")
                 return ", ".join(partes)
 
             lista = "; ".join(f"{n} ({cuenta(d)})" for n, d, _ in con_sectores)

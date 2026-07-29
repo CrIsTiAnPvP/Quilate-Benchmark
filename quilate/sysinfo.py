@@ -337,11 +337,22 @@ def _storage_reliability(rows) -> dict[int, dict]:
     return out
 
 
-# Los tres atributos SMART que `Get-StorageReliabilityCounter` no expone, y que
-# son el aviso más temprano que da un disco mecánico: sectores que el firmware ya
-# ha tenido que sustituir, sectores que no consigue leer y todavía no ha
+# Los atributos SMART que `Get-StorageReliabilityCounter` no expone, y que son el
+# aviso más temprano que da un disco. Los tres primeros son sectores: los que el
+# firmware ya ha tenido que sustituir, los que no consigue leer y todavía no ha
 # sustituido, y los que ha dado por irrecuperables.
-_ATRIBUTOS_SMART = {5: "reallocated", 197: "pending", 198: "uncorrectable"}
+#
+# Los tres siguientes no cuestan ni una consulta más —vienen en el mismo blob de
+# 512 bytes que ya se lee— y dicen cosas distintas:
+#   · 187 son errores que el disco no pudo corregir y reportó al sistema. Junto
+#     con 5, 197 y 198 forma el grupo que mejor predice un fallo próximo.
+#   · 188 son comandos que expiraron sin respuesta.
+#   · 199 son errores de comprobación en lo que viaja por el cable.
+# Los dos últimos suelen ser del enlace y no del disco: un cable SATA mal
+# encajado da CRC y timeouts en un disco perfectamente sano.
+_ATRIBUTOS_SMART = {5: "reallocated", 197: "pending", 198: "uncorrectable",
+                    187: "reported_uncorrectable", 188: "command_timeout",
+                    199: "crc_errors"}
 
 
 def _smart_atributos(blob) -> dict[int, int]:

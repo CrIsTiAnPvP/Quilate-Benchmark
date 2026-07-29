@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import unittest
 
-from quilate.audit import Auditor
+from quilate.audit import SEGURIDAD, Auditor
 from quilate.sysinfo import (SystemInfo, _ATRIBUTOS_SMART, _map_storage,
                              _modelo_de_instancia, _smart_atributos,
                              _smart_del_disco, _smart_por_modelo)
@@ -159,9 +159,14 @@ class CasarCadaDiscoConElSuyo(unittest.TestCase):
 
     def test_el_nombre_recortado_encaja_igual(self):
         # `Get-PhysicalDisk` dice ST1000DM010-2EP102; WMI, ST1000DM010-2EP1.
+        # Los seis atributos salen del mismo blob de 512 bytes: este disco de
+        # verdad los publica todos y todos a cero, que es lo que debe salir de
+        # un disco sano.
         smart = _smart_por_modelo(REALES)
         self.assertEqual(_smart_del_disco("ST1000DM010-2EP102", smart),
-                         {"reallocated": 0, "pending": 0, "uncorrectable": 0})
+                         {"reallocated": 0, "pending": 0, "uncorrectable": 0,
+                          "reported_uncorrectable": 0, "command_timeout": 0,
+                          "crc_errors": 0})
 
     def test_el_nombre_con_fabricante_delante_tambien(self):
         smart = _smart_por_modelo(REALES)
@@ -211,6 +216,56 @@ class LlegarHastaElInventario(unittest.TestCase):
                 self.assertNotIn("reallocated", disco)
 
 
+class ErroresDeEnlace(unittest.TestCase):
+    """199 y 188 acusan al cable, no al disco.
+
+    Es la parte donde más fácil es equivocar la conclusión: los errores de
+    transmisión y los comandos que expiran casi nunca significan que el disco
+    esté estropeado. Lo normal es un cable SATA mal encajado o de mala calidad.
+    Mandar a alguien a comprar un disco por esto sería hacerle tirar el dinero
+    sin arreglarle el problema, y por eso van con identificador y categoría
+    propios en vez de sumarse a los sectores.
+    """
+
+    def _auditar(self, **campos):
+        si = SystemInfo()
+        si.physical_disks = [dict({"name": "ST1000DM010", "media": "HDD",
+                                   "bus": "SATA"}, **campos)]
+        a = Auditor(si, None)
+        a._check_disco_enlace()
+        return a
+
+    def test_un_disco_sin_errores_de_enlace_no_es_un_hallazgo(self):
+        self.assertEqual(self._auditar(crc_errors=0, command_timeout=0).findings, [])
+
+    def test_los_errores_crc_avisan(self):
+        a = self._auditar(crc_errors=17)
+        self.assertEqual([f.id for f in a.findings], ["disco_cable"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("medium", "almacenamiento", 0.0))
+        self.assertIn("17 de transmisión", f.title)
+
+    def test_los_comandos_expirados_tambien(self):
+        a = self._auditar(command_timeout=4)
+        self.assertEqual([f.id for f in a.findings], ["disco_cable"])
+        self.assertIn("4 comandos expirados", a.findings[0].title)
+
+    def test_no_es_seguridad_sino_almacenamiento(self):
+        # El informe lo pide explícitamente: este no va al bloque de riesgos.
+        a = self._auditar(crc_errors=1)
+        self.assertNotEqual(a.findings[0].category, SEGURIDAD)
+
+    def test_el_primer_paso_es_el_cable_y_no_comprar_un_disco(self):
+        pasos = " ".join(self._auditar(crc_errors=5).findings[0].steps).lower()
+        self.assertIn("cable", pasos)
+        self.assertNotIn("sustituye el disco", pasos)
+
+    def test_sin_los_contadores_no_se_inventa_nada(self):
+        # Un NVMe no publica estos atributos: llega sin las claves y eso no
+        # puede leerse como «cero errores» ni como un hallazgo.
+        self.assertEqual(self._auditar().findings, [])
+
+
 class ElHallazgoDeSectores(unittest.TestCase):
     def _auditar(self, **campos):
         si = SystemInfo()
@@ -229,6 +284,15 @@ class ElHallazgoDeSectores(unittest.TestCase):
         self.assertEqual([f.id for f in a.findings], ["disk_sectores"])
         self.assertEqual(a.findings[0].severity, "medium")
         self.assertIn("8 reasignados", a.findings[0].title)
+
+    def test_los_no_corregidos_reportados_pesan_como_los_pendientes(self):
+        # El 187 es, junto con 5, 197 y 198, el grupo que mejor predice un
+        # fallo próximo. No es un error de enlace: son datos que el disco no
+        # pudo corregir y tuvo que reportar.
+        a = self._auditar(reported_uncorrectable=2)
+        self.assertEqual([f.id for f in a.findings], ["disk_sectores"])
+        self.assertEqual(a.findings[0].severity, "high")
+        self.assertIn("2 no corregidos", a.findings[0].title)
 
     def test_los_pendientes_pesan_mas(self):
         # Un sector pendiente ya no se lee y todavía no se ha sustituido: si
