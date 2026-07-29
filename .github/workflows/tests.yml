@@ -9,13 +9,19 @@ on:
 jobs:
   test:
     # Los tests no tocan el registro ni WMI —todo va por fixtures— así que se
-    # ejecutan igual en Linux, que arranca mucho más rápido. La matriz de
-    # versiones cubre desde la mínima que soporta el proyecto.
+    # ejecutan igual en Linux, que arranca mucho más rápido.
+    #
+    # La matriz empieza en 3.9 porque es la mínima que prometen el README y
+    # `quilate.py`. Hasta ahora empezaba en 3.10, así que la versión mínima era
+    # la única que nadie ejecutaba: la promesa la sostenía solo
+    # `test_python39.py`, que parsea con la gramática de 3.9 pero no ejecuta
+    # nada, y por tanto no caza un `zip(strict=True)` ni un método del stdlib
+    # que en 3.9 no exista. Este job sí. Ver `VERSION_MINIMA` en ese fichero.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.13"]
+        python: ["3.9", "3.10", "3.11", "3.13"]
 
     steps:
       - uses: actions/checkout@v4

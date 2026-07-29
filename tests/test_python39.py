@@ -19,15 +19,18 @@ del que tiene:
   · `typing.get_type_hints()` sobre una anotación moderna, o un
     `isinstance(x, int | str)`, que sí evalúa el `|`.
 
-Para esos tres hace falta ejecutar la suite en un 3.9 de verdad. Lo que hay aquí
-detecta la mayoría de las regresiones y cuesta diez líneas; lo otro es un job de
-CI con matriz de versiones, que es otra conversación.
+Para esos tres hace falta ejecutar la suite en un 3.9 de verdad, y eso es lo que
+hace la matriz de `.github/workflows/tests.yml` desde que incluye 3.9. Este
+fichero sigue teniendo sentido igual: caza la regresión en local, antes de
+empujar, y `LaMatrizDeCiEmpiezaEnLaMinima` comprueba que la matriz no vuelva a
+dejarse fuera la única versión que de verdad hay que vigilar.
 """
 
 from __future__ import annotations
 
 import ast
 import pathlib
+import re
 import unittest
 
 VERSION_MINIMA = (3, 9)
@@ -104,6 +107,36 @@ class Sintaxis(unittest.TestCase):
                     _aplaza_anotaciones(arbol),
                     f"{ruta.name} escribe anotaciones con `|` y no aplaza su "
                     f"evaluación: en Python 3.9 esto revienta al importar")
+
+
+class LaMatrizDeCiEmpiezaEnLaMinima(unittest.TestCase):
+    """La versión mínima es la única que no se puede dejar sin ejecutar.
+
+    La matriz empezaba en 3.10 mientras el comentario de al lado decía que
+    cubría «desde la mínima». Nadie lo notó porque un comentario no falla. Esto
+    sí: si alguien sube el suelo de la matriz sin subir `VERSION_MINIMA` —o al
+    revés— se entera aquí y no meses después, en el equipo de un usuario.
+    """
+
+    FLUJO = RAIZ / ".github" / "workflows" / "tests.yml"
+
+    def versiones(self) -> list[tuple[int, ...]]:
+        texto = self.FLUJO.read_text(encoding="utf-8")
+        linea = next(l for l in texto.splitlines() if l.strip().startswith("python:"))
+        return sorted(tuple(int(p) for p in v.split("."))
+                      for v in re.findall(r'"(\d+\.\d+)"', linea))
+
+    def test_la_matriz_se_puede_leer(self):
+        # Si el formato del flujo cambia y el regex deja de encontrar nada, el
+        # test de abajo pasaría en vacío.
+        self.assertGreaterEqual(len(self.versiones()), 2)
+
+    def test_la_mas_baja_es_la_version_minima(self):
+        self.assertEqual(
+            self.versiones()[0], VERSION_MINIMA,
+            f"la matriz de CI empieza en {self.versiones()[0]} y el proyecto "
+            f"promete {VERSION_MINIMA}: la versión mínima es justo la que no "
+            f"puede quedarse sin ejecutar")
 
 
 if __name__ == "__main__":
