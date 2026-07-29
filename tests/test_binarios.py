@@ -205,6 +205,21 @@ class NvidiaSmi(_EnDirectorioTrampa):
                 Path(encontrado).resolve().is_relative_to(self.trampa.resolve()),
                 "se ha resuelto al ejecutable del directorio actual")
 
+    @unittest.skipUnless(IS_WINDOWS, "%SystemRoot% solo decide rutas en Windows")
+    def test_no_se_coge_el_que_senala_systemroot(self):
+        # Cerrar la búsqueda por PATH y dejar abierta la variable de entorno no
+        # cierra nada: es el mismo hueco por otra puerta, y `%SystemRoot%` lo
+        # cambia cualquiera que arranque este proceso. System32 se le pregunta a
+        # Windows con GetSystemDirectoryW, que no mira el entorno.
+        falso32 = self.trampa / "System32"
+        falso32.mkdir()
+        shutil.copy2(os.path.join(_SYSTEM32, "cmd.exe"), falso32 / "nvidia-smi.exe")
+        os.environ["SystemRoot"] = str(self.trampa)
+        encontrado = sensors._find_nvidia_smi() or ""
+        # Estricto a propósito: la trampa existe siempre, así que el equipo tenga
+        # o no una NVIDIA de verdad, resolver ahí solo puede ser el fallo.
+        self.assertNotIn(str(self.trampa).lower(), encontrado.lower())
+
     def test_lo_que_devuelve_es_una_ruta_absoluta_o_nada(self):
         encontrado = sensors._find_nvidia_smi()
         if encontrado is not None:

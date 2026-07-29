@@ -21,7 +21,7 @@ from typing import Any
 import psutil
 
 from .const import IS_WINDOWS
-from .platform_utils import ps_json, run_cmd
+from .platform_utils import _sys_exe, ps_json, run_cmd
 
 # Nombres de sensor que corresponden al paquete de CPU, de mas a menos fiable.
 _CPU_SENSOR_HINTS = ("cpu package", "core (tctl/tdie)", "cpu total", "package id",
@@ -247,13 +247,20 @@ def _find_nvidia_smi() -> str | None:
         return _nvsmi_path  # type: ignore[return-value]
     # En Windows no se busca por PATH: CPython inserta el directorio actual en la
     # posicion 0 de esa busqueda, asi que un nvidia-smi.exe dejado junto al .exe
-    # ganaria a los dos sitios donde el driver lo instala de verdad — y esto puede
-    # acabar ejecutandose elevado. Solo las rutas absolutas conocidas. En Linux el
-    # PATH no incluye el directorio actual y `which` sigue siendo la via correcta.
+    # ganaria a los dos sitios donde el driver lo instala de verdad. Solo las
+    # rutas absolutas conocidas. En Linux el PATH no incluye el directorio actual
+    # y `which` sigue siendo la via correcta.
+    #
+    # System32 se pregunta con `_sys_exe`, que lo saca de GetSystemDirectoryW y
+    # no del entorno. `%SystemRoot%` lo puede cambiar cualquiera que arranque
+    # este proceso, y cerrar el PATH dejando abierta la variable no cierra nada:
+    # es el mismo hueco por otra puerta. Ya no se trata de una elevacion —este
+    # proceso no se eleva—, sino de dos cosas que siguen importando: que no se
+    # cuelgue un proceso ajeno del arbol de Quilate, y que la temperatura y la
+    # VRAM del informe salgan del driver y no de lo que alguien quiera contar.
     if IS_WINDOWS:
-        system_root = os.environ.get("SystemRoot", r"C:\Windows")
         candidates = [
-            os.path.join(system_root, "System32", "nvidia-smi.exe"),
+            _sys_exe("nvidia-smi.exe"),
             r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
         ]
     else:
