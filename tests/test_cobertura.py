@@ -122,6 +122,26 @@ class RecuentoHonesto(unittest.TestCase):
         self.assertEqual([l for l, _ in a.unverified], ["Sin dato", "Reventada"])
         self.assertEqual([l for l, _ in a.not_applicable], ["No aplica"])
 
+    def test_un_fallo_de_quilate_se_dice_que_es_de_quilate(self):
+        # «no evaluable (KeyError)» en mitad de una lista de comprobaciones del
+        # equipo se lee como un problema del equipo, y quien lo lea se pondrá a
+        # buscar qué tiene mal. No tiene nada mal: el fallo es del programa.
+        # Se ejercita el bucle de `run()` de verdad, no una copia suya.
+        import io
+        from contextlib import redirect_stdout
+        from quilate.console import C
+
+        a = Auditor(SystemInfo(), None)
+        C.disable()
+        salida = io.StringIO()
+        with patched(audit, reg_read=lambda *args, **k: 1 / 0):
+            with redirect_stdout(salida):
+                a.run()
+        texto = salida.getvalue()
+        self.assertIn("fallo de Quilate", texto)
+        motivos = " ".join(motivo for _, motivo in a.unverified)
+        self.assertIn("no un problema de tu equipo", motivos)
+
     def test_una_comprobacion_que_revienta_no_desaparece(self):
         # Antes, una excepción imprevista se tragaba en el bucle y la
         # comprobación no salía por ningún lado del informe.

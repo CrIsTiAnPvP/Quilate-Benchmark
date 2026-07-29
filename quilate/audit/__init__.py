@@ -212,5 +212,14 @@ class Auditor(ChecksRendimiento, ChecksSeguridad,
             except Exception as exc:
                 # Una comprobación que revienta desaparecía del informe sin
                 # dejar rastro, que es la peor forma posible de fallar.
-                self.unverified.append((label, f"error interno · {type(exc).__name__}: {exc}"))
-                spinner_done(f"no evaluable ({type(exc).__name__})", ok=False)
+                #
+                # Se dice de quién es la culpa a propósito. Sin esa frase, «no
+                # evaluable (KeyError)» en mitad de una lista de comprobaciones
+                # del equipo se lee como un problema del equipo, y quien lo lea
+                # se pondrá a buscar qué tiene mal. No tiene nada mal: el fallo
+                # es de Quilate.
+                self.unverified.append(
+                    (label, f"error interno de Quilate, no un problema de tu equipo "
+                            f"· {type(exc).__name__}: {exc}"))
+                spinner_done(f"no evaluable: fallo de Quilate ({type(exc).__name__})",
+                             ok=False)

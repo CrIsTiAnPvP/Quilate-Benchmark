@@ -22,7 +22,8 @@ from types import SimpleNamespace
 
 from quilate.benchmark import PY_ADJUST
 from quilate import cli
-from quilate.cli import _motivo, _run_comparison
+from quilate.cli import _run_comparison
+from quilate.console import _motivo
 from quilate.console import C
 from quilate.compare import (MARGEN_DESCONOCIDO_PCT, RunLoadError, _ajuste_python,
                              calibracion, comparabilidad, comparar_hallazgos,

@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 import psutil
 
-from .console import C, section, spinner_done, spinner_step
+from .console import C, _motivo, section, spinner_done, spinner_step
 from .const import IS_WINDOWS
 from .gpu_bench import GPUNoDisponible, medir_gpu
 from .rawio import DiskIO
@@ -283,10 +283,14 @@ class Benchmark:
         tercera se intentó y falló. Una prueba que no se ha podido hacer no es
         una prueba que no exista.
         """
+        # `_motivo` y no el mensaje crudo: lo que salía era «[Errno 28] No space
+        # left on device», en inglés y con el número de error de C, en mitad de
+        # un informe escrito para quien no programa. La métrica sí conserva el
+        # texto original, que es donde sirve: ahí lo lee quien va a depurarlo.
         self._metric(f"{clave}_error", f"{etiqueta}: no medida",
                      type(exc).__name__, "",
                      f"la prueba no llegó a completarse: {exc}")
-        spinner_done(f"error: {exc}", ok=False)
+        spinner_done(f"no se ha podido medir: {_motivo(exc)}", ok=False)
 
     def _snapshot(self, moment: str) -> dict:
         """Foto de frecuencia, temperatura y GPU en un instante de la sesión."""

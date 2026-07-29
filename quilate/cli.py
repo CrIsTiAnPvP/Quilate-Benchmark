@@ -12,8 +12,8 @@ from .audit import Auditor
 from .benchmark import Benchmark
 from .compare import RunLoadError, compare_runs, load_run
 from .compare_report import print_comparison
-from .console import (C, banner, clear_screen, configure_output, enable_ansi,
-                      read_key, section, spinner_done, spinner_step)
+from .console import (C, _motivo, banner, clear_screen, configure_output,
+                      enable_ansi, read_key, section, spinner_done, spinner_step)
 from .const import APP_NAME, AUTHOR, IS_WINDOWS, WEBSITE_URL
 from .export import build_payload, export_html, export_json, export_plan
 from . import elevacion
@@ -148,38 +148,6 @@ def _pedir_permisos(args: argparse.Namespace) -> None:
     else:
         print(f"  {C.GREEN}✓{C.RESET} Permisos concedidos "
               f"{C.DIM}(el proceso con permisos ya ha terminado).{C.RESET}")
-
-
-# Lo que le pasa al programa, dicho para quien no programa. El resto del informe
-# se ha escrito con ese criterio —los `detail` de cada hallazgo explican el
-# porqué, no solo el qué— y no hay motivo para que la única palabra en inglés y
-# en CamelCase de toda la ejecución sea la que aparece cuando algo falla.
-# Los textos son neutrales respecto a lo que se estaba haciendo, porque el mismo
-# traductor se usa al leer (rastreo, red) y al escribir (exportaciones): «sin
-# permisos para leerlo» quedaría mal en un fallo de escritura.
-_MOTIVOS = {
-    PermissionError: "permisos insuficientes",
-    FileNotFoundError: "la ruta no existe",
-    NotADirectoryError: "la ruta no es una carpeta",
-    IsADirectoryError: "la ruta es una carpeta, no un fichero",
-    TimeoutError: "ha tardado demasiado",
-    MemoryError: "no hay memoria suficiente",
-    InterruptedError: "algo lo ha interrumpido",
-    OSError: "el sistema lo ha impedido",
-}
-
-
-def _motivo(exc: BaseException) -> str:
-    """Traduce una excepción a algo que se pueda leer sin saber Python.
-
-    Se recorre `_MOTIVOS` en orden y no se usa `type(exc)` directamente para
-    que las subclases —`PermissionError` lo es de `OSError`— encuentren su
-    mensaje concreto antes de caer en el genérico.
-    """
-    for clase, texto in _MOTIVOS.items():
-        if isinstance(exc, clase):
-            return texto
-    return "ha fallado de una forma no prevista"
 
 
 def _run_comparison(rutas: list[str]) -> int:

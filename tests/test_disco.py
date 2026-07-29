@@ -201,6 +201,37 @@ class UnaFaseQueFallaNoSeLlevaALasOtras(unittest.TestCase):
         self.assertNotIn("disk_iops", b.results)
         self.assertIn("disk_iops_error", b.metrics)
 
+    def test_el_fallo_se_dice_en_castellano(self):
+        # Salía «[Errno 5] Error de dispositivo de E/S»: en inglés, con el
+        # número de error de C, en mitad de un informe escrito para quien no
+        # programa. El texto original se conserva en la métrica, que es donde
+        # sirve —ahí lo lee quien vaya a depurarlo—, no en pantalla.
+        salida = io.StringIO()
+        creados = itertools.count()
+
+        class DiskIOQueFallaAlLeer(DiskIO):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._malo = next(creados) == 1
+
+            def read(self, n):
+                if self._malo:
+                    raise PermissionError(13, "Acceso denegado")
+                return super().read(n)
+
+        original = benchmark.DiskIO
+        benchmark.DiskIO = DiskIOQueFallaAlLeer
+        try:
+            b = benchmark.Benchmark(disk_size_mb=8, target_dir=self.dir.name)
+            with redirect_stdout(salida):
+                b.run_disk()
+        finally:
+            benchmark.DiskIO = original
+        texto = salida.getvalue()
+        self.assertIn("permisos insuficientes", texto)
+        self.assertNotIn("PermissionError", texto)
+        self.assertIn("PermissionError", str(b.metrics["disk_read_error"]))
+
     def test_el_temporal_se_borra_aunque_falle_una_fase(self):
         # El `finally` de limpieza sigue siendo uno solo, y sigue haciendo su
         # trabajo: partir el `try` no podía tocarlo.
