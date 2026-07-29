@@ -66,6 +66,26 @@ def _sys_exe(name: str) -> str:
     return os.path.join(_SYSTEM32, _SUBDIR.get(name.lower(), ""), name)
 
 
+def _system_drive() -> str:
+    """La unidad donde está Windows, según Windows.
+
+    `%SystemDrive%` lo cambia cualquiera que arranque este proceso, igual que
+    `%SystemRoot%`. Aquí no da privilegios: da un informe equivocado y callado.
+    Con la variable apuntando a otra letra, `check_disk_encryption` busca en la
+    respuesta de BitLocker un volumen que no existe, no lo encuentra y se declara
+    «sin dato» — deja de comprobar el cifrado del disco sin decir que ha dejado
+    de comprobarlo, que es la peor de las tres formas de fallar.
+
+    Se saca de la misma fuente que `_system32()`, que pregunta a la API. La
+    variable de entorno queda de último recurso, por si esa no contestara.
+    """
+    if not IS_WINDOWS:
+        return "/"
+    if _SYSTEM32[1:2] == ":":
+        return _SYSTEM32[:2] + "\\"
+    return os.environ.get("SystemDrive", "C:") + "\\"
+
+
 def _console_encoding() -> str:
     """Codificación real de la salida de los programas de consola de Windows.
 

@@ -18,8 +18,8 @@ import unittest
 from pathlib import Path
 
 from quilate.const import IS_WINDOWS
-from quilate.platform_utils import (_SYSTEM32, _sys_exe, _system32, run_cmd,
-                                    run_cmd_bytes)
+from quilate.platform_utils import (_SYSTEM32, _sys_exe, _system32,
+                                    _system_drive, run_cmd, run_cmd_bytes)
 from quilate import sensors
 
 
@@ -50,6 +50,33 @@ class _EnDirectorioTrampa(unittest.TestCase):
         destino = self.trampa / nombre
         shutil.copy2(os.path.join(_SYSTEM32, "cmd.exe"), destino)
         return destino
+
+
+@unittest.skipUnless(IS_WINDOWS, "%SystemDrive% solo existe en Windows")
+class UnidadDeSistema(_EnDirectorioTrampa):
+    """Qué disco se audita no lo decide una variable de entorno.
+
+    Manipular `%SystemDrive%` no da privilegios, pero silencia una comprobación
+    de seguridad sin avisar: `check_disk_encryption` busca en la respuesta de
+    BitLocker el volumen que diga la variable, y si apunta a una letra que no es
+    la del sistema no lo encuentra y se declara «sin dato». El cifrado del disco
+    deja de comprobarse y el informe no dice que haya dejado de comprobarlo.
+    """
+
+    def test_no_la_decide_la_variable_de_entorno(self):
+        real = _system_drive()
+        os.environ["SystemDrive"] = "D:" if not real.startswith("D") else "E:"
+        self.assertEqual(_system_drive(), real)
+
+    def test_sale_de_la_misma_fuente_que_system32(self):
+        self.assertEqual(_system_drive().rstrip("\\").upper(),
+                         _SYSTEM32[:2].upper())
+
+    def test_termina_en_barra_como_esperan_sus_consumidores(self):
+        # `default_roots` la pasa a `os.path.isdir` y la comprobación de
+        # BitLocker le hace `rstrip("\\")`: sin la barra, «C:» es la ruta
+        # relativa al directorio actual de esa unidad, no su raíz.
+        self.assertTrue(_system_drive().endswith("\\"))
 
 
 @unittest.skipUnless(IS_WINDOWS, "el orden de búsqueda de CreateProcess es de Windows")

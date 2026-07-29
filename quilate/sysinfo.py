@@ -14,8 +14,8 @@ import psutil
 
 from . import elevacion
 from .const import IS_LINUX, IS_WINDOWS
-from .platform_utils import (PSResult, _bloque, _ps_raw, guion_de_bloques, is_admin,
-                             reg_read, trocear, winreg)
+from .platform_utils import (PSResult, _bloque, _ps_raw, _system_drive,
+                             guion_de_bloques, is_admin, reg_read, trocear, winreg)
 from .sensors import gpu_telemetry
 
 
@@ -99,7 +99,7 @@ def collect_system_info() -> SystemInfo:
             "physical": None,
         })
 
-    si.system_drive = os.environ.get("SystemDrive", "C:") + "\\" if IS_WINDOWS else "/"
+    si.system_drive = _system_drive()
 
     if IS_WINDOWS:
         _collect_windows_info(si)

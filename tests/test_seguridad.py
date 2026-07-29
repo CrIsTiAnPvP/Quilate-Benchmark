@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import os
 import re
 import tempfile
 import unittest
@@ -27,7 +28,8 @@ from pathlib import Path
 from quilate import audit
 from quilate.audit import (SEGURIDAD, SEVERITY_ORDER, Auditor, Finding, NoAplica,
                            SinDato, _estado_antivirus, security_findings)
-from quilate.platform_utils import PSResult
+from quilate.const import IS_WINDOWS
+from quilate.platform_utils import PSResult, _system_drive
 from quilate.export.html_export import export_html
 from quilate.export.plan_export import export_plan
 from quilate.projection import project_improvement, priority_rank
@@ -366,6 +368,25 @@ class CifradoDelDisco(unittest.TestCase):
         a, _ = self._auditar(PSResult([self.volumen(proteccion=0)]))
         pasos = " ".join(a.findings[0].steps).upper()
         self.assertIn("CLAVE DE RECUPERACIÓN", pasos)
+
+    @unittest.skipUnless(IS_WINDOWS, "%SystemDrive% solo existe en Windows")
+    def test_una_variable_de_entorno_manipulada_no_silencia_la_comprobacion(self):
+        # El disco real es el que diga la API; BitLocker informa de ese. Si la
+        # unidad saliera de `%SystemDrive%`, apuntarla a otra letra dejaría la
+        # comprobación sin encontrar el volumen y se declararía «sin dato»:
+        # el cifrado dejaría de comprobarse sin que el informe lo dijera.
+        entorno = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(entorno)))
+        real = _system_drive()
+        os.environ["SystemDrive"] = "D:" if not real.startswith("D") else "E:"
+
+        si = SystemInfo()
+        si.system_drive = _system_drive()
+        a = Auditor(si, None)
+        with patched(audit, elevado={"bitlocker": PSResult(
+                [self.volumen(mount=real.rstrip("\\"), proteccion=0, estado=0)])}):
+            a.check_disk_encryption()
+        self.assertEqual([f.id for f in a.findings], ["sin_cifrado"])
 
     def test_en_windows_home_no_aplica(self):
         # El cmdlet no existe. No es un dato que falte: es una pregunta que no
