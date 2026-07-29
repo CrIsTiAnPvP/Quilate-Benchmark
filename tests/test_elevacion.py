@@ -88,6 +88,7 @@ class LoQueSeEjecutaEsFijo(unittest.TestCase):
 
 
 class CuandoNoHayPermisos(unittest.TestCase):
+    @unittest.skipUnless(IS_WINDOWS, "el aviso de UAC es de Windows: fuera de el todo esto se atajo")
     def test_decir_que_no_al_uac_no_es_un_fallo_del_programa(self):
         # Es un camino normal: el informe tiene que poder decir «no se comprobó
         # porque no diste permisos» en vez de dar por bueno lo que nadie miró.
@@ -204,6 +205,7 @@ class RecogerUnaSolaVez(unittest.TestCase):
         elevacion._lanzar_elevado = self.lanzar
         elevacion.is_admin = self.admin
 
+    @unittest.skipUnless(IS_WINDOWS, "el aviso de UAC es de Windows: fuera de el todo esto se atajo")
     def test_sin_permiso_para_preguntar_no_se_pregunta(self):
         # Importar Quilate como biblioteca, o correr sus tests, no puede
         # sacarle a nadie un diálogo de Windows por sorpresa.
@@ -221,6 +223,7 @@ class RecogerUnaSolaVez(unittest.TestCase):
         # no»: son dos frases distintas para quien lo lee.
         self.assertNotEqual(NO_PEDIDOS, SIN_PERMISOS)
 
+    @unittest.skipUnless(IS_WINDOWS, "el aviso de UAC es de Windows: fuera de el todo esto se atajo")
     def test_solo_se_pide_una_vez(self):
         # Cada llamada sería otro aviso de UAC, y encadenar diálogos es la forma
         # más rápida de enseñarle a alguien a darle a «Sí» sin leer.
@@ -245,6 +248,7 @@ class RecogerUnaSolaVez(unittest.TestCase):
         self.assertEqual(set(lote), set(_CONSULTAS_ELEVADAS))
 
 
+@unittest.skipUnless(IS_WINDOWS, "el aviso de UAC es de Windows: fuera de el todo esto se atajo")
 class CuandoSePideYCuandoNo(unittest.TestCase):
     """El aviso de UAC ya no relanza nada: es la pregunta en sí.
 
@@ -319,6 +323,53 @@ class CuandoSePideYCuandoNo(unittest.TestCase):
         # motivo ya no existe, y dejar dos preguntas seguidas sobraba.
         self.assertFalse(hasattr(cli, "_ask_elevate"))
         self.assertFalse(hasattr(cli, "_try_elevate"))
+
+
+class FueraDeWindows(unittest.TestCase):
+    """El atajo de las otras plataformas, afirmado y no solo omitido.
+
+    Los diez tests de arriba miran el aviso de UAC, que solo existe en Windows,
+    asi que fuera de el se omiten. Omitir no es comprobar: aqui se afirma que el
+    atajo hace lo correcto —no lanzar nada y devolver un motivo legible por cada
+    consulta— en vez de dejar Linux sin nada que decir sobre este modulo.
+
+    Y no es teorico: estos diez tests llevaban desde que se escribieron sin
+    ejecutarse nunca en Linux, porque el ultimo CI verde de la rama principal
+    corrio un arbol con nueve ficheros de test menos.
+    """
+
+    def setUp(self):
+        elevacion.olvidar()
+        self.addCleanup(elevacion.olvidar)
+        self.lanzar = elevacion._lanzar_elevado
+        self.addCleanup(lambda: setattr(elevacion, "_lanzar_elevado", self.lanzar))
+        self.llamadas = []
+        elevacion._lanzar_elevado = lambda *a: self.llamadas.append(a) or True
+
+    @unittest.skipIf(IS_WINDOWS, "esto describe lo que pasa fuera de Windows")
+    def test_no_se_monta_ningun_canal(self):
+        elevacion.permitir_uac(True)
+        elevacion.recoger()
+        self.assertEqual(self.llamadas, [], "se ha intentado elevar fuera de Windows")
+
+    @unittest.skipIf(IS_WINDOWS, "esto describe lo que pasa fuera de Windows")
+    def test_cada_consulta_sale_con_un_motivo_legible(self):
+        # Ni una clave de menos: el informe recorre el lote entero y una que
+        # faltara saldria como KeyError en vez de como «no se pudo mirar».
+        lote = elevacion.recoger()
+        self.assertEqual(set(lote), set(_CONSULTAS_ELEVADAS))
+        for clave, valor in lote.items():
+            with self.subTest(consulta=clave):
+                self.assertFalse(valor.ok)
+                self.assertIn("Windows", valor.error)
+
+    @unittest.skipIf(IS_WINDOWS, "esto describe lo que pasa fuera de Windows")
+    def test_pedir_permisos_no_dice_nada(self):
+        # Anunciar un aviso de UAC que no va a aparecer seria peor que callarse.
+        salida = io.StringIO()
+        with redirect_stdout(salida):
+            cli._pedir_permisos(argparse.Namespace(no_elevate=False, elevate=False))
+        self.assertEqual(salida.getvalue(), "")
 
 
 @unittest.skipUnless(IS_WINDOWS, "la tubería con nombre es de Windows")
