@@ -40,6 +40,7 @@ def load_run(path: Path) -> dict:
         raise RunLoadError(f"{path} no parece un export de Quilate "
                            "(falta «meta» o «scores»)")
     datos["benchmark"] = _pruebas_utilizables(datos.get("benchmark"))
+    datos["dispersion"] = _dispersiones_utilizables(datos.get("dispersion"))
     return datos
 
 
@@ -64,6 +65,36 @@ def _pruebas_utilizables(benchmark: Any) -> dict:
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             continue
         utilizables[clave] = prueba
+    return utilizables
+
+
+def _dispersiones_utilizables(dispersion: Any) -> dict:
+    """Solo los márgenes con los que `_margen` puede operar.
+
+    El margen es un dato auxiliar, y para su ausencia el módulo ya tiene una vía
+    diseñada: `MARGEN_DESCONOCIDO_PCT`. Por eso lo ilegible se descarta y la
+    comparación sigue, en vez de abortarla —y se descarta del lado conservador,
+    porque sin margen el umbral queda más ancho: equivocarse aquí cuesta un «no
+    concluyente», nunca una mejora celebrada de más.
+
+    Las cifras de `scores` y `projection` no se criban así a propósito. Esas son
+    el objeto mismo de la comparación, y descartarlas en silencio sería quitarle
+    al usuario justo lo que ha venido a preguntar sin decírselo: cuando una de
+    ellas no es un número, `--compare` para y lo explica.
+    """
+    if not isinstance(dispersion, dict):
+        return {}
+    utilizables = {}
+    for clave, datos in dispersion.items():
+        if not isinstance(datos, dict):
+            continue
+        raw = datos.get("spread_pct")
+        # Ausente o cero ya se leía como «sin margen» y se sigue leyendo igual.
+        # Lo que no puede pasar es un texto, que revienta el `float()`. `bool`
+        # es subclase de `int` y tampoco es la medida de nada.
+        if raw and (isinstance(raw, bool) or not isinstance(raw, (int, float))):
+            continue
+        utilizables[clave] = datos
     return utilizables
 
 

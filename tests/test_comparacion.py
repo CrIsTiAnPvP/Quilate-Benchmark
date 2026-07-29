@@ -141,6 +141,43 @@ class FicherosIncompletos(unittest.TestCase):
         self.assertEqual(set(cargado["benchmark"]), {"disk_read"})
         self.assertEqual(cargado["benchmark"]["disk_read"]["raw"], 1000.0)
 
+    def test_un_margen_que_no_es_un_diccionario(self):
+        run = ejecucion()
+        run["dispersion"]["disk_read"] = "roto"
+        self._comparar(run)          # antes: AttributeError en «roto».get
+
+    def test_un_spread_que_no_es_numero(self):
+        run = ejecucion()
+        run["dispersion"]["disk_read"]["spread_pct"] = "mucho"
+        self._comparar(run)          # antes: ValueError en float("mucho")
+
+    def test_una_dispersion_que_no_es_un_diccionario(self):
+        run = ejecucion()
+        run["dispersion"] = ["disk_read"]
+        self._comparar(run)
+
+    def test_el_margen_ilegible_se_supone_amplio(self):
+        # Descartarlo devuelve el umbral al supuesto conservador, que es más
+        # ancho: una diferencia pequeña pasa a ser «dentro del margen», nunca al
+        # revés. Descartar un margen no puede acabar declarando mejoras.
+        run = ejecucion()
+        run["dispersion"]["disk_read"] = "roto"
+        fila = next(f for f in self._comparar(run)["tests"] if f["key"] == "disk_read")
+        self.assertEqual(fila["threshold"], MARGEN_DESCONOCIDO_PCT)
+        self.assertFalse(fila["margin_known"])
+
+    def test_un_margen_bueno_del_mismo_fichero_sobrevive(self):
+        run = ejecucion()
+        run["dispersion"]["cpu_single"] = "roto"
+        self.assertEqual(set(self._cargar(run)["dispersion"]), {"disk_read"})
+
+    def test_un_spread_ausente_se_sigue_leyendo_como_cero(self):
+        # Comportamiento de siempre: ausente o cero ya era «sin margen». La
+        # criba no puede aprovechar para cambiarlo de paso.
+        run = ejecucion()
+        del run["dispersion"]["disk_read"]["spread_pct"]
+        self.assertEqual(set(self._cargar(run)["dispersion"]), {"disk_read"})
+
     def test_un_hallazgo_sin_id(self):
         run = ejecucion()
         run["findings"] = [{"title": "algo sin identificar"}]
@@ -184,6 +221,40 @@ class ElMensajeQueVeElUsuario(unittest.TestCase):
     def test_un_dato_de_otro_tipo_no_saca_una_traza(self):
         roto = ejecucion()
         roto["scores"]["overall"] = "bastante"
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("le faltan datos", salida)
+
+    def test_un_margen_ilegible_no_impide_comparar(self):
+        # El reparto: `dispersion` es auxiliar y tiene un supuesto para su
+        # ausencia, así que se descarta y la comparación se hace igual.
+        roto = ejecucion()
+        roto["dispersion"]["disk_read"] = "roto"
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 0)
+        self.assertNotIn("No se puede comparar", salida)
+
+    def test_una_puntuacion_de_componente_ilegible_se_dice(self):
+        # La otra mitad del reparto: las notas son el objeto de la comparación.
+        # Descartarlas en silencio sería contestar a medias sin avisar.
+        roto = ejecucion()
+        roto["scores"]["components"]["disk"] = "bien"
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("le faltan datos", salida)
+
+    def test_una_proyeccion_ilegible_se_dice(self):
+        roto = ejecucion()
+        roto["projection"] = {"projected_overall": "más", "current_overall": 100.0}
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("le faltan datos", salida)
+
+    def test_un_anidado_que_no_es_un_objeto_tampoco_saca_traza(self):
+        # La red de última instancia, que es lo que faltaba: el módulo indexa
+        # dos y tres niveles y no hay saneador para cada rincón del esquema.
+        roto = ejecucion()
+        roto["coverage"]["unverified"] = ["algo"]
         codigo, salida = self._comparar(roto, ejecucion())
         self.assertEqual(codigo, 2)
         self.assertIn("le faltan datos", salida)

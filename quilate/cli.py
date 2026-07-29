@@ -189,11 +189,15 @@ def _run_comparison(rutas: list[str]) -> int:
         comparacion = compare_runs(antes, despues)
     except RunLoadError as exc:
         return _no_se_puede_comparar(str(exc))
-    except (KeyError, TypeError, ValueError) as exc:
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
         # `load_run` criba lo que sabe cribar, pero el fichero viene de fuera y
         # puede faltarle cualquier otra cosa. Que eso salga como una traza de
         # Python, justo debajo del mensaje cuidado que ya existe para el fichero
         # que no es de Quilate, no tiene defensa.
+        #
+        # `AttributeError` es la red del esquema anidado: el módulo indexa dos y
+        # tres niveles, y donde esperaba un objeto puede haber una cadena. Cribar
+        # cada rincón del esquema no compensa; que ninguno saque una traza, sí.
         campo = exc.args[0] if isinstance(exc, KeyError) else exc
         return _no_se_puede_comparar(f"el fichero es de Quilate pero le faltan "
                                      f"datos: {campo}")
