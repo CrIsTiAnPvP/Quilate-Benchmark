@@ -18,7 +18,9 @@ import json
 import unittest
 
 from quilate import sysinfo
-from quilate.sysinfo import _CONSULTAS_INVENTARIO, _bloque, _inventario_windows
+from quilate.sysinfo import (SystemInfo, _CONSULTAS_INVENTARIO, _bloque,
+                             _inventario_windows)
+from tests.support import patched
 
 
 def respuesta(**bloques) -> dict:
@@ -27,6 +29,126 @@ def respuesta(**bloques) -> dict:
     for clave in _CONSULTAS_INVENTARIO:
         salida[clave] = bloques.get(clave, {"ok": True, "filas": []})
     return salida
+
+
+class VolcarCadaPieza(unittest.TestCase):
+    """Las seis piezas del inventario de Windows, una a una.
+
+    `_collect_windows_info` eran cien líneas seguidas que nadie ejecutaba en la
+    suite: no hay forma de llamarlas sin WMI de verdad. Repartidas en seis
+    funciones que reciben ya sus filas, sí se pueden probar — y de paso queda
+    cubierto lo que cada bloque hace de no evidente, que es bastante: la
+    velocidad real de la RAM frente a la nominal, el entero de 32 bits que
+    satura la VRAM en 4 GB, y el adaptador que está pero no pinta nada.
+    """
+
+    def setUp(self):
+        self.si = SystemInfo()
+
+    # --- sistema operativo ---
+    def test_el_sistema_operativo_y_su_antiguedad(self):
+        sysinfo._volcar_os(self.si, [{"Caption": "Microsoft Windows 11 Pro",
+                                      "Version": "10.0.26100", "BuildNumber": "26100",
+                                      "InstallDate": "20240115000000.000000+060"}])
+        self.assertEqual(self.si.os_name, "Microsoft Windows 11 Pro")
+        self.assertIn("build 26100", self.si.os_build)
+        self.assertEqual(self.si.os_install_date, "2024-01-15")
+        self.assertGreater(self.si.os_age_days, 0)
+
+    def test_sin_filas_no_se_pisa_lo_que_ya_habia(self):
+        self.si.os_name = "lo de antes"
+        sysinfo._volcar_os(self.si, [])
+        self.assertEqual(self.si.os_name, "lo de antes")
+
+    def test_una_fecha_de_instalacion_ilegible_no_revienta(self):
+        sysinfo._volcar_os(self.si, [{"Caption": "Windows", "InstallDate": "vaya"}])
+        self.assertIsNone(self.si.os_install_date)
+
+    # --- CPU ---
+    def test_la_cpu_llega_sin_espacios_de_sobra(self):
+        sysinfo._volcar_cpu(self.si, [{"Name": "  AMD Ryzen 9 5900X  ",
+                                       "MaxClockSpeed": 3700}])
+        self.assertEqual(self.si.cpu_name, "AMD Ryzen 9 5900X")
+        self.assertEqual(self.si.cpu_max_mhz, 3700.0)
+
+    # --- memoria ---
+    def test_la_ram_distingue_la_velocidad_real_de_la_nominal(self):
+        # Es la diferencia entre XMP activado y no: informar de la nominal sería
+        # dar por bueno un rendimiento que el equipo no tiene.
+        sysinfo._volcar_memoria(self.si, [
+            {"DeviceLocator": "DIMM0", "Capacity": 8 * 1024**3,
+             "ConfiguredClockSpeed": 2133, "Speed": 3600},
+            {"DeviceLocator": "DIMM1", "Capacity": 8 * 1024**3,
+             "ConfiguredClockSpeed": 2133, "Speed": 3600}])
+        self.assertEqual(self.si.ram_speed_mhz, 2133)
+        self.assertEqual(self.si.ram_speed_rated_mhz, 3600)
+        self.assertEqual(self.si.ram_channels, 2)
+
+    def test_una_ranura_vacia_no_cuenta_como_canal(self):
+        sysinfo._volcar_memoria(self.si, [
+            {"DeviceLocator": "DIMM0", "Capacity": 8 * 1024**3, "Speed": 3200},
+            {"DeviceLocator": "DIMM1", "Capacity": 0, "Speed": 0}])
+        self.assertEqual(self.si.ram_channels, 1)
+
+    # --- GPU ---
+    def _volcar_gpus(self, gpus, registro=None, telemetria=()):
+        with patched(sysinfo,
+                     _vram_from_registry=lambda: registro or {},
+                     gpu_telemetry=lambda *a, **k: list(telemetria)):
+            sysinfo._volcar_gpus(self.si, gpus)
+        return self.si.gpus
+
+    def test_la_vram_del_registro_gana_al_entero_de_32_bits(self):
+        # `AdapterRAM` se satura en 4 GB, así que una tarjeta de 12 aparece
+        # siempre como 4. El tamaño real está en el registro.
+        gpus = self._volcar_gpus(
+            [{"Name": "NVIDIA GeForce RTX 3060", "AdapterRAM": 4 * 1024**3,
+              "CurrentHorizontalResolution": 2560}],
+            registro={"nvidia geforce rtx 3060": 12 * 1024**3})
+        self.assertEqual(gpus[0]["vram"], 12 * 1024**3)
+        self.assertIn("registro", gpus[0]["vram_source"])
+
+    def test_nvidia_smi_gana_al_registro(self):
+        gpus = self._volcar_gpus(
+            [{"Name": "NVIDIA GeForce RTX 3060", "AdapterRAM": 4 * 1024**3}],
+            registro={"nvidia geforce rtx 3060": 12 * 1024**3},
+            telemetria=[{"name": "NVIDIA GeForce RTX 3060", "vram": 12884901888,
+                         "temperature": 44}])
+        self.assertEqual(gpus[0]["vram_source"], "nvidia-smi")
+        self.assertEqual(gpus[0]["temperature"], 44)
+
+    def test_la_telemetria_casa_aunque_el_nombre_no_sea_identico(self):
+        # LibreHardwareMonitor y Win32_VideoController no siempre escriben igual
+        # el nombre de la tarjeta.
+        gpus = self._volcar_gpus(
+            [{"Name": "NVIDIA GeForce RTX 3060", "AdapterRAM": 0}],
+            telemetria=[{"name": "GeForce RTX 3060", "temperature": 51}])
+        self.assertEqual(gpus[0]["temperature"], 51)
+
+    def test_un_adaptador_sin_resolucion_esta_pero_no_pinta(self):
+        # Típico de la iGPU cuando el monitor va por la tarjeta dedicada.
+        gpus = self._volcar_gpus([{"Name": "Intel UHD Graphics 770", "AdapterRAM": 0}])
+        self.assertFalse(gpus[0]["active"])
+        self.assertTrue(gpus[0]["integrated"])
+        self.assertIsNone(gpus[0]["resolution"])
+
+    # --- BIOS y chasis ---
+    def test_la_fecha_de_la_bios(self):
+        sysinfo._volcar_bios(self.si, [{"ReleaseDate": "20220310000000.000000+000"}])
+        self.assertEqual(self.si.bios_date, "2022-03-10")
+
+    def test_el_chasis_dice_si_es_portatil(self):
+        sysinfo._volcar_chasis(self.si, [{"ChassisTypes": [10]}])
+        self.assertTrue(self.si.is_laptop)
+
+    def test_un_chasis_que_llega_como_entero_suelto(self):
+        # `ConvertTo-Json` colapsa las listas de un elemento en el elemento.
+        sysinfo._volcar_chasis(self.si, [{"ChassisTypes": 9}])
+        self.assertTrue(self.si.is_laptop)
+
+    def test_una_torre_no_es_un_portatil(self):
+        sysinfo._volcar_chasis(self.si, [{"ChassisTypes": [3]}])
+        self.assertFalse(self.si.is_laptop)
 
 
 class UnBloque(unittest.TestCase):

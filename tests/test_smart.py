@@ -22,9 +22,9 @@ from __future__ import annotations
 import unittest
 
 from quilate.audit import SEGURIDAD, Auditor
-from quilate.sysinfo import (SystemInfo, _ATRIBUTOS_SMART, _map_storage,
-                             _modelo_de_instancia, _smart_atributos,
-                             _smart_del_disco, _smart_por_modelo)
+from quilate.smart import (_ATRIBUTOS_SMART, _modelo_de_instancia,
+                           _smart_atributos, _smart_del_disco, _smart_por_modelo)
+from quilate.sysinfo import SystemInfo, _map_storage
 from tests.support import load
 
 REALES = load("smart_dos_hdd_sata")["discos"]
