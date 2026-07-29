@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 from quilate.benchmark import PY_ADJUST
 from quilate import cli
@@ -339,6 +340,77 @@ class NoPoderEscribirElInforme(unittest.TestCase):
         texto = self._fallar(OSError(28, "No queda espacio"))
         self.assertIn("--html", texto)
         self.assertIn("quilate_informe.html", texto)
+
+
+class ExportarPorBandera(unittest.TestCase):
+    """`--html` y compañía merecen el mismo cuidado que el menú.
+
+    Las tres ramas de exportación por bandera llamaban a las funciones a pelo,
+    sin `try`. Un disco lleno o una carpeta de solo lectura sacaban una traza de
+    Python después de haber corrido el benchmark completo, mientras que el mismo
+    fallo desde el menú daba un mensaje cuidado. La ruta la elige el usuario, así
+    que aquí no se reintenta en otro sitio: se dice lo que ha pasado y se sigue
+    con los demás ficheros.
+    """
+
+    def setUp(self):
+        C.disable()
+        self.addCleanup(setattr, cli, "export_html", cli.export_html)
+        self.addCleanup(setattr, cli, "export_json", cli.export_json)
+
+    def _args(self, **campos):
+        base = {"json": None, "html": None, "export_plan": None}
+        base.update(campos)
+        return SimpleNamespace(**base)
+
+    def _exportar(self, args) -> tuple[list[str], str]:
+        salida = io.StringIO()
+        with redirect_stdout(salida):
+            outputs = cli._exportaciones(args, None, None, None, {})
+        return outputs, salida.getvalue()
+
+    def _romper(self, nombre, excepcion):
+        setattr(cli, nombre, lambda *a, **k: (_ for _ in ()).throw(excepcion))
+
+    def test_una_ruta_que_no_se_puede_escribir_no_saca_traza(self):
+        self._romper("export_html", PermissionError(13, "Acceso denegado"))
+        outputs, texto = self._exportar(self._args(html="X:/no/existe/informe.html"))
+        self.assertEqual(outputs, [])
+        self.assertIn("No se ha podido escribir", texto)
+
+    def test_el_motivo_se_dice_en_castellano(self):
+        self._romper("export_html", PermissionError(13, "Acceso denegado"))
+        _, texto = self._exportar(self._args(html="informe.html"))
+        self.assertIn("permisos insuficientes", texto)
+        self.assertNotIn("PermissionError", texto)
+
+    def test_se_nombra_la_ruta_que_pidio_el_usuario(self):
+        # Y no otra: aquí no hay reserva a la carpeta personal.
+        self._romper("export_html", OSError(28, "No queda espacio"))
+        _, texto = self._exportar(self._args(html="donde/yo/dije.html"))
+        self.assertIn("dije.html", texto)
+        self.assertNotIn(str(Path.home()), texto)
+
+    def test_que_falle_uno_no_se_lleva_a_los_otros(self):
+        self._romper("export_html", OSError(28, "No queda espacio"))
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "datos.json"
+            setattr(cli, "export_json",
+                    lambda p, *a, **k: p.write_text("{}", encoding="utf-8"))
+            outputs, texto = self._exportar(
+                self._args(html="informe.html", json=str(destino)))
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("JSON", outputs[0])
+        self.assertIn("No se ha podido escribir", texto)
+
+    def test_lo_que_se_escribe_bien_se_anuncia(self):
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "datos.json"
+            setattr(cli, "export_json",
+                    lambda p, *a, **k: p.write_text("{}", encoding="utf-8"))
+            outputs, _ = self._exportar(self._args(json=str(destino)))
+        self.assertEqual(len(outputs), 1)
+        self.assertIn(str(destino.resolve()), outputs[0])
 
 
 class ElMargenDecide(unittest.TestCase):

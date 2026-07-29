@@ -301,22 +301,7 @@ def main() -> int:
                   f"Míralo con --history.{C.RESET}\n")
 
     # --- Exportaciones ---
-    outputs: list[str] = []
-    if args.json:
-        pj = Path(args.json)
-        export_json(pj, si, bench, auditor, projection)
-        outputs.append(f"JSON  → {pj.resolve()}")
-    if args.html:
-        ph = Path(args.html)
-        export_html(ph, si, bench, auditor, projection)
-        outputs.append(f"HTML  → {ph.resolve()}")
-    if args.export_plan:
-        if not IS_WINDOWS:
-            print(f"  {C.YELLOW}--export-plan solo está disponible en Windows.{C.RESET}")
-        else:
-            pp = Path(args.export_plan)
-            count = export_plan(pp, si, bench, auditor)
-            outputs.append(f"PLAN  → {pp.resolve()}  ({count} bloques automatizables)")
+    outputs = _exportaciones(args, si, bench, auditor, projection)
     if outputs:
         section("Ficheros generados")
         for o in outputs:
@@ -348,6 +333,56 @@ def _menu_line(key: str, label: str, target: str, done: Path | None = None) -> N
           f"{label.ljust(18)} {C.DIM}{target}{C.RESET}")
 
 
+def _exportar(kind: str, path: Path, si, bench, auditor, projection) -> str:
+    """Escribe una exportación en la ruta dada y devuelve su detalle.
+
+    Único sitio que sabe qué función genera cada tipo. Antes había dos listas
+    paralelas de llamadas —la del menú y la de las banderas— y solo la del menú
+    estaba protegida contra un fallo de escritura.
+    """
+    if kind == "html":
+        export_html(path, si, bench, auditor, projection)
+        return ""
+    if kind == "json":
+        export_json(path, si, bench, auditor, projection)
+        return ""
+    count = export_plan(path, si, bench, auditor)
+    return f"{count} bloque{'s' if count != 1 else ''} automatizable" \
+           f"{'s' if count != 1 else ''}"
+
+
+def _exportaciones(args, si, bench, auditor, projection) -> list[str]:
+    """Los ficheros pedidos por bandera, con el mismo cuidado que los del menú.
+
+    Aquí no hay reserva a la carpeta personal como en `_write_export`: la ruta
+    la ha elegido el usuario y escribir en otro sitio sería desobedecerle. Lo
+    que sí se comparte es que un disco lleno o una carpeta sin permiso no salgan
+    como una traza de Python después de haber corrido el análisis entero, y que
+    el fallo de un fichero no se lleve por delante a los otros dos.
+    """
+    peticiones = [("json", "JSON", args.json), ("html", "HTML", args.html)]
+    if args.export_plan:
+        if IS_WINDOWS:
+            peticiones.append(("plan", "PLAN", args.export_plan))
+        else:
+            print(f"  {C.YELLOW}--export-plan solo está disponible en Windows.{C.RESET}")
+
+    outputs: list[str] = []
+    for kind, etiqueta, ruta in peticiones:
+        if not ruta:
+            continue
+        destino = Path(ruta)
+        try:
+            detalle = _exportar(kind, destino, si, bench, auditor, projection)
+        except OSError as exc:
+            print(f"  {C.RED}✗{C.RESET} No se ha podido escribir {destino}: "
+                  f"{_motivo(exc)}.")
+            continue
+        outputs.append(f"{etiqueta}  → {destino.resolve()}"
+                       + (f"  ({detalle})" if detalle else ""))
+    return outputs
+
+
 def _write_export(kind: str, si, bench, auditor, projection) -> tuple[Path, str] | None:
     """Genera un fichero y devuelve (ruta, detalle), o None si no se pudo.
 
@@ -364,15 +399,7 @@ def _write_export(kind: str, si, bench, auditor, projection) -> tuple[Path, str]
         seen.append(base)
         path = base / name
         try:
-            if kind == "html":
-                export_html(path, si, bench, auditor, projection)
-                return path, ""
-            if kind == "json":
-                export_json(path, si, bench, auditor, projection)
-                return path, ""
-            count = export_plan(path, si, bench, auditor)
-            return path, f"{count} bloque{'s' if count != 1 else ''} automatizable" \
-                         f"{'s' if count != 1 else ''}"
+            return path, _exportar(kind, path, si, bench, auditor, projection)
         except OSError as exc:
             error = exc
     # Nombrar las dos ubicaciones intentadas: tras dos fallos, decir solo «no se
