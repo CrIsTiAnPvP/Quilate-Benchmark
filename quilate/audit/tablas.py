@@ -16,6 +16,9 @@ Solo stdlib. Nada de aquí sabe que existe un `Auditor`.
 
 from __future__ import annotations
 
+import re
+from datetime import date
+
 
 def _clave(valor):
     """Un valor de Windows listo para buscarlo en una de estas tablas.
@@ -132,6 +135,64 @@ _RDP_TCP_CLAVE = _RDP_CLAVE + r"\WinStations\RDP-Tcp"
 # --- SMB1 ---------------------------------------------------------------------
 _SMB1_ACTIVO = {1, "enabled"}
 _SMB1_INACTIVO = {2, "disabled", "disabledwithpayloadremoved"}
+
+
+# --- Soporte de Windows -------------------------------------------------------
+# Hasta cuándo publica Microsoft parches para cada versión. Esta tabla se
+# escribe a mano y caduca sola: por eso lleva su propia fecha de revisión y por
+# eso `check_windows_soportado` se calla cuando lleva demasiado sin tocarse.
+# Decirle a alguien «tu Windows ya no recibe parches» con una tabla vieja es
+# peor que no decirle nada, porque es un aviso que se actúa.
+_SOPORTE_REVISADO = "2026-05"
+_SOPORTE_CADUCA_MESES = 18
+
+# build -> (fin de soporte en Home/Pro, fin en Enterprise/Education)
+# Las ediciones de empresa reciben unos dos años más por la misma build, así
+# que usar una sola fecha marcaría como caducado un equipo que sí tiene parches.
+_SOPORTE_WINDOWS = {
+    19044: ("2023-06-13", "2024-06-11"),   # Windows 10 21H2
+    19045: ("2025-10-14", "2025-10-14"),   # Windows 10 22H2 · fin de Windows 10
+    22000: ("2023-10-10", "2024-10-08"),   # Windows 11 21H2
+    22621: ("2024-10-08", "2025-10-14"),   # Windows 11 22H2
+    22631: ("2025-11-11", "2026-11-10"),   # Windows 11 23H2
+    26100: ("2026-10-13", "2027-10-12"),   # Windows 11 24H2
+}
+
+# Por debajo de la build más antigua de la tabla no hace falta tabla: Windows 8.1
+# dejó de recibir parches en enero de 2023 y Windows 7 en enero de 2020. Esto no
+# caduca, solo puede volverse más cierto con el tiempo.
+_SOPORTE_SUELO = min(_SOPORTE_WINDOWS)
+
+# Las que reciben el ciclo largo. Se busca en el nombre que publica Windows
+# (`Caption`), que trae la edición: «Microsoft Windows 11 Enterprise».
+_EDICIONES_LARGAS = ("enterprise", "education", "iot")
+
+
+def _build_de(os_build: str) -> int | None:
+    """El número de build dentro de lo que publica el inventario.
+
+    Llega como «10.0.26200 (build 26200)» en Windows y como cualquier otra cosa
+    fuera de él, así que se busca el número que va detrás de «build» y, si no
+    está, el tercer componente de la versión.
+    """
+    texto = str(os_build or "")
+    marcado = re.search(r"build\s+(\d+)", texto, re.I)
+    if marcado:
+        return int(marcado.group(1))
+    partes = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", texto)
+    return int(partes.group(3)) if partes else None
+
+
+def _tabla_de_soporte_caducada(hoy: date | None = None) -> bool:
+    """Si la tabla de fin de soporte lleva demasiado sin revisarse.
+
+    Misma idea que `reference_is_stale` para la escala del benchmark, pero
+    contra la fecha de ESTA tabla: son dos cosas que se revisan por separado y
+    atarlas a la misma fecha haría que una caducase por culpa de la otra.
+    """
+    hoy = hoy or date.today()
+    año, mes = (int(x) for x in _SOPORTE_REVISADO.split("-"))
+    return (hoy.year - año) * 12 + (hoy.month - mes) >= _SOPORTE_CADUCA_MESES
 
 
 # --- Boletines de seguridad ---------------------------------------------------

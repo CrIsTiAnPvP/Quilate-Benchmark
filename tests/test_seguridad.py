@@ -21,6 +21,7 @@ import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 from datetime import date, timedelta
 from pathlib import Path
@@ -29,7 +30,8 @@ from quilate import audit
 from quilate.audit import (SEGURIDAD, SEVERITY_ORDER, Auditor, Finding, NoAplica,
                            SinDato, _ESFUERZOS, _RIESGOS, _estado_antivirus,
                            security_findings)
-from quilate.audit.tablas import _RDP_CLAVE, _RDP_TCP_CLAVE
+from quilate.audit.tablas import (_RDP_CLAVE, _RDP_TCP_CLAVE, _SOPORTE_REVISADO,
+                                  _build_de, _tabla_de_soporte_caducada)
 from quilate.const import IS_WINDOWS
 from quilate.platform_utils import PSResult, _system_drive
 from quilate.export.html_export import export_html
@@ -511,6 +513,90 @@ class Cortafuegos(unittest.TestCase):
     def test_una_lista_vacia_no_es_un_equipo_sin_cortafuegos(self):
         with self.assertRaises(SinDato):
             self._auditar([])
+
+
+class VersionDeWindowsConSoporte(unittest.TestCase):
+    """La comprobación que hace inútiles a casi todas las demás.
+
+    En un Windows fuera de soporte, los fallos que se descubran a partir de la
+    fecha de fin no se arreglan nunca. Pero el dato sale de una tabla escrita a
+    mano, así que lo que de verdad hay que probar no es solo que detecte: es
+    que **se calle cuando la tabla ya no es de fiar**. Afirmar «tu Windows no
+    recibe parches» con una tabla vieja es un aviso sobre el que la gente actúa.
+    """
+
+    def _auditar(self, build, nombre="Microsoft Windows 11 Pro"):
+        si = SystemInfo()
+        si.os_build = build
+        si.os_name = nombre
+        a = Auditor(si, None)
+        return a, a.check_windows_soportado()
+
+    def test_una_version_con_soporte_no_genera_nada(self):
+        # 24H2 para Home/Pro: hasta 2026-10-13.
+        a, resumen = self._auditar("10.0.26100 (build 26100)")
+        self.assertEqual(a.findings, [])
+        self.assertIn("2026-10-13", resumen)
+
+    def test_una_version_caducada_es_un_hallazgo(self):
+        # Windows 10 22H2 dejó de recibir parches en octubre de 2025.
+        a, resumen = self._auditar("10.0.19045 (build 19045)")
+        self.assertEqual([f.id for f in a.findings], ["windows_sin_soporte"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("high", SEGURIDAD, 0.0))
+        self.assertIn("2025-10-14", f.detail)
+        self.assertEqual(resumen, "SIN SOPORTE")
+
+    def test_enterprise_recibe_la_fecha_larga(self):
+        # Misma build, dos veredictos: 22H2 caducó en 2024 para Home/Pro y en
+        # octubre de 2025 para Enterprise. Usar una sola fecha marcaría como
+        # caducado un equipo que sí tenía parches.
+        pro, _ = self._auditar("10.0.22621 (build 22621)")
+        self.assertEqual([f.id for f in pro.findings], ["windows_sin_soporte"])
+        ent, _ = self._auditar("10.0.22621 (build 22621)",
+                               "Microsoft Windows 11 Enterprise")
+        self.assertIn("Enterprise", ent.findings[0].detail)
+
+    def test_lo_anterior_a_la_tabla_no_necesita_tabla(self):
+        # Windows 7 y 8.1 llevan años sin parches: esto no caduca, solo puede
+        # volverse más cierto.
+        a, _ = self._auditar("6.1.7601 (build 7601)")
+        self.assertEqual([f.id for f in a.findings], ["windows_sin_soporte"])
+        self.assertIn("anterior a Windows 10", a.findings[0].title)
+
+    def test_una_build_mas_nueva_que_la_tabla_no_se_da_por_buena(self):
+        # No saber no es lo mismo que estar bien. Si se devolviera «con
+        # soporte», la tabla envejecería en silencio.
+        with self.assertRaises(SinDato):
+            self._auditar("10.0.99999 (build 99999)")
+
+    def test_con_la_tabla_caducada_no_se_afirma_nada(self):
+        # La garantía que pide el informe: la tabla se revisa a mano, así que
+        # cuando lleva demasiado sin tocarse esta comprobación se calla.
+        with mock.patch.object(audit.seguridad, "_tabla_de_soporte_caducada",
+                               return_value=True):
+            with self.assertRaises(SinDato) as caso:
+                self._auditar("10.0.19045 (build 19045)")
+        self.assertIn(_SOPORTE_REVISADO, str(caso.exception))
+
+    def test_sin_build_legible_no_se_opina(self):
+        for valor in ("", None, "no hay build aquí"):
+            with self.subTest(valor=valor):
+                with self.assertRaises(SinDato):
+                    self._auditar(valor)
+
+    def test_la_build_se_lee_de_las_dos_formas(self):
+        self.assertEqual(_build_de("10.0.26100 (build 26100)"), 26100)
+        self.assertEqual(_build_de("10.0.26100"), 26100)
+        self.assertIsNone(_build_de("Linux 6.8"))
+
+    def test_la_tabla_no_esta_caducada_hoy(self):
+        # Si este test falla, la tabla necesita una revisión: no es un fallo de
+        # código, es el recordatorio funcionando.
+        self.assertFalse(
+            _tabla_de_soporte_caducada(),
+            f"la tabla de fin de soporte se revisó en {_SOPORTE_REVISADO} y ya "
+            f"ha caducado: revísala y actualiza la fecha")
 
 
 class EscritorioRemoto(unittest.TestCase):

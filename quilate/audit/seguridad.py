@@ -19,10 +19,12 @@ from datetime import date, datetime
 from .. import elevacion
 from ..platform_utils import pending_security_updates, ps_json, reg_read, winreg
 from .modelo import SEGURIDAD, NoAplica, SinDato
-from .tablas import (_CIFRADO_NO, _CIFRADO_SI, _FIREWALL_ACTIVO, _MSRC_GRAVES,
-                     _MSRC_SERIAS, _PERFILES_EXPUESTOS, _RDP_CLAVE,
-                     _RDP_TCP_CLAVE, _SMB1_ACTIVO, _SMB1_INACTIVO, _clave,
-                     _estado_antivirus)
+from .tablas import (_CIFRADO_NO, _CIFRADO_SI, _EDICIONES_LARGAS,
+                     _FIREWALL_ACTIVO, _MSRC_GRAVES, _MSRC_SERIAS,
+                     _PERFILES_EXPUESTOS, _RDP_CLAVE, _RDP_TCP_CLAVE,
+                     _SMB1_ACTIVO, _SMB1_INACTIVO, _SOPORTE_REVISADO,
+                     _SOPORTE_SUELO, _SOPORTE_WINDOWS, _build_de, _clave,
+                     _estado_antivirus, _tabla_de_soporte_caducada)
 
 
 class ChecksSeguridad:
@@ -348,6 +350,75 @@ class ChecksSeguridad:
                    "ese programa siga instalado y siga filtrando por su cuenta",
                    "Nunca lo dejes apagado «para que funcione algo»: abre la regla concreta"])
         return f"DESACTIVADO en {cuales}"
+
+    def check_windows_soportado(self) -> str:
+        """Si esta versión de Windows sigue recibiendo parches de seguridad.
+
+        Es la comprobación que hace inútiles a casi todas las demás: en un
+        Windows fuera de soporte, los fallos que se descubran a partir de la
+        fecha de fin no se arreglan nunca, y no hay ajuste que lo compense.
+
+        La tabla se escribe a mano y por eso caduca sola. Si lleva más de
+        `_SOPORTE_CADUCA_MESES` sin revisarse, esta comprobación se declara sin
+        dato en vez de opinar: una tabla vieja diría que una versión está en
+        soporte cuando ya no lo está, que es el error que no se puede cometer
+        aquí. Es el mismo criterio que aplica la escala de referencia del
+        benchmark con `reference_is_stale`.
+        """
+        build = _build_de(self.si.os_build)
+        if build is None:
+            raise SinDato(f"no se ha podido leer el número de build "
+                          f"(«{self.si.os_build}»)")
+        if _tabla_de_soporte_caducada():
+            raise SinDato(
+                f"la tabla de fin de soporte se revisó en {_SOPORTE_REVISADO} y ya "
+                f"no es de fiar: con ella no se puede afirmar si esta versión "
+                f"sigue recibiendo parches")
+
+        largo = any(e in (self.si.os_name or "").lower() for e in _EDICIONES_LARGAS)
+        fechas = _SOPORTE_WINDOWS.get(build)
+        if fechas is None:
+            if build < _SOPORTE_SUELO:
+                # Por debajo de la tabla no hace falta tabla: son versiones que
+                # dejaron de recibir parches hace años.
+                fin, etiqueta = None, "una versión anterior a Windows 10 22H2"
+            else:
+                # Una build más nueva que la tabla: no se sabe, y no saber no es
+                # lo mismo que estar bien.
+                raise SinDato(f"la build {build} no está en la tabla de fin de "
+                              f"soporte (revisada en {_SOPORTE_REVISADO})")
+        else:
+            fin = date.fromisoformat(fechas[1] if largo else fechas[0])
+            etiqueta = f"build {build}"
+            if fin >= date.today():
+                return f"con soporte hasta {fin.isoformat()}"
+
+        self.add(
+            id="windows_sin_soporte",
+            title=f"Este Windows ya no recibe actualizaciones de seguridad "
+                  f"({etiqueta})",
+            severity="high", category=SEGURIDAD, component="system",
+            detail="Microsoft dejó de publicar parches para esta versión"
+                   + (f" el {fin.isoformat()}" if fin else "")
+                   + ". Los fallos que se descubran a partir de ahí no se arreglan nunca en "
+                     "este equipo: no es que falte una actualización concreta, es que ya no "
+                     "va a haber ninguna. Ningún ajuste de los que propone este informe "
+                     "compensa eso, y por eso aparece aquí y no entre las mejoras."
+                   + (" Las ediciones Enterprise y Education reciben unos dos años más por "
+                      "la misma versión, y esa es la fecha que se ha usado aquí."
+                      if largo else ""),
+            gain=0.0,
+            gain_note="no es una optimización: son parches que ya no van a llegar",
+            effort="alto", risk="medio",
+            steps=["Comprueba si el equipo admite la versión actual: Configuración → "
+                   "Windows Update → Buscar actualizaciones",
+                   "Si el equipo no cumple los requisitos de Windows 11, valora Linux antes "
+                   "que seguir con un sistema sin parches",
+                   "Mientras tanto, no uses este equipo para banca ni correo si puedes "
+                   "evitarlo, y ten copia de seguridad al día",
+                   "Actualizar el sistema operativo es la única solución real: un antivirus "
+                   "no tapa un fallo del propio Windows"])
+        return "SIN SOPORTE"
 
     def check_escritorio_remoto(self) -> str:
         """Si el equipo acepta conexiones de Escritorio remoto, y con qué puerta.
