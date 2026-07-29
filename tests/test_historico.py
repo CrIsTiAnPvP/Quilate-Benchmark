@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -162,6 +163,47 @@ class NadaQueNoSeaUnaCifra(unittest.TestCase):
             with self.subTest(campo=ruta_campo):
                 self.assertNotIn("\\", cadena)
                 self.assertNotIn("/", cadena)
+
+
+class ElReadmeDiceLaVerdad(unittest.TestCase):
+    """La lista de campos del README, contrastada con lo que se escribe.
+
+    El README promete «solo cifras y fechas» y ahora enumera cuáles. Esa
+    promesa es sobre datos personales, así que envejecer mal no es un detalle
+    de documentación: es decirle a alguien que no se guarda algo que sí se
+    guarda. Un campo nuevo en `_resumen` tiene que pasar por el README.
+    """
+
+    RAIZ = Path(__file__).resolve().parent.parent
+
+    def documentados(self) -> set[str]:
+        texto = (self.RAIZ / "README.md").read_text(encoding="utf-8")
+        inicio = texto.index("Dónde está y qué guarda")
+        bloque = texto[inicio:texto.index("El fichero se recorta", inicio)]
+        return set(re.findall(r"`(\w+)`", bloque))
+
+    def escritos(self) -> set[str]:
+        # Con TODOS los componentes: `_resumen` solo escribe los que vienen, y
+        # con la ejecución de ejemplo faltarían tres y el test se los perdería.
+        completo = ejecucion(overall=120.0, boot=31.0, temp=68.0)
+        completo["scores"]["components"] = {
+            c: 100.0 for c in ("cpu_single", "cpu_multi", "memory", "disk", "gpu")}
+        return set(_resumen(completo))
+
+    def test_se_documenta_todo_lo_que_se_escribe(self):
+        self.assertEqual(
+            self.escritos() - self.documentados(), set(),
+            "hay campos en el histórico que el README no menciona: la promesa "
+            "de qué se guarda dejaría de ser cierta")
+
+    def test_no_se_documenta_nada_que_no_se_escriba(self):
+        # Al revés también importa: un campo fantasma en la tabla hace dudar
+        # del resto de la lista.
+        self.assertEqual(self.documentados() - self.escritos(), set())
+
+    def test_la_ruta_de_windows_esta_escrita(self):
+        texto = (self.RAIZ / "README.md").read_text(encoding="utf-8")
+        self.assertIn(r"%LOCALAPPDATA%\Quilate\historico.jsonl", texto)
 
 
 class RecortarSinPerderElHistorico(unittest.TestCase):

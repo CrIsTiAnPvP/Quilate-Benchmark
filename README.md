@@ -292,9 +292,40 @@ puede declarar que el equipo se degrada. El signo va corregido, así que «+»
 siempre significa mejor, también en el arranque y la temperatura, donde el
 número baja cuando la cosa mejora.
 
-**Solo se guardan cifras y fechas**: ni rutas, ni nombres de programa, ni el
-nombre del equipo. `--no-history` desactiva el registro, y el fichero es texto
-plano que se puede leer, copiar o borrar.
+### Dónde está y qué guarda exactamente
+
+```text
+Windows   %LOCALAPPDATA%\Quilate\historico.jsonl
+Linux     $XDG_DATA_HOME/Quilate/historico.jsonl   (o ~/.local/share/Quilate/)
+```
+
+Una línea de JSON por ejecución, en texto plano. Estos son **todos** los campos
+que se escriben, sin excepción:
+
+| Campo | Qué es |
+| --- | --- |
+| `at` | Fecha y hora de la ejecución (ISO 8601) |
+| `version` | Versión de Quilate que la generó |
+| `overall` | Puntuación global |
+| `cpu_single`, `cpu_multi`, `memory`, `disk`, `gpu` | Nota de cada componente |
+| `boot_seconds` | Duración del arranque medida por Windows |
+| `cpu_temp` | Temperatura de CPU bajo carga |
+| `max_spread_pct` | El mayor margen de variación de la sesión |
+| `busy_pct` | El mayor porcentaje de CPU ajena durante la medida |
+| `findings` | Cuántos hallazgos hubo (el número, no cuáles) |
+| `quick` | Si se midió con `--quick` |
+
+**Solo cifras, banderas y dos fechas.** No hay rutas, ni nombres de programa, ni
+nombre de equipo, ni lista de procesos, ni qué hallazgos fueron: para eso está
+el JSON completo de cada ejecución, que se genera solo si lo pides con `--json`.
+Los dos únicos campos de texto son `at` y `version`, y ninguno sale de tu
+equipo. Hay un test que recorre el fichero ya escrito y falla si aparece
+cualquier cosa que no sea un número, una bandera o una de esas dos fechas, así
+que añadir un campo con texto del sistema rompe la suite el día que se escribe.
+
+El fichero se recorta a las 200 últimas ejecuciones, se puede leer con
+cualquier editor, y borrarlo no rompe nada: se vuelve a crear en la siguiente
+ejecución. `--no-history` desactiva el registro por completo.
 
 ## El informe HTML
 
