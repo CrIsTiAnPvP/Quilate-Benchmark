@@ -23,6 +23,7 @@ from unittest import mock
 from quilate import audit, benchmark
 from quilate.audit import Auditor, SinDato
 from quilate.sysinfo import SystemInfo
+from tests.support import patched
 
 ANTES = {"moment": "antes de la carga", "cpu_mhz": 4200.0, "cpu_temp": 45.0}
 CARGA = {"moment": "con todos los núcleos cargados", "cpu_mhz": 3600.0, "cpu_temp": 97.0}
@@ -57,10 +58,14 @@ class MuestreoEnWindows(unittest.TestCase):
 
 class TemperaturaQueSeJuzga(unittest.TestCase):
     def _auditar(self, bench, reposo, gpu=None):
+        # Con `patched` y no con `mock.patch.object`: los sensores se resuelven
+        # en el módulo donde vive `check_thermals`, no en la fachada del
+        # paquete, y `patched` sabe alcanzar los submódulos. Así el test no
+        # tiene que saber en cuál de ellos ha acabado la comprobación.
         aud = Auditor(SystemInfo(), bench)
-        with mock.patch.object(audit, "cpu_temperature", return_value=reposo), \
-             mock.patch.object(audit, "gpu_temperature", return_value=gpu), \
-             mock.patch.object(audit, "temperature_source", return_value="fuente"):
+        with patched(audit, cpu_temperature=lambda: reposo,
+                     gpu_temperature=lambda: gpu,
+                     temperature_source=lambda: "fuente"):
             return aud, aud.check_thermals()
 
     def _ids(self, aud):
@@ -109,9 +114,9 @@ class TemperaturaQueSeJuzga(unittest.TestCase):
 
     def test_sin_ninguna_fuente_no_se_inventa_nada(self):
         aud = Auditor(SystemInfo(), _bench())
-        with mock.patch.object(audit, "cpu_temperature", return_value=None), \
-             mock.patch.object(audit, "gpu_temperature", return_value=None), \
-             mock.patch.object(audit, "temperature_report", return_value=[]):
+        with patched(audit, cpu_temperature=lambda: None,
+                     gpu_temperature=lambda: None,
+                     temperature_report=lambda: []):
             with self.assertRaises(SinDato):
                 aud.check_thermals()
         self.assertEqual(aud.findings, [])
