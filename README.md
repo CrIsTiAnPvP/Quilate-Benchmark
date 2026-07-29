@@ -40,20 +40,18 @@ Para salir del entorno: `deactivate`.
 
 ## Uso
 
-Abre PowerShell **como Administrador** (sin permisos elevados se pierden las
-comprobaciones de SMART, TRIM y servicios), activa el entorno y ejecuta:
+Abre PowerShell **normal** —no hace falta como Administrador—, activa el entorno
+y ejecuta:
 
 ```powershell
 .venv\Scripts\Activate.ps1
 python quilate.py
 ```
 
-Una consola elevada es una sesión nueva: hay que volver a activar el entorno.
-Para evitarlo, invoca el intérprete del venv por ruta —no necesita activación:
-
-```powershell
-.venv\Scripts\python.exe quilate.py
-```
+Windows sacará **un** aviso de UAC al empezar. No es para elevar Quilate: es para
+un proceso aparte que lee seis cosas que de otro modo no se ven y termina en dos
+segundos ([qué son y qué pasa si dices que no](#qué-se-gana-aceptando-el-uac)).
+El análisis, el benchmark y los informes corren siempre como tú.
 
 En los ejemplos siguientes, `python` asume el entorno ya activado.
 
@@ -73,15 +71,63 @@ En los ejemplos siguientes, `python` asume el entorno ya activado.
 | `--scan-path D:\Juegos` | Carpeta extra a rastrear (repetible) |
 | `--min-file-size 512` | Umbral de "archivo grande" en MB (por defecto 128) |
 | `--check-drivers` | Consulta en línea si hay drivers más nuevos (tarda 10-30 s) |
+| `--check-updates` | Consulta en línea si faltan actualizaciones de seguridad (tarda 10-30 s) |
 | `--html informe.html` | Informe HTML con branding |
 | `--json datos.json` | Datos crudos para comparar ejecuciones |
 | `--export-plan` | Genera `plan_optimizacion.ps1` (solo Windows) |
 | `--compare antes.json despues.json` | Contrasta dos ejecuciones y sale (no mide nada) |
 | `--history` | Muestra el histórico local y su deriva, y sale |
 | `--no-history` | No guarda esta ejecución en el histórico local |
-| `--elevate` | Pide permisos de administrador aunque se lance desde una terminal |
-| `--no-elevate` | No pide permisos de administrador en ningún caso |
+| `--elevate` | Pide permisos aunque no haya nadie delante para aceptarlos |
+| `--no-elevate` | No pide permisos en ningún caso |
 | `--no-color` | Desactiva colores ANSI |
+
+### Qué se gana aceptando el UAC
+
+**Quilate no se ejecuta como administrador.** El aviso de UAC lanza un proceso
+aparte que ejecuta ocho consultas de lectura, devuelve el resultado y muere. El
+análisis, el benchmark, el rastreo de archivos y la escritura de los informes
+corren siempre con tu cuenta, así que los ficheros que salen son tuyos.
+
+Las ocho consultas están juntas en un único sitio del código,
+[`quilate/elevacion.py`](quilate/elevacion.py), precisamente para que se puedan
+leer de una sentada. **Todas son de lectura**: no se escribe en el registro, no
+se cambia ninguna configuración y no se instala nada. Hay un test que recorre
+esa lista y falla si aparece un verbo que modifique algo, y otro que fija qué
+puede invocar cada consulta, de forma que añadir una obliga a pasar por ahí.
+
+Estas son las comprobaciones que sin permisos aparecen en «Sin comprobar», y no
+como correctas:
+
+| Comprobación | Qué consulta | Qué se pierde sin ella |
+|---|---|---|
+| Duración real del arranque | log `Diagnostics-Performance` de Windows | cuánto tarda de verdad en arrancar y qué programa lo retrasa |
+| Integridad del sistema de archivos | `fsutil dirty query` | si el volumen está marcado como «sucio» |
+| Cifrado del disco | `Get-BitLockerVolume` | si el disco del sistema está cifrado |
+| Arranque seguro | `Confirm-SecureBootUEFI` | si Secure Boot está activo |
+| Chip TPM | `Get-Tpm` | si hay TPM y está encendido |
+| Protocolo SMB1 | `Get-WindowsOptionalFeature` | si sigue activo el protocolo por el que entró WannaCry |
+
+Además, la **salud SMART** se sigue comprobando sin permisos pero con menos
+detalle: el estado general (`HealthStatus`) se lee igual, mientras que el
+desgaste, las horas de uso, los errores acumulados y los sectores reasignados y
+pendientes salen de `Get-StorageReliabilityCounter` y del blob SMART crudo, que
+sí los exigen. Son los que avisan de un disco que va a fallar **antes** de que
+Windows lo dé por degradado.
+
+Lo que **no** hace falta elevar, en contra de lo que suele suponerse: TRIM, el
+plan de energía, los programas de inicio, los servicios, la memoria, la red y
+todo el benchmark funcionan igual sin permisos.
+
+**Si dices que no**, el análisis continúa entero y esas seis comprobaciones
+dicen que no se han concedido los permisos, en vez de darse por buenas. El
+informe distingue las tres situaciones: que no se pidieran (`--no-elevate`), que
+se pidieran y se rechazaran, y que no hubiera nadie delante para contestar.
+
+El aviso solo sale si hay alguien que pueda aceptarlo. Con la salida redirigida
+a un fichero o a una tubería no se pide nada, porque un diálogo de UAC en una
+tarea programada se queda parado hasta que alguien lo cierre; `--elevate` lo
+pide igualmente y `--no-elevate` no lo pide nunca.
 
 ### Ejecutable (.exe)
 
@@ -96,23 +142,6 @@ puede copiar a un pendrive y ejecutar en cualquier Windows de 64 bits. Lleva el
 icono del proyecto, que se regenera desde `quilate.png` con
 `python tools/make_icon.py` cuando cambia el logo. Acepta
 las mismas opciones que el script.
-
-Cuando le faltan permisos, **los pide** con el aviso de UAC de Windows: sin ellos
-se caen SMART, TRIM y la revisión de servicios. Si el usuario rechaza el aviso,
-el análisis continúa sin ellos, diciendo lo que se pierde. Cómo lo pide depende
-de cómo se haya abierto:
-
-- **Doble clic**: va directo al aviso de UAC. Aceptar sustituye esa ventana por
-  la elevada.
-- **Desde una terminal**: pregunta antes, porque relanzarse abre una ventana
-  nueva. Al aceptar, el proceso original termina en el acto y devuelve el
-  control a la terminal: el análisis sigue solo en la ventana con permisos.
-- **Con la salida redirigida** a un fichero o a una tubería: no pide nada. Ahí no
-  hay quien conteste, y la ventana nueva dejaría el destino vacío.
-
-`--elevate` fuerza el intento sin preguntar y `--no-elevate` lo desactiva del
-todo. Con `--elevate` desde un script —sin nadie que mire la pantalla— el
-proceso original sí espera al elevado y hereda su código de salida.
 
 Al abrir el `.exe` con doble clic no hay forma de pasarle flags, así que cuando
 termina el análisis —y solo si no se pidió ningún fichero por línea de comandos—
@@ -263,9 +292,40 @@ puede declarar que el equipo se degrada. El signo va corregido, así que «+»
 siempre significa mejor, también en el arranque y la temperatura, donde el
 número baja cuando la cosa mejora.
 
-**Solo se guardan cifras y fechas**: ni rutas, ni nombres de programa, ni el
-nombre del equipo. `--no-history` desactiva el registro, y el fichero es texto
-plano que se puede leer, copiar o borrar.
+### Dónde está y qué guarda exactamente
+
+```text
+Windows   %LOCALAPPDATA%\Quilate\historico.jsonl
+Linux     $XDG_DATA_HOME/Quilate/historico.jsonl   (o ~/.local/share/Quilate/)
+```
+
+Una línea de JSON por ejecución, en texto plano. Estos son **todos** los campos
+que se escriben, sin excepción:
+
+| Campo | Qué es |
+| --- | --- |
+| `at` | Fecha y hora de la ejecución (ISO 8601) |
+| `version` | Versión de Quilate que la generó |
+| `overall` | Puntuación global |
+| `cpu_single`, `cpu_multi`, `memory`, `disk`, `gpu` | Nota de cada componente |
+| `boot_seconds` | Duración del arranque medida por Windows |
+| `cpu_temp` | Temperatura de CPU bajo carga |
+| `max_spread_pct` | El mayor margen de variación de la sesión |
+| `busy_pct` | El mayor porcentaje de CPU ajena durante la medida |
+| `findings` | Cuántos hallazgos hubo (el número, no cuáles) |
+| `quick` | Si se midió con `--quick` |
+
+**Solo cifras, banderas y dos fechas.** No hay rutas, ni nombres de programa, ni
+nombre de equipo, ni lista de procesos, ni qué hallazgos fueron: para eso está
+el JSON completo de cada ejecución, que se genera solo si lo pides con `--json`.
+Los dos únicos campos de texto son `at` y `version`, y ninguno sale de tu
+equipo. Hay un test que recorre el fichero ya escrito y falla si aparece
+cualquier cosa que no sea un número, una bandera o una de esas dos fechas, así
+que añadir un campo con texto del sistema rompe la suite el día que se escribe.
+
+El fichero se recorta a las 200 últimas ejecuciones, se puede leer con
+cualquier editor, y borrarlo no rompe nada: se vuelve a crear en la siguiente
+ejecución. `--no-history` desactiva el registro por completo.
 
 ## El informe HTML
 
@@ -383,6 +443,7 @@ malinterpretar por el camino, y un test lo comprueba.
 | `const.py` | Branding y detección de plataforma |
 | `console.py` | Color ANSI, cajas, barras, notas y formato de texto |
 | `platform_utils.py` | Comandos, PowerShell/WMI, registro y privilegios |
+| `elevacion.py` | Las consultas que necesitan permisos, y el proceso corto que las hace |
 | `sensors.py` | Temperatura de CPU, frecuencia real y telemetría de GPU |
 | `workloads.py` | Cargas de trabajo puras del benchmark |
 | `sysinfo.py` | Inventario del equipo y clasificación de volúmenes |

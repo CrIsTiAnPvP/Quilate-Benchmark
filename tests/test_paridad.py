@@ -16,6 +16,7 @@ quiere cazar.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,7 +25,7 @@ from quilate.audit import Auditor
 from quilate.benchmark import Benchmark
 from quilate.const import WEBSITE_URL
 from quilate.components import build_component_cards
-from quilate.export.html_export import export_html
+from quilate.export.html_export import Seccion, export_html
 from quilate.export.json_export import build_payload
 from quilate.export.plan_export import export_plan
 from quilate.projection import project_improvement
@@ -281,8 +282,36 @@ class SinDatosOpcionales(unittest.TestCase):
 class Marca(unittest.TestCase):
     """El isotipo va incrustado: ni .ico al lado, ni petición a ningún servidor."""
 
+    # Atributos entre comillas dobles Y simples, y las `url()` del CSS. Las
+    # comillas simples y el `url(` faltaban: hoy el grano del fondo es un `data:`
+    # incrustado, pero nada impedía que el siguiente no lo fuera y la criba no
+    # se habría enterado.
+    RECURSOS = re.compile(r"""(?:href|src)\s*=\s*"([^"]*)"|"""
+                          r"""(?:href|src)\s*=\s*'([^']*)'|"""
+                          r"""url\(\s*['"]?([^'")]*)""", re.I)
+
+    def _recursos_externos(self, html: str) -> list[str]:
+        """Todo lo que el documento cargaría solo, si no fuera autocontenido."""
+        # Fuera el script: dentro hay cadenas que construyen URLs en tiempo de
+        # ejecución y no son enlaces del documento.
+        marcado = re.sub(r"(?s)<script>.*?</script>", "", html)
+        fuera = []
+        for grupos in self.RECURSOS.findall(marcado):
+            objetivo = next((g for g in grupos if g), "").strip()
+            # Ancla interna, recurso incrustado o la web del autor —un enlace
+            # que el lector pulsa, no algo que el documento cargue solo—.
+            #
+            # `%23` es una almohadilla codificada: dentro de un `data:image/svg+xml`
+            # hay que escaparla, así que el degradado del logo y el filtro del
+            # grano se referencian como `url(%23g)`. Apuntan a algo definido en
+            # el mismo SVG y no salen del documento.
+            if (not objetivo or objetivo.startswith(("#", "%23", "data:"))
+                    or objetivo == WEBSITE_URL):
+                continue
+            fuera.append(objetivo)
+        return fuera
+
     def test_el_informe_no_pide_nada_a_ninguna_parte(self):
-        import re
         from quilate.export.html_export import export_html
         with tempfile.TemporaryDirectory() as tmp:
             destino = Path(tmp) / "i.html"
@@ -291,16 +320,49 @@ class Marca(unittest.TestCase):
             html = destino.read_text(encoding="utf-8")
         self.assertIn('rel="icon"', html, "el icono de pestaña no va incrustado")
         self.assertIn("data:image/svg+xml", html)
-        # Fuera el script: dentro hay cadenas que construyen URLs en tiempo de
-        # ejecución y no son enlaces del documento.
-        marcado = re.sub(r"(?s)<script>.*?</script>", "", html)
-        for destino_enlace in re.findall(r'(?:href|src)="([^"]*)"', marcado):
-            # Ancla interna, recurso incrustado o la web del autor —un enlace
-            # que el lector pulsa, no algo que el documento cargue solo—.
-            self.assertTrue(
-                destino_enlace.startswith(("#", "data:")) or destino_enlace == WEBSITE_URL,
-                f"«{destino_enlace}» es un recurso externo: el informe deja de "
-                "abrirse igual sin conexión")
+        self.assertEqual(self._recursos_externos(html), [],
+                         "el informe deja de abrirse igual sin conexión")
+
+    def test_tampoco_con_el_informe_lleno(self):
+        """El informe vacío no ejercita ni la mitad de las secciones.
+
+        `export_html(destino, si, None, Auditor(si, None), {})` no genera red, ni
+        archivos grandes, ni benchmark, ni plan, ni hallazgos: un
+        `<img src="https://…">` metido en cualquiera de esas pasaba la criba sin
+        que nadie se enterara, porque esas secciones ni llegaban a escribirse.
+        """
+        from quilate.export.html_export import export_html
+        si = _sistema()
+        bench = _benchmark()
+        auditor = _auditoria(si, bench)
+        with tempfile.TemporaryDirectory() as tmp:
+            destino = Path(tmp) / "i.html"
+            export_html(destino, si, bench, auditor,
+                        project_improvement(bench, auditor.findings))
+            html = destino.read_text(encoding="utf-8")
+
+        # Que las secciones que faltaban están de verdad en este informe: sin
+        # esto, el test volvería a cribar la mitad del documento sin decirlo.
+        for seccion in ('id="red"', 'id="archivos"', 'id="benchmark"',
+                        'id="plan"', 'id="hallazgos"', 'id="proyeccion"'):
+            self.assertIn(seccion, html, f"falta {seccion}: el informe sigue incompleto")
+
+        self.assertEqual(self._recursos_externos(html), [],
+                         "el informe deja de abrirse igual sin conexión")
+
+    def test_la_criba_encuentra_lo_que_busca(self):
+        # Un test que no falla nunca no protege de nada: aquí se comprueba que
+        # la regex ve las tres formas, incluidas las dos que se le escapaban.
+        muestras = {
+            'comillas dobles': '<img src="https://ejemplo.com/a.png">',
+            'comillas simples': "<img src='https://ejemplo.com/a.png'>",
+            'url() de CSS': 'body{background-image:url("https://ejemplo.com/a.png")}',
+            'url() sin comillas': "body{background:url(https://ejemplo.com/a.png)}",
+        }
+        for etiqueta, muestra in muestras.items():
+            with self.subTest(forma=etiqueta):
+                self.assertEqual(self._recursos_externos(muestra),
+                                 ["https://ejemplo.com/a.png"])
 
     def test_la_mascara_del_anillo_declara_sus_unidades(self):
         # Sin `maskUnits`, la región de la máscara es la caja del círculo
@@ -347,7 +409,7 @@ class JavaScriptDelInforme(unittest.TestCase):
 
     def test_el_script_del_informe_es_un_solo_bloque(self):
         import re
-        from quilate.export.html_export import export_html
+        from quilate.export.html_export import Seccion, export_html
         with tempfile.TemporaryDirectory() as tmp:
             destino = Path(tmp) / "i.html"
             si = _sistema()
@@ -388,6 +450,51 @@ class SinEtiquetasHuerfanas(unittest.TestCase):
         agrupados = {c for _k, _l, comps, _b in COMPONENT_GROUPS for c in comps}
         self.assertEqual(set(WEIGHTS) - agrupados, set(),
                          "un componente con nota que no aparece en ninguna ficha")
+
+
+class RecuentoDeHallazgos(unittest.TestCase):
+    """El informe da un único total de hallazgos, y no lo suma de trozos.
+
+    `Seccion.findings` se rellena en cuatro sitios con cifras que se solapan
+    —«componentes» recibe todos los hallazgos, «red» solo los suyos, «plan» los
+    accionables y «hallazgos» todos otra vez—, así que enseñarlas juntas daría
+    un total inflado. El comentario junto a la declaración lo explica; esto lo
+    hace comprobable.
+    """
+
+    def _informe(self) -> tuple[Auditor, str]:
+        si = _sistema()
+        bench = _benchmark()
+        auditor = _auditoria(si, bench)
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "informe.html"
+            export_html(destino, si, bench, auditor,
+                        project_improvement(bench, auditor.findings))
+            return auditor, destino.read_text(encoding="utf-8")
+
+    def test_el_total_se_da_una_sola_vez(self):
+        auditor, html = self._informe()
+        self.assertTrue(auditor.findings, "sin hallazgos esto no comprueba nada")
+        total = (f'<div class="n">{len(auditor.findings)}</div>'
+                 f'<div class="l">Hallazgos en')
+        self.assertEqual(html.count(total), 1,
+                         "el recuento total de hallazgos aparece más de una vez")
+
+    def test_el_campo_muerto_sigue_sin_pintarse(self):
+        # `Seccion.findings` guarda cuatro cifras que se solapan. Que ninguna
+        # llegue al HTML es lo que impide que alguien las sume creyendo que el
+        # resultado significa algo.
+        self.assertIn("findings", Seccion.__dataclass_fields__)
+        auditor, html = self._informe()
+        campos = re.findall(r'data-findings|class="findings"', html)
+        self.assertEqual(campos, [], "el recuento por sección ha llegado al HTML")
+
+    def test_la_severidad_si_se_usa(self):
+        # El otro campo opcional de Seccion sí se pinta: el punto de color de la
+        # navegación. Documentar uno como muerto no puede sugerir que el otro
+        # también lo esté.
+        _, html = self._informe()
+        self.assertIn('<span class="sev s-high"></span>', html)
 
 
 if __name__ == "__main__":

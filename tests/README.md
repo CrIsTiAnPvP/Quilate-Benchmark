@@ -8,6 +8,12 @@ Sin dependencias: `unittest` de la biblioteca estándar. No hacen falta permisos
 de administrador ni estar en Windows — el acceso al registro y a WMI se sustituye
 por los fixtures de `fixtures/`.
 
+La única excepción es `test_elevacion.ElCanalDeVerdad`, que sí lanza PowerShell
+de verdad para probar la tubería por la que vuelve el lote con permisos: se salta
+fuera de Windows y **nunca saca un aviso de UAC**, porque sustituye el `runas`
+por un lanzamiento normal. Esa última pieza —que Windows enseñe el diálogo y
+alguien lo acepte— es la única de todo el proyecto que no se puede automatizar.
+
 ## Por qué existen
 
 Los tres primeros fallos que cubren eran del mismo tipo: **leer el campo que dice
@@ -57,6 +63,22 @@ deshacerse leyendo el valor actual, nunca suponiendo el de fábrica.
 | `memoria_ddr4_xmp_activo.json` | Capturado. DDR4-3200 con XMP puesto |
 | `gpu_una_dedicada.json` | Capturado. Un solo adaptador |
 | `gpu_dos_adaptadores_reconstruido.json` | **Reconstruido**, no capturado — ver abajo |
+| `smart_dos_hdd_sata.json` | Capturado con permisos. Los 512 bytes crudos de dos HDD SATA sanos |
+
+### Lo que está contrastado con una herramienta ajena
+
+`smart_dos_hdd_sata.json` son los blobs SMART tal y como los devuelve
+`MSStorageDriver_FailurePredictData`, sin interpretar. Se guardan crudos porque
+el decodificador está escrito a mano —30 huecos de 12 bytes desde el offset 2— y
+un decodificador escrito a mano no puede comprobarse contra su propia aritmética.
+Las cifras contra las que se contrastan en `test_smart.py` son las que enseñaba
+**CrystalDiskInfo** sobre esos mismos dos discos en el mismo momento: 7583 horas
+y 1396 encendidos uno, 4732 y 1470 el otro.
+
+Sus `InstanceName` van tal cual y **no llevan número de serie**: se comprobó uno
+por uno antes de guardarlos, porque en USB y en NVMe esa cadena sí puede
+incluirlo. El código los usa para casar el modelo con `Get-PhysicalDisk` y los
+descarta.
 
 ### Lo que está reconstruido
 

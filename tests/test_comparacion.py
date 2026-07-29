@@ -9,20 +9,35 @@ buen aspecto.
 
 from __future__ import annotations
 
+import inspect
+import io
 import json
+import re
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
-from quilate.compare import (MARGEN_DESCONOCIDO_PCT, RunLoadError, calibracion,
-                             comparar_hallazgos, comparar_pruebas, compare_runs,
-                             load_run, mismo_equipo)
+from quilate.benchmark import PY_ADJUST
+from quilate import cli
+from quilate.cli import _run_comparison
+from quilate.console import _motivo
+from quilate.console import C
+from quilate.compare import (MARGEN_DESCONOCIDO_PCT, RunLoadError, _ajuste_python,
+                             calibracion, comparabilidad, comparar_hallazgos,
+                             comparar_pruebas, compare_runs, load_run)
 
 
 def ejecucion(**cambios) -> dict:
     base = {
-        "meta": {"version": "2.2.0", "generated_at": "2026-07-27T10:00:00"},
-        "system": {"hostname": "PC", "cpu_name": "CPU X", "ram_total": 16},
+        "meta": {"version": "2.2.0", "generated_at": "2026-07-27T10:00:00", "quick": False},
+        "system": {"hostname": "PC", "cpu_name": "CPU X", "ram_total": 16,
+                   "python_version": "3.10.11"},
+        # Con qué escala se dieron las notas: `build_payload` lo guarda desde la
+        # v2.2 justo para poder decidir si dos ejecuciones son conmensurables.
+        "reference_meta": {"date": "2026-07", "machine": "banco", "stale": False},
         "scores": {"overall": 100.0, "components": {"disk": 100.0}},
         "benchmark": {"disk_read": {"name": "Disco · lectura", "unit": "MB/s",
                                     "raw": 1000.0, "score": 100.0}},
@@ -69,6 +84,390 @@ class CargaDeFicheros(unittest.TestCase):
             p = Path(d) / "ok.json"
             p.write_text(json.dumps(ejecucion()), encoding="utf-8")
             self.assertEqual(load_run(p)["scores"]["overall"], 100.0)
+
+
+class FicherosIncompletos(unittest.TestCase):
+    """Un JSON al que le faltan datos no puede acabar en una traza de Python.
+
+    `--compare` es el único camino que acepta ficheros de fuera, y esos ficheros
+    se truncan por un corte de luz, se editan a mano —cosa que el proyecto da
+    por buena en el histórico— y los generan versiones con otro esquema. El mimo
+    de `history.load()`, que se salta las líneas corruptas, faltaba aquí.
+    """
+
+    def _cargar(self, run: dict) -> dict:
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "run.json"
+            p.write_text(json.dumps(run), encoding="utf-8")
+            return load_run(p)
+
+    def _comparar(self, roto: dict) -> dict:
+        return compare_runs(self._cargar(roto), self._cargar(ejecucion()))
+
+    def test_una_prueba_sin_raw(self):
+        run = ejecucion()
+        del run["benchmark"]["disk_read"]["raw"]
+        self._comparar(run)          # antes: KeyError: 'raw'
+
+    def test_una_prueba_con_raw_nulo(self):
+        run = ejecucion()
+        run["benchmark"]["disk_read"]["raw"] = None
+        self._comparar(run)          # antes: TypeError en float(None)
+
+    def test_una_prueba_con_raw_que_no_es_numero(self):
+        run = ejecucion()
+        run["benchmark"]["disk_read"]["raw"] = "mil"
+        self._comparar(run)
+
+    def test_una_entrada_de_benchmark_que_no_es_un_diccionario(self):
+        run = ejecucion()
+        run["benchmark"]["disk_read"] = "basura"
+        self._comparar(run)
+
+    def test_un_benchmark_que_no_es_un_diccionario(self):
+        run = ejecucion()
+        run["benchmark"] = ["disk_read"]
+        self._comparar(run)
+
+    def test_la_prueba_descartada_no_se_compara_a_medias(self):
+        # Descartarla y luego enseñar una fila con «before: None» sería peor que
+        # el fallo: parecería que la prueba no se ejecutó.
+        run = ejecucion()
+        run["benchmark"]["disk_read"]["raw"] = None
+        self.assertEqual(self._cargar(run)["benchmark"], {})
+
+    def test_lo_que_esta_bien_sigue_pasando(self):
+        # La criba no puede llevarse por delante las pruebas buenas del mismo
+        # fichero: solo se descarta la que no tiene cifra.
+        run = ejecucion()
+        run["benchmark"]["cpu_single"] = {"name": "CPU", "unit": "pts", "raw": None}
+        cargado = self._cargar(run)
+        self.assertEqual(set(cargado["benchmark"]), {"disk_read"})
+        self.assertEqual(cargado["benchmark"]["disk_read"]["raw"], 1000.0)
+
+    def test_un_margen_que_no_es_un_diccionario(self):
+        run = ejecucion()
+        run["dispersion"]["disk_read"] = "roto"
+        self._comparar(run)          # antes: AttributeError en «roto».get
+
+    def test_un_spread_que_no_es_numero(self):
+        run = ejecucion()
+        run["dispersion"]["disk_read"]["spread_pct"] = "mucho"
+        self._comparar(run)          # antes: ValueError en float("mucho")
+
+    def test_una_dispersion_que_no_es_un_diccionario(self):
+        run = ejecucion()
+        run["dispersion"] = ["disk_read"]
+        self._comparar(run)
+
+    def test_el_margen_ilegible_se_supone_amplio(self):
+        # Descartarlo devuelve el umbral al supuesto conservador, que es más
+        # ancho: una diferencia pequeña pasa a ser «dentro del margen», nunca al
+        # revés. Descartar un margen no puede acabar declarando mejoras.
+        run = ejecucion()
+        run["dispersion"]["disk_read"] = "roto"
+        fila = next(f for f in self._comparar(run)["tests"] if f["key"] == "disk_read")
+        self.assertEqual(fila["threshold"], MARGEN_DESCONOCIDO_PCT)
+        self.assertFalse(fila["margin_known"])
+
+    def test_un_margen_bueno_del_mismo_fichero_sobrevive(self):
+        run = ejecucion()
+        run["dispersion"]["cpu_single"] = "roto"
+        self.assertEqual(set(self._cargar(run)["dispersion"]), {"disk_read"})
+
+    def test_un_spread_ausente_se_sigue_leyendo_como_cero(self):
+        # Comportamiento de siempre: ausente o cero ya era «sin margen». La
+        # criba no puede aprovechar para cambiarlo de paso.
+        run = ejecucion()
+        del run["dispersion"]["disk_read"]["spread_pct"]
+        self.assertEqual(set(self._cargar(run)["dispersion"]), {"disk_read"})
+
+    def test_un_hallazgo_sin_id(self):
+        run = ejecucion()
+        run["findings"] = [{"title": "algo sin identificar"}]
+        self._comparar(run)          # antes: KeyError: 'id'
+
+    def test_los_hallazgos_con_id_se_siguen_casando(self):
+        antes, despues = ejecucion(), ejecucion()
+        antes["findings"] = [{"title": "sin id"}, {"id": "trim_off", "title": "TRIM"}]
+        despues["findings"] = [{"id": "trim_off", "title": "TRIM"},
+                               {"id": "fs_dirty", "title": "Sucio"}]
+        hallazgos = comparar_hallazgos(antes, despues)
+        self.assertEqual([f["id"] for f in hallazgos["persisten"]], ["trim_off"])
+        self.assertEqual([f["id"] for f in hallazgos["nuevos"]], ["fs_dirty"])
+        self.assertEqual(hallazgos["resueltos"], [])
+
+
+class ElMensajeQueVeElUsuario(unittest.TestCase):
+    """Lo que `--compare` hace cuando el fichero no da para comparar.
+
+    El mensaje cuidado ya existía dos líneas más abajo del `except`; el problema
+    era que solo lo veía quien pasaba un fichero que no era de Quilate.
+    """
+
+    def _comparar(self, antes: dict, despues: dict) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as d:
+            rutas = []
+            for nombre, run in (("antes.json", antes), ("despues.json", despues)):
+                p = Path(d) / nombre
+                p.write_text(json.dumps(run), encoding="utf-8")
+                rutas.append(str(p))
+            salida = io.StringIO()
+            with redirect_stdout(salida):
+                codigo = _run_comparison(rutas)
+        return codigo, salida.getvalue()
+
+    def test_dos_ficheros_buenos_se_comparan(self):
+        codigo, salida = self._comparar(ejecucion(), ejecucion())
+        self.assertEqual(codigo, 0)
+        self.assertNotIn("No se puede comparar", salida)
+
+    def test_un_dato_de_otro_tipo_no_saca_una_traza(self):
+        roto = ejecucion()
+        roto["scores"]["overall"] = "bastante"
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("No se puede comparar", salida)
+
+    def test_un_margen_ilegible_no_impide_comparar(self):
+        # El reparto: `dispersion` es auxiliar y tiene un supuesto para su
+        # ausencia, así que se descarta y la comparación se hace igual.
+        roto = ejecucion()
+        roto["dispersion"]["disk_read"] = "roto"
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 0)
+        self.assertNotIn("No se puede comparar", salida)
+
+    def test_una_puntuacion_de_componente_ilegible_se_dice(self):
+        # La otra mitad del reparto: las notas son el objeto de la comparación.
+        # Descartarlas en silencio sería contestar a medias sin avisar.
+        roto = ejecucion()
+        roto["scores"]["components"]["disk"] = "bien"
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("No se puede comparar", salida)
+
+    def test_una_proyeccion_ilegible_se_dice(self):
+        roto = ejecucion()
+        roto["projection"] = {"projected_overall": "más", "current_overall": 100.0}
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("No se puede comparar", salida)
+
+    def test_un_anidado_que_no_es_un_objeto_tampoco_saca_traza(self):
+        # La red de última instancia, que es lo que faltaba: el módulo indexa
+        # dos y tres niveles y no hay saneador para cada rincón del esquema.
+        roto = ejecucion()
+        roto["coverage"]["unverified"] = ["algo"]
+        codigo, salida = self._comparar(roto, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("No se puede comparar", salida)
+
+    def test_el_mensaje_no_filtra_el_ingles_de_cpython(self):
+        # `unsupported operand type(s) for -: 'str' and 'float'` es el mensaje
+        # de CPython: viene en inglés, no dice qué hacer, y aparecía en un
+        # programa cuyo informe entero está en castellano.
+        roto = ejecucion()
+        roto["scores"]["overall"] = "bastante"
+        _, salida = self._comparar(roto, ejecucion())
+        for ingles in ("unsupported operand", "could not convert", "NoneType",
+                       "TypeError", "ValueError", "AttributeError"):
+            with self.subTest(fragmento=ingles):
+                self.assertNotIn(ingles, salida)
+
+    def test_el_mensaje_apunta_a_la_causa_probable(self):
+        # No basta con no filtrar inglés: hay que decir algo que sirva. Las dos
+        # causas reales son un fichero tocado a mano y otra versión.
+        roto = ejecucion()
+        roto["scores"]["components"]["disk"] = "bien"
+        _, salida = self._comparar(roto, ejecucion())
+        self.assertIn("no encaja", salida)
+        self.assertIn("mano", salida)
+        self.assertIn("versión", salida)
+
+    def test_de_un_campo_que_falta_si_se_dice_cual(self):
+        # El KeyError sí trae algo que el usuario reconoce y puede buscar en el
+        # JSON que tiene delante, así que ese no se sustituye por texto fijo.
+        original = cli.compare_runs
+        cli.compare_runs = lambda *a, **k: (_ for _ in ()).throw(KeyError("ambient_load"))
+        try:
+            codigo, salida = self._comparar(ejecucion(), ejecucion())
+        finally:
+            cli.compare_runs = original
+        self.assertEqual(codigo, 2)
+        self.assertIn("le faltan datos", salida)
+        self.assertIn("ambient_load", salida)
+
+    def test_un_fichero_que_no_es_de_quilate(self):
+        # El mensaje de siempre no puede haberse perdido por el camino.
+        codigo, salida = self._comparar({"cualquier": "cosa"}, ejecucion())
+        self.assertEqual(codigo, 2)
+        self.assertIn("no parece un export de Quilate", salida)
+
+    def test_siempre_se_explica_como_generarlos(self):
+        _, salida = self._comparar({"cualquier": "cosa"}, ejecucion())
+        self.assertIn("--json", salida)
+
+
+class MensajesParaQuienNoPrograma(unittest.TestCase):
+    """Lo que falla se dice en castellano, no con el nombre de la excepción.
+
+    El resto del informe se ha escrito con ese criterio —los `detail` de cada
+    hallazgo explican el porqué y no solo el qué— así que no hay motivo para que
+    la única palabra en inglés y en CamelCase de toda la ejecución sea la que
+    aparece justo cuando algo se ha torcido.
+    """
+
+    def test_los_fallos_habituales_estan_traducidos(self):
+        esperado = {
+            PermissionError(13, "denegado"): "permisos insuficientes",
+            FileNotFoundError(2, "no existe"): "la ruta no existe",
+            NotADirectoryError(20, "no es carpeta"): "la ruta no es una carpeta",
+            TimeoutError(): "ha tardado demasiado",
+            MemoryError(): "no hay memoria suficiente",
+        }
+        for excepcion, texto in esperado.items():
+            with self.subTest(excepcion=type(excepcion).__name__):
+                self.assertEqual(_motivo(excepcion), texto)
+
+    def test_las_subclases_ganan_al_generico(self):
+        # `PermissionError` es subclase de `OSError`: si el orden del recorrido
+        # se invirtiera, todos los fallos de permisos dirían lo genérico.
+        self.assertNotEqual(_motivo(PermissionError()), _motivo(OSError()))
+
+    def test_lo_no_previsto_tambien_se_dice_en_castellano(self):
+        motivo = _motivo(ValueError("algo raro"))
+        self.assertNotIn("ValueError", motivo)
+        self.assertNotIn("Error", motivo)
+
+    def test_nunca_se_cuela_el_nombre_de_la_clase(self):
+        for excepcion in (PermissionError(), OSError(), RuntimeError(),
+                          ZeroDivisionError(), KeyError("x")):
+            with self.subTest(excepcion=type(excepcion).__name__):
+                self.assertNotIn(type(excepcion).__name__, _motivo(excepcion))
+
+
+class NoPoderEscribirElInforme(unittest.TestCase):
+    """Tras intentarlo en dos sitios, el usuario merece saber cuáles."""
+
+    def _fallar(self, excepcion, kind: str = "html") -> str:
+        funcion = {"html": "export_html", "json": "export_json",
+                   "plan": "export_plan"}[kind]
+        original = getattr(cli, funcion)
+        setattr(cli, funcion, lambda *a, **k: (_ for _ in ()).throw(excepcion))
+        C.disable()
+        salida = io.StringIO()
+        try:
+            with redirect_stdout(salida):
+                resultado = cli._write_export(kind, None, None, None, {})
+        finally:
+            setattr(cli, funcion, original)
+        self.assertIsNone(resultado)
+        return salida.getvalue()
+
+    def test_nombra_las_ubicaciones_que_ha_probado(self):
+        texto = self._fallar(PermissionError(13, "Acceso denegado"))
+        self.assertIn(str(Path.cwd()), texto)
+        self.assertIn(str(Path.home()), texto)
+
+    def test_dice_el_motivo_en_castellano(self):
+        texto = self._fallar(PermissionError(13, "Acceso denegado"))
+        self.assertIn("permisos insuficientes", texto)
+        self.assertNotIn("PermissionError", texto)
+
+    def test_ofrece_la_salida_concreta(self):
+        # No basta con decir que no se pudo: hay que decir qué hacer.
+        texto = self._fallar(OSError(28, "No queda espacio"))
+        self.assertIn("--html", texto)
+        self.assertIn("quilate_informe.html", texto)
+
+    def test_la_bandera_que_propone_existe_de_verdad(self):
+        # Proponía `--plan`, que no es ninguna opción de Quilate: quien copiara
+        # el mensaje se llevaba un «unrecognized arguments» encima del fallo que
+        # ya tenía. Se comprueba contra las opciones que declara `parse_args`, y
+        # no contra una lista escrita aquí, para que renombrar una bandera no
+        # deje esto obsoleto en silencio.
+        declaradas = set(re.findall(r'add_argument\(\s*"(--[\w-]+)"',
+                                    inspect.getsource(cli.parse_args)))
+        self.assertIn("--export-plan", declaradas, "el fuente ya no se puede leer así")
+        for kind in ("html", "json", "plan"):
+            with self.subTest(tipo=kind):
+                texto = self._fallar(OSError(28, "No queda espacio"), kind)
+                propuestas = re.findall(r"`(--[\w-]+)", texto)
+                self.assertTrue(propuestas, "el mensaje no propone ninguna bandera")
+                for bandera in propuestas:
+                    self.assertIn(bandera, declaradas)
+
+
+class ExportarPorBandera(unittest.TestCase):
+    """`--html` y compañía merecen el mismo cuidado que el menú.
+
+    Las tres ramas de exportación por bandera llamaban a las funciones a pelo,
+    sin `try`. Un disco lleno o una carpeta de solo lectura sacaban una traza de
+    Python después de haber corrido el benchmark completo, mientras que el mismo
+    fallo desde el menú daba un mensaje cuidado. La ruta la elige el usuario, así
+    que aquí no se reintenta en otro sitio: se dice lo que ha pasado y se sigue
+    con los demás ficheros.
+    """
+
+    def setUp(self):
+        C.disable()
+        self.addCleanup(setattr, cli, "export_html", cli.export_html)
+        self.addCleanup(setattr, cli, "export_json", cli.export_json)
+
+    def _args(self, **campos):
+        base = {"json": None, "html": None, "export_plan": None}
+        base.update(campos)
+        return SimpleNamespace(**base)
+
+    def _exportar(self, args) -> tuple[list[str], str]:
+        salida = io.StringIO()
+        with redirect_stdout(salida):
+            outputs = cli._exportaciones(args, None, None, None, {})
+        return outputs, salida.getvalue()
+
+    def _romper(self, nombre, excepcion):
+        setattr(cli, nombre, lambda *a, **k: (_ for _ in ()).throw(excepcion))
+
+    def test_una_ruta_que_no_se_puede_escribir_no_saca_traza(self):
+        self._romper("export_html", PermissionError(13, "Acceso denegado"))
+        outputs, texto = self._exportar(self._args(html="X:/no/existe/informe.html"))
+        self.assertEqual(outputs, [])
+        self.assertIn("No se ha podido escribir", texto)
+
+    def test_el_motivo_se_dice_en_castellano(self):
+        self._romper("export_html", PermissionError(13, "Acceso denegado"))
+        _, texto = self._exportar(self._args(html="informe.html"))
+        self.assertIn("permisos insuficientes", texto)
+        self.assertNotIn("PermissionError", texto)
+
+    def test_se_nombra_la_ruta_que_pidio_el_usuario(self):
+        # Y no otra: aquí no hay reserva a la carpeta personal.
+        self._romper("export_html", OSError(28, "No queda espacio"))
+        _, texto = self._exportar(self._args(html="donde/yo/dije.html"))
+        self.assertIn("dije.html", texto)
+        self.assertNotIn(str(Path.home()), texto)
+
+    def test_que_falle_uno_no_se_lleva_a_los_otros(self):
+        self._romper("export_html", OSError(28, "No queda espacio"))
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "datos.json"
+            setattr(cli, "export_json",
+                    lambda p, *a, **k: p.write_text("{}", encoding="utf-8"))
+            outputs, texto = self._exportar(
+                self._args(html="informe.html", json=str(destino)))
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("JSON", outputs[0])
+        self.assertIn("No se ha podido escribir", texto)
+
+    def test_lo_que_se_escribe_bien_se_anuncia(self):
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "datos.json"
+            setattr(cli, "export_json",
+                    lambda p, *a, **k: p.write_text("{}", encoding="utf-8"))
+            outputs, _ = self._exportar(self._args(json=str(destino)))
+        self.assertEqual(len(outputs), 1)
+        self.assertIn(str(destino.resolve()), outputs[0])
 
 
 class ElMargenDecide(unittest.TestCase):
@@ -156,22 +555,134 @@ class Calibracion(unittest.TestCase):
         self.assertIsNone(calibracion(ejecucion(), ejecucion()))
 
 
-class EquipoDistinto(unittest.TestCase):
-    def test_mismo_equipo(self):
-        coincide, difs = mismo_equipo(ejecucion(), ejecucion())
-        self.assertTrue(coincide)
-        self.assertEqual(difs, [])
+class Comparabilidad(unittest.TestCase):
+    """No basta con restar: hay que decidir si la resta significa algo.
 
+    Es el criterio que el módulo ya aplicaba al margen de cada prueba, llevado a
+    la ejecución entera. «Distinto equipo» era solo una de las formas de que dos
+    medidas no sean restables, y ni siquiera la más frecuente: lo normal es
+    comparar un equipo consigo mismo después de haber tocado algo.
+    """
+
+    def _motivos(self, antes: dict, despues: dict) -> dict[str, dict]:
+        return {m["key"]: m for m in comparabilidad(antes, despues)}
+
+    def test_dos_ejecuciones_iguales_no_tienen_pegas(self):
+        self.assertEqual(comparabilidad(ejecucion(), ejecucion()), [])
+        self.assertTrue(compare_runs(ejecucion(), ejecucion())["meta"]["comparable"])
+
+    # ------------------------------------------------------------ hardware ---
     def test_cpu_distinta_se_avisa(self):
         otro = ejecucion(system={"hostname": "PC", "cpu_name": "OTRA", "ram_total": 16})
-        coincide, difs = mismo_equipo(ejecucion(), otro)
-        self.assertFalse(coincide)
-        self.assertIn("CPU", difs[0])
+        motivos = self._motivos(ejecucion(), otro)
+        self.assertIn("CPU", motivos["hardware"]["text"])
+        self.assertEqual(motivos["hardware"]["severity"], "alta")
 
     def test_un_campo_ausente_no_cuenta_como_diferencia(self):
         # Un JSON antiguo sin el campo no debe hacer parecer que es otro equipo.
         viejo = ejecucion(system={"hostname": "PC"})
-        self.assertTrue(mismo_equipo(ejecucion(), viejo)[0])
+        self.assertNotIn("hardware", self._motivos(ejecucion(), viejo))
+
+    # --------------------------------------------------------------- quick ---
+    def test_quick_contra_completo(self):
+        rapida = ejecucion()
+        rapida["meta"] = dict(rapida["meta"], quick=True)
+        motivos = self._motivos(rapida, ejecucion())
+        self.assertEqual(motivos["quick"]["severity"], "alta")
+        self.assertIn("--quick", motivos["quick"]["text"])
+
+    def test_dos_quick_si_son_comparables(self):
+        rapida = ejecucion()
+        rapida["meta"] = dict(rapida["meta"], quick=True)
+        self.assertNotIn("quick", self._motivos(rapida, rapida))
+
+    # ---------------------------------------------------------- referencia ---
+    def test_escala_de_referencia_distinta(self):
+        viejo = ejecucion()
+        viejo["reference_meta"] = {"date": "2024-01"}
+        motivos = self._motivos(viejo, ejecucion())
+        self.assertEqual(motivos["reference"]["severity"], "alta")
+        self.assertIn("2024-01", motivos["reference"]["text"])
+
+    def test_la_misma_escala_no_se_avisa_aunque_cambie_la_version(self):
+        # Cambiar de versión sin tocar la escala no invalida nada.
+        viejo = ejecucion()
+        viejo["meta"] = dict(viejo["meta"], version="2.4.0")
+        motivos = self._motivos(viejo, ejecucion())
+        self.assertNotIn("reference", motivos)
+        self.assertNotIn("version", motivos)
+
+    def test_sin_reference_meta_la_version_es_lo_unico_que_queda(self):
+        # Las ejecuciones anteriores a la v2.2 no anotan con qué escala puntuaron.
+        viejo = ejecucion()
+        viejo["meta"] = dict(viejo["meta"], version="2.1.0")
+        del viejo["reference_meta"]
+        motivos = self._motivos(viejo, ejecucion())
+        self.assertEqual(motivos["version"]["severity"], "media")
+        self.assertIn("2.1.0", motivos["version"]["text"])
+
+    # -------------------------------------------------------------- python ---
+    def test_dos_interpretes_con_distinto_ajuste(self):
+        viejo = ejecucion()
+        viejo["system"] = dict(viejo["system"], python_version="3.10.11")
+        nuevo = ejecucion()
+        nuevo["system"] = dict(nuevo["system"], python_version="3.13.0")
+        motivos = self._motivos(viejo, nuevo)
+        self.assertEqual(motivos["python"]["severity"], "alta")
+        self.assertIn("1.35", motivos["python"]["text"])
+
+    def test_dos_interpretes_del_mismo_lado_del_umbral(self):
+        # 3.11 y 3.13 se corrigen igual: cambiar de uno a otro no sesga nada.
+        for antes_v, despues_v in (("3.11.0", "3.13.0"), ("3.9.7", "3.10.11")):
+            with self.subTest(versiones=(antes_v, despues_v)):
+                a, d = ejecucion(), ejecucion()
+                a["system"] = dict(a["system"], python_version=antes_v)
+                d["system"] = dict(d["system"], python_version=despues_v)
+                self.assertNotIn("python", self._motivos(a, d))
+
+    def test_una_version_de_python_ilegible_no_inventa_un_aviso(self):
+        for valor in (None, "", "vete a saber", "3", 3.11):
+            with self.subTest(valor=valor):
+                raro = ejecucion()
+                raro["system"] = dict(raro["system"], python_version=valor)
+                self.assertNotIn("python", self._motivos(raro, ejecucion()))
+
+    def test_el_umbral_es_el_de_PY_ADJUST(self):
+        # Si alguien mueve PY_ADJUST, este test lo obliga a mover también esto.
+        self.assertEqual(_ajuste_python(f"{sys.version_info[0]}.{sys.version_info[1]}.0"),
+                         PY_ADJUST)
+
+    # ----------------------------------------------------------- cobertura ---
+    def test_no_gpu_contra_completo(self):
+        completo = ejecucion()
+        completo["scores"] = {"overall": 100.0, "components": {"disk": 100.0, "gpu": 80.0}}
+        motivos = self._motivos(ejecucion(), completo)
+        self.assertEqual(motivos["coverage"]["severity"], "media")
+        self.assertIn("gpu", motivos["coverage"]["text"])
+
+    # ------------------------------------------------------------ conjunto ---
+    def test_solo_lo_grave_invalida_la_resta(self):
+        # Un aviso «media» se enseña, pero la comparación sigue teniendo sentido.
+        completo = ejecucion()
+        completo["scores"] = {"overall": 100.0, "components": {"disk": 100.0, "gpu": 80.0}}
+        cmp = compare_runs(ejecucion(), completo)
+        self.assertTrue(cmp["meta"]["comparable"])
+        self.assertEqual(len(cmp["meta"]["comparability"]), 1)
+
+    def test_el_caso_que_no_avisaba_de_nada(self):
+        # Verificado en el informe: quick v2.1.0 contra completa v2.6.0 devolvía
+        # same_machine=True y cero avisos.
+        viejo = ejecucion()
+        viejo["meta"] = {"version": "2.1.0", "generated_at": "2026-01-01T10:00:00",
+                         "quick": True}
+        viejo["system"] = dict(viejo["system"], python_version="3.10.11")
+        del viejo["reference_meta"]
+        nuevo = ejecucion()
+        nuevo["system"] = dict(nuevo["system"], python_version="3.13.0")
+        cmp = compare_runs(viejo, nuevo)
+        self.assertFalse(cmp["meta"]["comparable"])
+        self.assertEqual({m["key"] for m in cmp["meta"]["comparability"]},
+                         {"quick", "version", "python"})
 
 
 class InformeCompleto(unittest.TestCase):
@@ -180,7 +691,7 @@ class InformeCompleto(unittest.TestCase):
         for clave in ("meta", "overall", "tests", "components", "findings",
                       "coverage", "calibration", "ambient"):
             self.assertIn(clave, cmp)
-        self.assertTrue(cmp["meta"]["same_machine"])
+        self.assertTrue(cmp["meta"]["comparable"])
         self.assertEqual(cmp["overall"]["delta_pct"], 0.0)
 
     def test_no_revienta_con_json_minimos(self):

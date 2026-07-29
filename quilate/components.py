@@ -10,7 +10,7 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass, field
 
-from .audit import Auditor, Finding, SEVERITY_ORDER
+from .audit import SEGURIDAD, SEVERITY_ORDER, Auditor, Finding
 from .benchmark import BenchResult, Benchmark, SCORE_CAP, WEIGHTS
 from .console import grade, human_bytes
 from .projection import combine_gains
@@ -56,7 +56,14 @@ class ComponentCard:
     measurable: bool = False   # ¿tiene nota sintética cuando el benchmark corre?
     score: float | None = None
     letter: str = "—"
+    # Dos listas y no una, porque son dos cosas que se miden con reglas
+    # distintas. `findings` son mejoras: prometen rendimiento y tienen ganancia
+    # estimada. `riesgos` son de seguridad: no aceleran nada, van con `gain=0.0`
+    # y se ordenan por gravedad. Juntarlas obligaba a titular el bloque entero
+    # «Mejoras aplicables», que sobre «SMB1 activo» o «sin cifrar el disco» es
+    # sencillamente falso.
     findings: list[Finding] = field(default_factory=list)
+    riesgos: list[Finding] = field(default_factory=list)
     gain: float = 0.0
     projected_score: float | None = None
 
@@ -276,13 +283,20 @@ def build_component_cards(si: SystemInfo, bench: Benchmark | None,
             card.score = sum(min(v, SCORE_CAP) * WEIGHTS[k] for k, v in scored.items()) / total_w
             card.letter = grade(card.score)[0]
 
-        card.findings = sorted([f for f in auditor.findings if finding_group(f) == key],
+        # El corte es por categoría y no por qué comprobación lo emitió:
+        # `check_antivirus` vive entre las de seguridad pero `av_stack` es un
+        # hallazgo de fluidez —dos motores en tiempo real cuestan E/S— y su
+        # sitio son las mejoras, con su ganancia y todo.
+        del_grupo = [f for f in auditor.findings if finding_group(f) == key]
+        card.findings = sorted([f for f in del_grupo if f.category != SEGURIDAD],
                                key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), -f.gain))
+        card.riesgos = sorted([f for f in del_grupo if f.category == SEGURIDAD],
+                              key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.title))
         card.gain = combine_gains([f.gain for f in card.findings if f.gain > 0])
         if card.score is not None:
             card.projected_score = card.score * (1 + card.gain)
 
-        if card.specs or card.tests or card.findings:
+        if card.specs or card.tests or card.findings or card.riesgos:
             cards.append(card)
     return cards
 

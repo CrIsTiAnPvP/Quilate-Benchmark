@@ -17,6 +17,9 @@ plan_optimizacion.ps1
 
 tests/*.md
 
+# Informes de auditoría del propio proyecto: material de trabajo, no fuente.
+auditory.md
+
 # Empaquetado
 build/
 dist/

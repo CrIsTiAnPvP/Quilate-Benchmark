@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import subprocess
 import sys
 from typing import Any
 
@@ -77,13 +76,15 @@ def clear_screen() -> None:
     Solo cuando la salida va a un terminal: si esta redirigida a un fichero o a
     otro proceso, el borrado no tendria efecto visible y ademas ensuciaria el
     destino con el codigo de control.
+
+    Se borra con la secuencia VT100 y no llamando a `cls`/`clear`: `configure_output`
+    ya ha activado VT100, asi que hace lo mismo sin levantar un proceso hijo por
+    ejecucion y sin depender de que %COMSPEC% en Windows —o el `clear` que haya
+    en el PATH en Linux— sean los que uno espera.
     """
     if not sys.stdout.isatty():
         return
-    try:
-        subprocess.run("cls" if IS_WINDOWS else "clear", shell=True, check=False)
-    except OSError:
-        print("\033[2J\033[H", end="")   # respaldo: borrar y volver al origen
+    print("\033[2J\033[H", end="")   # borrar la pantalla y volver al origen
 
 
 def read_key() -> str:
@@ -214,3 +215,35 @@ def _wrap(text: str, width: int) -> list[str]:
     if cur:
         lines.append(cur)
     return lines or [""]
+
+
+# Lo que le pasa al programa, dicho para quien no programa. El resto del informe
+# se ha escrito con ese criterio —los `detail` de cada hallazgo explican el
+# porqué, no solo el qué— y no hay motivo para que la única palabra en inglés y
+# en CamelCase de toda la ejecución sea la que aparece cuando algo falla.
+# Los textos son neutrales respecto a lo que se estaba haciendo, porque el mismo
+# traductor se usa al leer (rastreo, red) y al escribir (exportaciones): «sin
+# permisos para leerlo» quedaría mal en un fallo de escritura.
+_MOTIVOS = {
+    PermissionError: "permisos insuficientes",
+    FileNotFoundError: "la ruta no existe",
+    NotADirectoryError: "la ruta no es una carpeta",
+    IsADirectoryError: "la ruta es una carpeta, no un fichero",
+    TimeoutError: "ha tardado demasiado",
+    MemoryError: "no hay memoria suficiente",
+    InterruptedError: "algo lo ha interrumpido",
+    OSError: "el sistema lo ha impedido",
+}
+
+
+def _motivo(exc: BaseException) -> str:
+    """Traduce una excepción a algo que se pueda leer sin saber Python.
+
+    Se recorre `_MOTIVOS` en orden y no se usa `type(exc)` directamente para
+    que las subclases —`PermissionError` lo es de `OSError`— encuentren su
+    mensaje concreto antes de caer en el genérico.
+    """
+    for clase, texto in _MOTIVOS.items():
+        if isinstance(exc, clase):
+            return texto
+    return "ha fallado de una forma no prevista"

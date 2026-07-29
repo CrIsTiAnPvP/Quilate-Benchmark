@@ -1,236 +1,39 @@
-"""Auditoria del sistema: comprobaciones de configuracion y hallazgos."""
+"""Las comprobaciones de rendimiento: por que el equipo va como va.
+
+Memoria, temperatura, frecuencia, arranque, drivers, red y los ajustes de
+Windows que cuestan fluidez. Es el grupo mas grande con diferencia, y lo une
+algo concreto: todas responden a «esto se puede ir mas rapido», y todas dan un
+hallazgo con ganancia estimada.
+
+Casi todas son solo-Windows. Las que no encuentran su dato levantan `SinDato`,
+y las que no proceden en este equipo, `NoAplica`: ver `modelo`.
+"""
 
 from __future__ import annotations
 
-import os
 import re
 import statistics
-from dataclasses import dataclass, field
-from pathlib import Path
+from datetime import datetime
 
 import psutil
 
-from .benchmark import Benchmark
-from .sensors import cpu_temperature, gpu_temperature, temperature_report, temperature_source
-from .storage_scan import ScanResult, candidate_bytes
-from .console import C, human_bytes, section, spinner_done, spinner_step
-from .const import IS_LINUX, IS_WINDOWS
-from .platform_utils import (boot_performance, pending_driver_updates, ps_json,
-                             reg_key_readable, reg_list_values, reg_read, run_cmd, winreg)
-from .network import WIFI_TECHO, wifi_capability
-from .sysinfo import KIND_LABELS, SystemInfo, local_volumes, primary_gpu
+from .. import elevacion
+from ..console import human_bytes
+from ..const import IS_WINDOWS
+from ..network import WIFI_TECHO, wifi_capability
+from ..platform_utils import (_sys_exe, boot_performance, pending_driver_updates,
+                              ps_json, reg_key_readable, reg_list_values, reg_read,
+                              run_cmd, winreg)
+from ..sensors import (cpu_temperature, gpu_temperature, temperature_report,
+                       temperature_source)
+from ..sysinfo import _parse_cim_date, primary_gpu
+from .modelo import NoAplica, SinDato
+from .tablas import _DRIVER_VIEJO_DIAS, _PNP_DELIBERADO, _PNP_PROBLEMA
 
 
-class SinDato(Exception):
-    """La comprobación no pudo leer lo que necesitaba para opinar.
-
-    Existe porque devolver un mensaje neutro cuando falta el dato hace que el
-    informe dé por bueno algo que nadie ha llegado a mirar. Es el mismo error
-    de fondo que leer la velocidad nominal de la RAM en vez de la real, pero
-    aplicado al propio veredicto: sin dato no hay veredicto, y decirlo es la
-    única respuesta honesta.
-    """
-
-
-class NoAplica(Exception):
-    """La comprobación no tiene sentido en este equipo.
-
-    TRIM en un disco mecánico o la desfragmentación en un SSD no son datos que
-    falten: son preguntas que no procede hacer. No cuentan como pendientes.
-    """
-
-
-SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-SEVERITY_TEXT = {"critical": "CRÍTICO", "high": "ALTO", "medium": "MEDIO",
-                 "low": "BAJO", "info": "INFO"}
-SEVERITY_COLOR = {"critical": "RED", "high": "RED", "medium": "YELLOW",
-                  "low": "CYAN", "info": "GREY"}
-
-
-def sev_label(severity: str) -> str:
-    """Se resuelve en tiempo de ejecución: si los colores están desactivados
-    (--no-color o salida redirigida) no se cuelan códigos ANSI en el informe."""
-    color = getattr(C, SEVERITY_COLOR.get(severity, "GREY"), "")
-    return f"{color}{SEVERITY_TEXT.get(severity, severity.upper())}{C.RESET}"
-
-
-@dataclass
-class Finding:
-    id: str
-    title: str
-    severity: str
-    category: str            # arranque | fluidez | almacenamiento | térmico | memoria | cpu | seguridad
-    component: str           # cpu_single | cpu_multi | memory | disk | system
-    detail: str
-    gain: float              # mejora estimada (fracción, 0.10 = 10%)
-    gain_note: str
-    effort: str              # bajo | medio | alto
-    risk: str                # nulo | bajo | medio | alto
-    steps: list[str] = field(default_factory=list)
-
-
-class Auditor:
-    def __init__(self, si: SystemInfo, bench: Benchmark | None,
-                 scan: ScanResult | None = None, check_drivers: bool = False,
-                 network: dict | None = None):
-        self.si = si
-        self.network = network or {}
-        self.bench = bench
-        self.scan = scan
-        self.check_drivers = check_drivers
-        self.findings: list[Finding] = []
-        self.checks_run = 0
-        self.notes: list[str] = []
-        # Comprobaciones que no llegaron a un veredicto y por qué. Se informan
-        # aparte: un informe que dice «24 pruebas» cuando cinco no pudieron
-        # mirar nada está exagerando su propia cobertura.
-        self.unverified: list[tuple[str, str]] = []
-        self.not_applicable: list[tuple[str, str]] = []
-        # Arranque medido por Windows. `None` es «no se pudo leer», que no es lo
-        # mismo que «rápido»: el log pide privilegios de administrador.
-        self.boot_report: dict = {}
-        self.boot_seconds: float | None = None
-
-    def add(self, **kwargs) -> None:
-        self.findings.append(Finding(**kwargs))
-
-    # ------------------------------------------------------------------ core --
-    def run(self) -> None:
-        section("Auditoría del sistema")
-        checks = [
-            ("Espacio en disco", self.check_disk_space),
-            ("Archivos grandes y espacio recuperable", self.check_large_files),
-            ("Tipo de disco de sistema", self.check_disk_media),
-            ("Memoria RAM", self.check_memory),
-            ("Configuración de canales de RAM", self.check_ram_channels),
-            ("Temperaturas y throttling", self.check_thermals),
-            ("Frecuencia de CPU bajo carga", self.check_cpu_frequency),
-            ("Programas de inicio", self.check_startup),
-            ("Procesos en segundo plano", self.check_background_load),
-            ("Tiempo sin reiniciar", self.check_uptime),
-            ("Antigüedad de la instalación", self.check_os_age),
-            ("Drivers gráficos", self.check_gpu_drivers),
-            ("Enlace de red", self.check_network_link),
-            ("Latencia y DNS", self.check_network_latency),
-        ]
-        if IS_WINDOWS:
-            checks += [
-                ("Plan de energía", self.check_power_plan),
-                ("TRIM en SSD", self.check_trim),
-                ("Efectos visuales", self.check_visual_effects),
-                ("Archivo de paginación", self.check_pagefile),
-                ("Inicio rápido / hibernación", self.check_fast_startup),
-                ("SysMain e indexación", self.check_services),
-                ("Game DVR y captura en segundo plano", self.check_game_dvr),
-                ("Duración real del arranque", self.check_boot_time),
-                ("Integridad del sistema de archivos", self.check_filesystem_health),
-                ("Antivirus y solapamientos", self.check_antivirus),
-                ("Fragmentación / optimización", self.check_defrag),
-                ("Salud SMART de los discos", self.check_smart),
-            ]
-        elif IS_LINUX:
-            checks += [
-                ("Gobernador de CPU", self.check_linux_governor),
-                ("Swappiness", self.check_linux_swappiness),
-                ("TRIM periódico", self.check_linux_trim),
-            ]
-
-        self.checks_total = len(checks)
-        for label, fn in checks:
-            spinner_step(label.ljust(38))
-            try:
-                msg = fn()
-                self.checks_run += 1
-                spinner_done(msg or "ok")
-            except NoAplica as exc:
-                self.not_applicable.append((label, str(exc)))
-                spinner_done(f"no aplica: {exc}", neutral=True)
-            except SinDato as exc:
-                self.unverified.append((label, str(exc)))
-                spinner_done(f"sin comprobar: {exc}", ok=False)
-            except Exception as exc:
-                # Una comprobación que revienta desaparecía del informe sin
-                # dejar rastro, que es la peor forma posible de fallar.
-                self.unverified.append((label, f"error interno · {type(exc).__name__}: {exc}"))
-                spinner_done(f"no evaluable ({type(exc).__name__})", ok=False)
-
-    # ------------------------------------------------------- comprobaciones --
-    def check_disk_space(self) -> str:
-        # Solo almacenamiento físico local: una unidad de Google Drive, OneDrive
-        # o de red informa de un tamaño que no es del equipo y no se libera
-        # borrando archivos aquí. Auditarla solo genera avisos falsos.
-        ignored = [d for d in self.si.disks if d["ignored"] and d["total"] > 5 * 1024**3]
-        if ignored:
-            self.notes.append(
-                "Volúmenes excluidos de la auditoría de almacenamiento por no ser discos "
-                "locales: " + ", ".join(
-                    f"{d['mount']} ({d['label'] or KIND_LABELS.get(d['kind'], d['kind'])})"
-                    for d in ignored) + ".")
-
-        worst = None
-        for d in local_volumes(self.si):
-            free_pct = 100 - d["percent"]
-            if worst is None or free_pct < worst[1]:
-                worst = (d, free_pct)
-        if not worst:
-            raise SinDato("no se ha identificado ningún volumen local")
-        d, free_pct = worst
-        if free_pct < 10:
-            self.add(
-                id="disk_space", title=f"Espacio libre crítico en {d['mount']}",
-                severity="critical", category="almacenamiento", component="disk",
-                detail=f"Solo queda un {free_pct:.1f}% libre ({human_bytes(d['free'])}). "
-                       "Por debajo del 10% los SSD pierden capacidad de wear-leveling y "
-                       "escribir bloques nuevos obliga a reorganizar celdas, lo que hunde "
-                       "la velocidad de escritura. Windows tampoco puede crecer el pagefile.",
-                gain=0.22, gain_note="escritura y respuesta general",
-                effort="bajo", risk="nulo",
-                steps=[
-                    "Ejecuta `cleanmgr /sageset:1` y marca Windows Update Cleanup, archivos temporales y volcados",
-                    "Revisa Configuración → Sistema → Almacenamiento → Recomendaciones de limpieza",
-                    "Libera puntos de restauración antiguos: `vssadmin list shadowstorage`",
-                    "Objetivo: dejar al menos un 20% libre en el disco de sistema",
-                ])
-            return f"{free_pct:.0f}% libre en {d['mount']} (crítico)"
-        if free_pct < 20:
-            self.add(
-                id="disk_space", title=f"Espacio libre bajo en {d['mount']}",
-                severity="medium", category="almacenamiento", component="disk",
-                detail=f"Queda un {free_pct:.1f}% libre ({human_bytes(d['free'])}). Se recomienda "
-                       "mantener un 20% libre para que el SSD mantenga rendimiento estable.",
-                gain=0.08, gain_note="estabilidad de escritura",
-                effort="bajo", risk="nulo",
-                steps=["Limpieza de disco (`cleanmgr`)",
-                       "Desinstalar software que no uses desde Aplicaciones instaladas",
-                       "Mover bibliotecas grandes (juegos, vídeo) a otra unidad"])
-            return f"{free_pct:.0f}% libre en {d['mount']}"
-        return f"{free_pct:.0f}% libre (correcto)"
-
-    def check_disk_media(self) -> str:
-        media = self.si.system_drive_media
-        if not media or "desconocido" in media.lower():
-            # De este dato dependen TRIM, desfragmentación y SysMain: darlo por
-            # SSD cuando no se sabe apagaría tres avisos de golpe.
-            raise SinDato("no se ha podido identificar el tipo de disco de sistema")
-        if "HDD" in media and "SSD" not in media:
-            self.add(
-                id="hdd_system", title="El sistema arranca desde un disco mecánico (HDD)",
-                severity="critical", category="almacenamiento", component="disk",
-                detail="Es, con mucha diferencia, el mayor cuello de botella posible en un PC "
-                       "moderno. Un HDD entrega ~100-200 IOPS aleatorias frente a las 20.000-500.000 "
-                       "de un SSD NVMe. Ninguna optimización de software compensa esto: el arranque, "
-                       "la apertura de programas y la carga de niveles en juegos están limitados por "
-                       "acceso aleatorio, no por ancho de banda secuencial.",
-                gain=0.85, gain_note="tiempos de carga y arranque (mejoras de 3-10x son habituales)",
-                effort="medio", risk="bajo",
-                steps=[
-                    "Comprueba si la placa tiene ranura M.2 NVMe; si no, un SSD SATA 2,5\" también sirve",
-                    "Instalación limpia de Windows en el SSD (preferible a clonar una instalación vieja)",
-                    "Deja el HDD como almacenamiento secundario de datos, no de sistema",
-                    "Tras migrar: verifica que TRIM está activo y desactiva la desfragmentación programada",
-                ])
-            return "HDD como disco de sistema (cuello de botella grave)"
-        return f"{media}"
+class ChecksRendimiento:
+    """Mixin de `Auditor`. No se instancia sola: usa `self.si`, `self.bench`,
+    `self.add()` y `self.notes`, que los pone el `__init__` del paquete."""
 
     def check_memory(self) -> str:
         vm = psutil.virtual_memory()
@@ -277,6 +80,7 @@ class Auditor:
                 steps=["Cierra aplicaciones residentes innecesarias", "Considera ampliar RAM"])
         return f"{total_gb:.0f} GB · {used_pct:.0f}% en uso"
 
+
     def check_ram_channels(self) -> str:
         sticks = [s for s in self.si.ram_sticks if s["capacity"] > 0]
         if not sticks:
@@ -319,10 +123,34 @@ class Auditor:
             return f"{len(sticks)} módulos a {speed} MT/s (XMP sin activar)"
         return f"{len(sticks)} módulos" + (f" a {speed} MT/s" if speed else "")
 
-    def check_thermals(self) -> str:
+
+    def _pico_termico(self) -> tuple[float | None, str]:
+        """La temperatura más representativa que haya, y de qué momento es.
+
+        Por orden: el muestreo continuo durante la carga, la foto tomada al
+        terminar la carga, y como último recurso el reposo de ahora. Las tres
+        son medidas reales de un sensor —aquí no se estima nada—; lo que cambia
+        es cuándo se tomaron, y por eso la procedencia viaja con la cifra hasta
+        el título del hallazgo.
+
+        El muestreo continuo no existe en Windows: `_sample_sensors` se salta
+        entero por la frecuencia, que ahí es nominal. La foto sí, y es la misma
+        que ya se pinta en el informe y se apunta en el histórico.
+        """
         samples = self.bench.thermal_samples if self.bench else []
-        current = cpu_temperature()
-        peak = max(samples) if samples else current
+        if samples:
+            return max(samples), "bajo carga"
+        fotos = self.bench.load_snapshots if self.bench else []
+        # Hacen falta las dos fotos: `run_cpu_multi` toma la de antes y se va sin
+        # tomar la de después si el Pool no arranca. Quedarse con la última a
+        # ciegas sería llamar «bajo carga» a un reposo previo al benchmark.
+        if len(fotos) >= 2 and fotos[-1].get("cpu_temp") is not None:
+            return float(fotos[-1]["cpu_temp"]), "bajo carga"
+        return cpu_temperature(), "en reposo"
+
+
+    def check_thermals(self) -> str:
+        peak, momento = self._pico_termico()
         gpu = gpu_temperature()
 
         if peak is None:
@@ -373,7 +201,7 @@ class Auditor:
                               f"(fuente: nvidia-smi).")
         if peak >= 95:
             self.add(
-                id="thermal_critical", title=f"Throttling térmico severo ({peak:.0f} °C bajo carga)",
+                id="thermal_critical", title=f"Throttling térmico severo ({peak:.0f} °C {momento})",
                 severity="critical", category="térmico", component="cpu_multi",
                 detail="A partir de ~95-100 °C la CPU reduce frecuencia para protegerse. Estás "
                        "perdiendo rendimiento de forma permanente y el equipo tiene un problema "
@@ -389,7 +217,7 @@ class Auditor:
             return f"{peak:.0f} °C (crítico)"
         if peak >= 85:
             self.add(
-                id="thermal_high", title=f"Temperaturas elevadas ({peak:.0f} °C bajo carga)",
+                id="thermal_high", title=f"Temperaturas elevadas ({peak:.0f} °C {momento})",
                 severity="high", category="térmico", component="cpu_multi",
                 detail="Todavía por debajo del límite, pero con poco margen. En verano o en cargas "
                        "sostenidas entrará en throttling. Limpieza y pasta térmica devuelven "
@@ -403,46 +231,6 @@ class Auditor:
         source = temperature_source()
         return f"{peak:.0f} °C (correcto)" + (f" · {source}" if source else "")
 
-    def check_large_files(self) -> str:
-        """Espacio recuperable según el rastreo de archivos grandes."""
-        scan = self.scan
-        if scan is None or not scan.available:
-            raise NoAplica("rastreo de archivos no ejecutado")
-        if not scan.files and not scan.special:
-            return f"nada por encima de {human_bytes(scan.min_size)}"
-
-        system_free = next((d["free"] for d in local_volumes(self.si)
-                            if d["mount"].upper().startswith(str(self.si.system_drive)[:1].upper())),
-                           0)
-        recoverable, review = candidate_bytes(scan)
-        candidates = recoverable + review
-
-        top = ", ".join(f"{f['name'][:38]} ({human_bytes(f['size'])})" for f in scan.files[:3])
-        if candidates >= 5 * 1024**3 or (recoverable >= 2 * 1024**3 and system_free
-                                         and candidates > system_free * 0.1):
-            severity = "medium" if candidates < 20 * 1024**3 else "high"
-            self.add(
-                id="large_files",
-                title=f"{human_bytes(candidates)} en archivos grandes prescindibles",
-                severity=severity, category="almacenamiento", component="disk",
-                detail=f"El rastreo encontró {human_bytes(scan.total_large)} en ficheros de más de "
-                       f"{human_bytes(scan.min_size)}, de los cuales {human_bytes(candidates)} son "
-                       "temporales, cachés, volcados, instaladores ya usados o copias antiguas. "
-                       "En un SSD el espacio libre no es solo capacidad: por debajo del 20% la "
-                       f"velocidad de escritura cae. Los más grandes: {top}.",
-                gain=0.06, gain_note="margen de escritura del SSD",
-                effort="bajo", risk="bajo",
-                steps=["Revisa la lista de la sección «Archivos grandes» antes de borrar nada",
-                       "Ejecuta `cleanmgr /sageset:1` y marca temporales, volcados y Windows Update",
-                       "Configuración → Sistema → Almacenamiento → Sensor de almacenamiento",
-                       "Los instaladores y comprimidos ya usados se pueden volver a descargar",
-                       "Mueve vídeos y copias a otra unidad en lugar de borrarlos"])
-        note = f"{human_bytes(scan.total_large)} en {len(scan.files)} ficheros grandes"
-        if candidates:
-            note += f" · {human_bytes(candidates)} prescindibles"
-        if scan.truncated:
-            note += " (rastreo parcial)"
-        return note
 
     def check_cpu_frequency(self) -> str:
         """Frecuencia real bajo carga frente al reloj base.
@@ -487,6 +275,7 @@ class Auditor:
             return f"{sustained:.0f} MHz bajo carga ({ratio * 100:.0f}% de la base)"
         return (f"{sustained:.0f} MHz bajo carga · base {base:.0f} MHz "
                 f"({ratio * 100:.0f}%)")
+
 
     def check_startup(self) -> str:
         items: list[dict] = []
@@ -543,6 +332,7 @@ class Auditor:
         return (f"{count} entradas de inicio activas (razonable)"
                 + (f", {off} desactivadas" if off else ""))
 
+
     # Task Manager no borra el valor de Run al desactivar una app: deja la entrada
     # y anota el estado en StartupApproved. Sin mirar ahí, todo lo que el usuario
     # ha ido desactivando sigue contando como si arrancara con Windows.
@@ -557,14 +347,14 @@ class Auditor:
                 return not raw[0] & 1
         return True
 
+
     def _startup_folder_items(self) -> list[dict]:
         """Accesos directos de las carpetas Inicio. Van por WMI porque la ruta
         depende del perfil; su estado está en StartupApproved\\StartupFolder,
         con el nombre del .lnk. Las entradas de registro que devuelve la misma
         consulta se ignoran: ya se leen del registro, y ahí llegan duplicadas
         por cada perfil de usuario (incluido .DEFAULT)."""
-        data = ps_json("Get-CimInstance Win32_StartupCommand | Select-Object Name,Location",
-                       timeout=25)
+        data = self._consulta("inicio")
         if not getattr(data, "ok", True):
             self.notes.append("No se han podido leer las carpetas de Inicio "
                               f"({data.error}): el recuento de programas de arranque "
@@ -581,6 +371,7 @@ class Auditor:
             out.append({"name": name, "location": "Carpeta Inicio",
                         "enabled": self._startup_enabled(hives, f"{name}.lnk")})
         return out
+
 
     def check_background_load(self) -> str:
         procs = []
@@ -610,6 +401,7 @@ class Auditor:
             return f"{total} procesos"
         return f"{total} procesos (normal)"
 
+
     def check_os_age(self) -> str:
         age = self.si.os_age_days
         if age is None:
@@ -636,6 +428,7 @@ class Auditor:
                        "La licencia digital se reactiva sola si es la misma placa base"])
             return f"{years:.1f} años (recomendable reinstalar)"
         return f"{years:.1f} años"
+
 
     def check_uptime(self) -> str:
         """Tiempo sin reiniciar.
@@ -671,6 +464,7 @@ class Auditor:
         if days >= 7:
             return f"{days:.0f} días encendido (empieza a ser mucho)"
         return f"{hours:.0f} h encendido"
+
 
     def check_gpu_drivers(self) -> str:
         if not self.si.gpus:
@@ -741,6 +535,169 @@ class Auditor:
                                           "gráfic", "graphics")):
                 return title
         return None
+
+
+    def check_device_problems(self) -> str:
+        """Los dispositivos con el signo de exclamación amarillo.
+
+        Se pregunta a `Win32_PnPEntity` filtrando en la propia consulta, y no a
+        `Get-PnpDevice -Status Error,Degraded` como parecería natural: verificado
+        ejecutándolo, ese cmdlet lanza excepción cuando NO hay ninguno («No
+        Win32_PnPEntity objects found with property 'Status' equal to 'Error'»).
+        Con él, un equipo sano y una consulta que falla llegan aquí iguales, y el
+        equipo sano acabaría contado como «Sin comprobar». El filtro WQL devuelve
+        lista vacía, que es la respuesta correcta y además cuesta 0,26 s.
+        """
+        rows = self._consulta("dispositivos")
+        if not rows.ok:
+            raise SinDato("no se ha podido consultar el estado de los dispositivos"
+                          f" ({rows.error})")
+
+        averiados: list[tuple[str, str]] = []
+        deliberados = 0
+        for row in rows:
+            codigo = row.get("ConfigManagerErrorCode")
+            # `isinstance(True, int)` es cierto en Python, y un booleano aquí
+            # significaría que la consulta devolvió otra cosa, no un código.
+            if isinstance(codigo, bool) or not isinstance(codigo, int) or codigo == 0:
+                continue
+            if codigo in _PNP_DELIBERADO:
+                deliberados += 1
+                continue
+            nombre = str(row.get("Name") or row.get("PNPClass") or "dispositivo sin nombre")
+            # Un código que no está en la tabla sigue siendo un problema: lo que
+            # no se sabe es cuál, y decir el número permite buscarlo.
+            averiados.append((nombre, _PNP_PROBLEMA.get(
+                codigo, f"Windows le ha asignado el código de problema {codigo}")))
+
+        cola = f", {deliberados} apagado(s) a propósito" if deliberados else ""
+        if not averiados:
+            return f"ninguno con problema{cola}"
+
+        # Con muchos dispositivos rotos la lista completa no cabe en un título ni
+        # ayuda: los primeros bastan para reconocer de qué se está hablando.
+        visibles = averiados[:4]
+        detalle = ". ".join(f"«{n}»: {m}" for n, m in visibles)
+        if len(averiados) > len(visibles):
+            detalle += f". Y {len(averiados) - len(visibles)} más"
+        titulo = (f"«{averiados[0][0]}» no está funcionando" if len(averiados) == 1
+                  else f"{len(averiados)} dispositivos no están funcionando")
+        self.add(
+            id="dispositivo_con_error", title=titulo,
+            severity="medium", category="dispositivos", component="system",
+            detail=f"{detalle}. Es el signo de exclamación amarillo del Administrador de "
+                   "dispositivos: hardware que está montado en el equipo y que Windows ha "
+                   "dado por imposible. No se nota como lentitud, se nota como algo que "
+                   "sencillamente no va —un lector de tarjetas, el Bluetooth, un puerto— y "
+                   "que casi nadie relaciona con un driver porque nadie abre esa ventana.",
+            gain=0.0, gain_note="no es una optimización: es hardware que no funciona",
+            effort="bajo", risk="bajo",
+            steps=["Abre el Administrador de dispositivos (`devmgmt.msc`) y busca el aviso amarillo",
+                   "Botón derecho → Actualizar controlador → Buscar automáticamente",
+                   "Si no lo encuentra, busca el modelo en la web del fabricante de la placa "
+                   "o del portátil: ahí están los drivers que Windows Update no trae",
+                   "Si el dispositivo ya no está conectado, botón derecho → Desinstalar"])
+        return f"{len(averiados)} con problema{cola}"
+
+
+    def check_old_drivers(self) -> str:
+        """Drivers de terceros que nadie ha vuelto a tocar.
+
+        La regla que parecería natural —«driver anterior a la instalación del
+        SO»— es inservible, y está medido: en este equipo la cumplen 209 de 239
+        drivers. Microsoft fecha a propósito los suyos en 21/06/2006 para que
+        cualquier driver del fabricante gane siempre la resolución de PnP, así
+        que `WAN Miniport (IP)` y compañía son de 2006 y están perfectos. La
+        señal aparece al quedarse solo con los de terceros: 39 de esos 239.
+
+        La fecha también está en el registro (`Control\\Class\\{clase}\\NNNN`),
+        y leerla de ahí cuesta 0,02 s frente a los 2,5 s de WMI. Se descartó
+        porque el registro conserva los drivers de dispositivos que ya no están
+        conectados —aquí saca uno de Apple de 2013, resto de un iTunes— y este
+        hallazgo dice «actualiza esto», que sobre algo desenchufado no se puede
+        hacer. WMI enumera dispositivos presentes, que es justo lo que afirma.
+
+        Se paga: `Win32_PnPSignedDriver` comprueba la firma de cada driver, y eso
+        cuesta 2 s con la caché caliente y hasta 11 s en frío, medido aquí. Es la
+        comprobación más cara de las 34, y está asumido a cambio de no acusar a
+        nadie de tener viejo el driver de algo que ya no tiene enchufado.
+        """
+        rows = ps_json("Get-CimInstance Win32_PnPSignedDriver "
+                       "-Filter \"NOT DriverProviderName LIKE 'Microsoft%'\" | "
+                       "Select-Object DeviceName,DriverDate,DriverProviderName,DeviceClass")
+        if not rows.ok:
+            raise SinDato(f"no se han podido consultar los drivers ({rows.error})")
+        if not rows:
+            # Un Windows recién instalado en hardware corriente funciona entero
+            # con drivers de caja. No hay nada que auditar, y eso no es un dato
+            # que falte: es la respuesta.
+            return "no hay drivers de terceros"
+
+        hoy = datetime.now()
+        # Un mismo teclado aparece una vez por cada función que expone (HID,
+        # ratón, teclado…), a veces con drivers de fechas distintas. Se queda la
+        # más antigua: es la que dice desde cuándo no se toca ese dispositivo.
+        por_dispositivo: dict[str, int] = {}
+        ilegibles = 0
+        for row in rows:
+            # La gráfica ya la audita `check_gpu_drivers`, con su fecha y su
+            # ganancia. Repetirla aquí sería el mismo aviso dos veces.
+            if str(row.get("DeviceClass") or "").upper() == "DISPLAY":
+                continue
+            fecha = _parse_cim_date(row.get("DriverDate"))
+            nombre = str(row.get("DeviceName") or "").strip()
+            if fecha is None or not nombre:
+                ilegibles += 1
+                continue
+            dias = (hoy - fecha).days
+            # Hay drivers fechados en el futuro, y no es un error del fabricante
+            # sino de la máquina que los firmó. Uno así no es viejo.
+            if dias < 0:
+                continue
+            por_dispositivo[nombre] = max(por_dispositivo.get(nombre, 0), dias)
+
+        if not por_dispositivo:
+            # Quedarse sin ninguno no significa siempre lo mismo. Si es porque
+            # nadie dijo su fecha, falta el dato y hay que decirlo. Si es porque
+            # los que había estaban excluidos con motivo —la gráfica, que audita
+            # otra comprobación; una fecha futura—, la respuesta es que no hay
+            # nada que auditar, y eso sí es una respuesta.
+            if ilegibles:
+                raise SinDato("ningún driver de terceros ha informado de su fecha")
+            return "no hay drivers de terceros que auditar"
+        viejos = sorted(((n, d) for n, d in por_dispositivo.items()
+                         if d > _DRIVER_VIEJO_DIAS), key=lambda x: -x[1])
+        if not viejos:
+            return f"{len(por_dispositivo)} de terceros, ninguno de más de 5 años"
+
+        def años(dias: int) -> int:
+            return round(dias / 365.25)
+
+        visibles = viejos[:4]
+        lista = ", ".join(f"{n} ({años(d)} años)" for n, d in visibles)
+        if len(viejos) > len(visibles):
+            lista += f" y {len(viejos) - len(visibles)} más"
+        titulo = (f"{viejos[0][0]}: driver de hace {años(viejos[0][1])} años"
+                  if len(viejos) == 1
+                  else f"{len(viejos)} dispositivos con drivers de más de 5 años")
+        self.add(
+            id="driver_viejo", title=titulo,
+            severity="low", category="dispositivos", component="system",
+            detail=f"{lista}. Son drivers del fabricante del dispositivo, no de Windows: "
+                   "Windows Update casi nunca los renueva y quedan como estaban el día que "
+                   "se instalaron. Pasados unos años eso significa fallos conocidos sin "
+                   "corregir y, en los que manejan datos —red, audio, almacenamiento—, "
+                   "también agujeros de seguridad que ya tienen parche publicado. No es "
+                   "urgente y no va a acelerar el equipo; es mantenimiento pendiente.",
+            gain=0.0, gain_note="no es una optimización: es mantenimiento",
+            effort="bajo", risk="bajo",
+            steps=["Busca el modelo del equipo o de la placa en la web del fabricante y "
+                   "mira su sección de soporte: ahí está lo que Windows Update no trae",
+                   "Actualiza primero los que manejan datos: red, audio y almacenamiento",
+                   "Un driver de hace años que funciona bien puede quedarse: si el "
+                   "dispositivo no da problemas, esto no corre prisa"])
+        return f"{len(viejos)} de más de 5 años, de {len(por_dispositivo)} de terceros"
+
 
     def check_network_link(self) -> str:
         """Lo que el enlace está haciendo frente a lo que la tarjeta sabe hacer.
@@ -836,6 +793,7 @@ class Auditor:
                            "Revisa que la velocidad del adaptador esté en «Negociación automática»"])
         return " · ".join(partes) if partes else "conectado"
 
+
     def check_network_latency(self) -> str:
         """Latencia y resolución DNS. Solo si se han pedido las sondas."""
         datos = self.network or {}
@@ -895,10 +853,13 @@ class Auditor:
                        "Activa la gestión de cola (SQM/QoS) en el router si la tiene"])
         return " · ".join(partes)
 
+
     # ------------------------------------------------------- solo Windows ----
     def check_power_plan(self) -> str:
-        out = run_cmd(["powercfg", "/getactivescheme"], timeout=15) or ""
-        name = out.split("(", 1)[1].rstrip(")").strip() if "(" in out else out
+        out = run_cmd([_sys_exe("powercfg.exe"), "/getactivescheme"], timeout=15)
+        if not out.ok:
+            raise SinDato(f"no se ha podido preguntar el plan de energía: {out.error}")
+        name = out.split("(", 1)[1].rstrip(")").strip() if "(" in out else str(out)
         if not name.strip():
             # Sin nombre de plan, la comparación contra la lista de nombres
             # «buenos» siempre fallaba y el hallazgo se emitía con el plan
@@ -924,27 +885,6 @@ class Auditor:
             return f"«{name}»"
         return f"«{name}» (correcto)"
 
-    def check_trim(self) -> str:
-        if "SSD" not in self.si.system_drive_media:
-            raise NoAplica("el disco de sistema no es un SSD")
-        out = run_cmd(["fsutil", "behavior", "query", "DisableDeleteNotify"], timeout=15) or ""
-        if not out.strip():
-            raise SinDato("fsutil no ha devuelto el estado de TRIM")
-        disabled = any(tok in out for tok in ("= 1", "=1"))
-        if disabled:
-            self.add(
-                id="trim_off", title="TRIM desactivado en un SSD",
-                severity="high", category="almacenamiento", component="disk",
-                detail="Sin TRIM, el SSD no sabe qué bloques están libres y acaba haciendo "
-                       "read-modify-write constantemente. La velocidad de escritura se degrada "
-                       "progresivamente y la vida útil del disco se acorta.",
-                gain=0.20, gain_note="escritura sostenida y durabilidad",
-                effort="bajo", risk="nulo",
-                steps=["Como administrador: `fsutil behavior set DisableDeleteNotify 0`",
-                       "Fuerza un TRIM manual: `defrag C: /L`",
-                       "Verifica que la tarea programada «Optimizar unidades» está activa"])
-            return "desactivado"
-        return "activo"
 
     def check_visual_effects(self) -> str:
         pref = reg_read(winreg.HKEY_CURRENT_USER,
@@ -975,8 +915,9 @@ class Auditor:
             return "activas"
         return "configuradas"
 
+
     def check_pagefile(self) -> str:
-        data = ps_json("Get-CimInstance Win32_PageFileUsage | Select-Object Name,AllocatedBaseSize,CurrentUsage")
+        data = self._consulta("pagefile")
         if not getattr(data, "ok", True):
             # Sin esta distinción, una consulta fallida se leía como «no hay
             # archivo de paginación» y se emitía el hallazgo igualmente.
@@ -998,6 +939,7 @@ class Auditor:
                 return "desactivado"
             return "desactivado (aceptable con mucha RAM)"
         return f"{len(data)} archivo(s), {data[0].get('AllocatedBaseSize', '?')} MB"
+
 
     def check_fast_startup(self) -> str:
         val = reg_read(winreg.HKEY_LOCAL_MACHINE,
@@ -1023,9 +965,9 @@ class Auditor:
             return "desactivado (con HDD, conviene activarlo)"
         return "activado" if val else "desactivado"
 
+
     def check_services(self) -> str:
-        rows = ps_json("Get-Service | Where-Object {$_.Status -eq 'Running'} | "
-                       "Select-Object Name,DisplayName,StartType")
+        rows = self._consulta("servicios")
         if not getattr(rows, "ok", True) or not rows:
             raise SinDato("no se ha podido enumerar los servicios"
                           + (f" ({rows.error})" if getattr(rows, "error", None) else ""))
@@ -1056,6 +998,7 @@ class Auditor:
                        "O desactiva el servicio: `sc config WSearch start=disabled`",
                        "Contrapartida: las búsquedas en el menú Inicio serán más lentas"])
         return f"{running} servicios en ejecución"
+
 
     def check_game_dvr(self) -> str:
         gamedvr = r"Software\Microsoft\Windows\CurrentVersion\GameDVR"
@@ -1092,6 +1035,7 @@ class Auditor:
             return "activa"
         return "sin grabación en segundo plano"
 
+
     @staticmethod
     def _event_ms(fields: dict, *names: str) -> float | None:
         """Primer campo del evento que traiga un número de milisegundos."""
@@ -1105,16 +1049,17 @@ class Auditor:
                 continue
         return None
 
+
     def check_boot_time(self) -> str:
         """Duración real del arranque, medida por Windows en cada encendido.
 
         Es la única fuente que convierte «tienes muchos programas de inicio» en
         una cifra: el propio sistema apunta cuánto tardó y qué lo retrasó.
         """
-        if not self.si.is_admin:
-            self.boot_report = {"error": "requiere administrador", "boots": [], "delays": []}
-            raise SinDato("el registro de arranque exige administrador para leerse")
-        data = boot_performance()
+        # Ya no se mira `si.is_admin`: este proceso no se eleva nunca, así que
+        # eso diría siempre «no» aunque el lote con permisos haya contestado.
+        # Lo que decide es si el dato está, que es la pregunta de verdad.
+        data = boot_performance(elevacion.recoger()["arranque"])
         self.boot_report = data
         if data.get("error"):
             # El log tiene una ACL propia, y con -FilterHashtable el error que
@@ -1180,228 +1125,3 @@ class Auditor:
             gain=ganancia, gain_note="tiempo hasta escritorio usable (medido, no estimado)",
             effort="bajo", risk="nulo", steps=pasos)
         return f"{segundos:.0f} s de mediana en {len(tiempos)} arranques"
-
-    # «Está sucio» y «NO está sucio» solo se diferencian por la negación, que va
-    # traducida. Buscarla como palabra suelta es lo único que aguanta el cambio
-    # de idioma y que la respuesta llegue con los acentos rotos. Decirle a
-    # alguien que su sistema de ficheros está corrupto —y mandarle un chkdsk /r
-    # de horas— por no saber leer la respuesta es mucho peor que no decir nada,
-    # así que ante la duda no se informa.
-    _NEGACIONES = {"not", "no", "nicht", "non", "pas", "niet", "nao", "não"}
-    _SUCIO = ("dirty", "sucio", "sujo", "verschmutzt", "sporco", "vuil")
-
-    def check_filesystem_health(self) -> str:
-        drive = os.environ.get("SystemDrive", "C:")
-        out = run_cmd(["fsutil", "dirty", "query", drive], timeout=15) or ""
-        if not out:
-            raise SinDato("fsutil no ha respondido (suele requerir administrador)")
-        lowered = out.lower()
-        if set(re.split(r"[^\w]+", lowered)) & self._NEGACIONES:
-            return "limpio"
-        if not any(termino in lowered for termino in self._SUCIO):
-            raise SinDato(f"respuesta de fsutil no reconocida: «{out[:60]}»")
-        self.add(
-            id="fs_dirty", title="El volumen de sistema está marcado como «sucio»",
-            severity="high", category="almacenamiento", component="disk",
-            detail="Windows ha detectado inconsistencias en el sistema de archivos y programará "
-                   "una comprobación. Puede indicar un apagado incorrecto o, más preocupante, "
-                   "un disco con sectores defectuosos.",
-            gain=0.10, gain_note="estabilidad y velocidad de E/S",
-            effort="bajo", risk="bajo",
-            steps=[f"Programa una comprobación: `chkdsk {drive} /f /r` y reinicia",
-                   "Revisa el estado SMART del disco con CrystalDiskInfo",
-                   "Haz copia de seguridad antes de nada si SMART muestra advertencias"])
-        return "marcado como sucio"
-
-    def check_antivirus(self) -> str:
-        rows = ps_json('Get-CimInstance -Namespace "root/SecurityCenter2" -ClassName AntiVirusProduct '
-                       '-ErrorAction SilentlyContinue | Select-Object displayName,productState')
-        if not getattr(rows, "ok", True):
-            raise SinDato(f"no se ha podido consultar el Centro de seguridad ({rows.error})")
-        names = [str(r.get("displayName")) for r in rows if r.get("displayName")]
-        if not names:
-            # Windows registra siempre Defender aquí; una lista vacía significa
-            # que el Centro de seguridad no ha contestado, no que no haya nada.
-            raise SinDato("el Centro de seguridad no ha devuelto ningún producto")
-        third_party = [n for n in names if "defender" not in n.lower()]
-        if len(third_party) >= 2:
-            self.add(
-                id="av_stack", title=f"Varios antivirus instalados ({', '.join(third_party)})",
-                severity="high", category="fluidez", component="system",
-                detail="Dos motores de análisis en tiempo real se escanean mutuamente. El resultado "
-                       "es un impacto grande en la E/S de disco, conflictos y menor protección real, "
-                       "no mayor.",
-                gain=0.20, gain_note="E/S de disco y fluidez",
-                effort="bajo", risk="bajo",
-                steps=["Deja un único antivirus en tiempo real",
-                       "Desinstala el resto con la herramienta de limpieza oficial del fabricante",
-                       "Windows Defender es suficiente para la mayoría de usuarios"])
-            return f"{len(names)} productos ({', '.join(names)})"
-        return ", ".join(names)
-
-    def check_defrag(self) -> str:
-        if "HDD" not in self.si.system_drive_media:
-            raise NoAplica("desfragmentar un SSD solo desgasta celdas")
-        self.add(
-            id="defrag_hdd", title="Desfragmentación recomendable en disco mecánico",
-            severity="low", category="almacenamiento", component="disk",
-            detail="En HDD la fragmentación obliga al cabezal a saltar entre zonas del plato. "
-                   "Desfragmentar recupera velocidad secuencial. (En SSD no se debe hacer nunca: "
-                   "solo desgasta celdas.)",
-            gain=0.07, gain_note="lectura secuencial en HDD",
-            effort="bajo", risk="nulo",
-            steps=["`defrag C: /U /V /O` como administrador",
-                   "Comprueba que la tarea programada «Optimizar unidades» está activa (semanal)"])
-        return "pendiente de optimizar"
-
-    def check_smart(self) -> str:
-        rows = ps_json("Get-PhysicalDisk | Select-Object FriendlyName,HealthStatus,OperationalStatus")
-        if not getattr(rows, "ok", True) or not rows:
-            raise SinDato("no se ha podido consultar el estado de los discos"
-                          + (f" ({rows.error})" if getattr(rows, "error", None) else ""))
-        bad = [r for r in rows if str(r.get("HealthStatus", "")).lower() not in ("healthy", "0", "sano")]
-        if bad:
-            names = ", ".join(str(r.get("FriendlyName")) for r in bad)
-            self.add(
-                id="smart_warn", title=f"Disco con estado de salud degradado ({names})",
-                severity="critical", category="almacenamiento", component="disk",
-                detail="Windows informa de un estado distinto de «Healthy». Antes de optimizar "
-                       "nada, haz copia de seguridad: un disco en degradación puede fallar sin "
-                       "más aviso y explica por sí solo cualquier lentitud.",
-                gain=0.0, gain_note="no es una optimización: es riesgo de pérdida de datos",
-                effort="alto", risk="alto",
-                steps=["Copia de seguridad inmediata de los datos importantes",
-                       "Revisa los atributos SMART con CrystalDiskInfo (reallocated sectors, pending)",
-                       "Planifica la sustitución del disco"])
-            return f"degradado: {names}"
-
-        extra = self._check_disk_wear()
-        return extra or f"{len(rows)} disco(s) sano(s)"
-
-    def _check_disk_wear(self) -> str:
-        """Desgaste y errores acumulados, que avisan mucho antes que HealthStatus.
-
-        Un SSD al 90% de vida consumida sigue reportándose como «Healthy» hasta
-        que deja de funcionar. Sin privilegios estos contadores no se leen, y
-        entonces no se afirma nada: ausencia de dato no es ausencia de problema.
-        """
-        gastados, con_errores, calientes = [], [], []
-        medidos = 0
-        for disk in self.si.physical_disks:
-            nombre = str(disk.get("name") or "disco")
-            desgaste = disk.get("wear")
-            errores = (disk.get("read_errors") or 0) + (disk.get("write_errors") or 0)
-            grados = disk.get("temperature")
-            if desgaste is None and grados is None and disk.get("power_on_hours") is None:
-                continue
-            medidos += 1
-            # El desgaste es un contador de ciclos de escritura: en un disco
-            # mecánico no significa nada, y los HDD lo devuelven igualmente a 0.
-            es_ssd = "SSD" in str(disk.get("media") or "").upper()
-            if es_ssd and desgaste is not None and desgaste >= 60:
-                gastados.append((nombre, desgaste))
-            if errores > 0:
-                con_errores.append((nombre, errores))
-            # Los USB suelen mentir con la temperatura; solo se mira lo interno.
-            if grados and grados >= 65 and str(disk.get("bus") or "").upper() != "USB":
-                calientes.append((nombre, grados))
-
-        if con_errores:
-            lista = ", ".join(f"{n} ({e} errores)" for n, e in con_errores)
-            self.add(
-                id="disk_errors", title=f"Errores de lectura/escritura no corregidos ({lista})",
-                severity="critical", category="almacenamiento", component="disk",
-                detail="El disco ha registrado operaciones que no pudo corregir. Es pérdida de "
-                       "datos ya ocurrida, no un riesgo futuro, y Windows sigue informando del "
-                       "disco como «Healthy» hasta que falla del todo.",
-                gain=0.0, gain_note="no es una optimización: es pérdida de datos",
-                effort="alto", risk="alto",
-                steps=["Copia de seguridad inmediata, antes de cualquier otra cosa",
-                       "Comprueba los atributos completos con CrystalDiskInfo o smartctl",
-                       "Sustituye el disco: los errores no corregidos no se arreglan"])
-
-        if gastados:
-            peor = max(gastados, key=lambda x: x[1])
-            severidad = "critical" if peor[1] >= 90 else "high" if peor[1] >= 80 else "medium"
-            self.add(
-                id="disk_wear", title=f"{peor[0]}: {peor[1]}% de vida útil consumida",
-                severity=severidad, category="almacenamiento", component="disk",
-                detail=f"El contador de desgaste del disco va por el {peor[1]}%. Es una "
-                       "estimación del propio firmware sobre los ciclos de escritura "
-                       "consumidos. Cerca del 100% el disco pasa a solo lectura o falla, y "
-                       "antes de eso la velocidad de escritura ya se degrada.",
-                gain=0.0, gain_note="no es una optimización: es vida restante del disco",
-                effort="alto", risk="bajo",
-                steps=["Planifica la sustitución antes de llegar al 100%",
-                       "Mantén copia de seguridad al día mientras tanto",
-                       "Evita moverle cargas de escritura intensiva (torrents, edición, swap)"])
-
-        if calientes:
-            peor = max(calientes, key=lambda x: x[1])
-            self.add(
-                id="disk_hot", title=f"{peor[0]} a {peor[1]} °C",
-                severity="medium", category="térmico", component="disk",
-                detail="Por encima de 65-70 °C los SSD NVMe reducen velocidad para protegerse, "
-                       "y el calor sostenido acorta su vida. Suele ser falta de disipador o de "
-                       "flujo de aire, no un defecto del disco.",
-                gain=0.08, gain_note="velocidad sostenida de disco",
-                effort="medio", risk="bajo",
-                steps=["Monta el disipador del M.2 si la placa lo trae y no está puesto",
-                       "Mejora el flujo de aire de la caja",
-                       "Aléjalo de la gráfica si comparte espacio con ella"])
-
-        if not medidos:
-            return "sin contadores de fiabilidad (requiere administrador)"
-        partes = [f"{medidos} disco(s) con contadores"]
-        if gastados:
-            partes.append(f"desgaste máx {max(d for _, d in gastados)}%")
-        if con_errores:
-            partes.append("con errores no corregidos")
-        return " · ".join(partes)
-
-    # --------------------------------------------------------- solo Linux ----
-    def check_linux_governor(self) -> str:
-        path = Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
-        if not path.exists():
-            raise NoAplica("este kernel no expone gobernadores de frecuencia")
-        gov = path.read_text().strip()
-        if gov in ("powersave", "conservative"):
-            self.add(
-                id="linux_governor", title=f"Gobernador de CPU en «{gov}»",
-                severity="medium", category="cpu", component="cpu_multi",
-                detail="Limita la escalada de frecuencia y añade latencia en cargas a ráfagas.",
-                gain=0.10, gain_note="respuesta de CPU", effort="bajo", risk="nulo",
-                steps=["`sudo cpupower frequency-set -g performance`",
-                       "Para hacerlo persistente, configura tuned o un servicio systemd"])
-        return gov
-
-    def check_linux_swappiness(self) -> str:
-        path = Path("/proc/sys/vm/swappiness")
-        if not path.exists():
-            raise SinDato("no se ha podido leer /proc/sys/vm/swappiness")
-        val = int(path.read_text().strip())
-        if val >= 60 and self.si.ram_total > 8 * 1024**3:
-            self.add(
-                id="linux_swappiness", title=f"vm.swappiness = {val} con RAM abundante",
-                severity="low", category="memoria", component="system",
-                detail="Un valor alto hace que el kernel envíe páginas a swap antes de lo necesario.",
-                gain=0.05, gain_note="latencia bajo carga", effort="bajo", risk="nulo",
-                steps=["`sudo sysctl vm.swappiness=10`",
-                       "Persistente: añade `vm.swappiness=10` a /etc/sysctl.d/99-tuning.conf"])
-        return str(val)
-
-    def check_linux_trim(self) -> str:
-        out = run_cmd(["systemctl", "is-enabled", "fstrim.timer"], timeout=10)
-        if not out:
-            # `systemctl` devuelve código distinto de cero cuando la unidad no
-            # existe o está deshabilitada, y run_cmd traduce eso a None: sin
-            # esto, «no hay TRIM periódico» y «no hay systemd» eran lo mismo.
-            raise SinDato("systemctl no ha informado del estado de fstrim.timer")
-        if "enabled" not in out:
-            self.add(
-                id="linux_trim", title="fstrim.timer no está activado",
-                severity="medium", category="almacenamiento", component="disk",
-                detail="Sin TRIM periódico, el SSD degrada su rendimiento de escritura.",
-                gain=0.12, gain_note="escritura sostenida", effort="bajo", risk="nulo",
-                steps=["`sudo systemctl enable --now fstrim.timer`"])
-        return out

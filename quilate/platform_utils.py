@@ -17,6 +17,75 @@ else:
     winreg = None
 
 
+# Windows resuelve un ejecutable sin ruta buscando primero en el directorio de la
+# aplicación y, acto seguido, en el **directorio actual** — antes que en System32.
+# Como este programa se ofrece a elevarse por UAC, un `powercfg.exe` cualquiera
+# dejado en la carpeta desde la que se hace doble clic acabaría ejecutándose como
+# Administrador. Los binarios del sistema se piden siempre por ruta absoluta.
+def _system32() -> str:
+    """System32 según Windows, no según el entorno.
+
+    `%SystemRoot%` lo puede cambiar cualquiera que arranque este proceso: una
+    tarea programada del propio usuario, un `.bat` previo, un `setx`. Mientras
+    Quilate solo se lanzaba a sí mismo eso era el problema de 1.3, que se
+    resolvió validando la ruta del histórico. Desde que hay un proceso que se
+    lanza **con permisos de administrador**, es otra cosa: quien controle esa
+    variable elegiría qué `powershell.exe` se ejecuta elevado, que es una
+    escalada de privilegios con todas las letras.
+
+    `GetSystemDirectoryW` lo pregunta al sistema y no mira el entorno. Se
+    comprueba: con `SystemRoot` apuntando a una carpeta del usuario, la API
+    sigue devolviendo `C:\\WINDOWS\\system32`.
+    """
+    if not IS_WINDOWS:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(260)
+        if ctypes.windll.kernel32.GetSystemDirectoryW(buf, 260) and buf.value:
+            return buf.value
+    except Exception:
+        pass
+    # Si hasta eso falla, la ruta literal antes que una que venga del entorno.
+    return r"C:\Windows\System32"
+
+
+_SYSTEM32 = _system32()
+
+# PowerShell 5.1 es el único que no cuelga directamente de System32.
+_SUBDIR = {"powershell.exe": os.path.join("WindowsPowerShell", "v1.0")}
+
+
+def _sys_exe(name: str) -> str:
+    """Ruta absoluta de un binario de sistema de Windows.
+
+    Fuera de Windows devuelve el nombre tal cual: allí la búsqueda por `PATH` no
+    incluye el directorio actual, y no hay System32 al que apuntar.
+    """
+    if not IS_WINDOWS:
+        return name
+    return os.path.join(_SYSTEM32, _SUBDIR.get(name.lower(), ""), name)
+
+
+def _system_drive() -> str:
+    """La unidad donde está Windows, según Windows.
+
+    `%SystemDrive%` lo cambia cualquiera que arranque este proceso, igual que
+    `%SystemRoot%`. Aquí no da privilegios: da un informe equivocado y callado.
+    Con la variable apuntando a otra letra, `check_disk_encryption` busca en la
+    respuesta de BitLocker un volumen que no existe, no lo encuentra y se declara
+    «sin dato» — deja de comprobar el cifrado del disco sin decir que ha dejado
+    de comprobarlo, que es la peor de las tres formas de fallar.
+
+    Se saca de la misma fuente que `_system32()`, que pregunta a la API. La
+    variable de entorno queda de último recurso, por si esa no contestara.
+    """
+    if not IS_WINDOWS:
+        return "/"
+    if _SYSTEM32[1:2] == ":":
+        return _SYSTEM32[:2] + "\\"
+    return os.environ.get("SystemDrive", "C:") + "\\"
+
+
 def _console_encoding() -> str:
     """Codificación real de la salida de los programas de consola de Windows.
 
@@ -34,20 +103,81 @@ def _console_encoding() -> str:
         return "cp850"
 
 
-def run_cmd(args: list[str], timeout: int = 25, encoding: str | None = None) -> str | None:
-    """Ejecuta un comando y devuelve stdout, o None si falla."""
+class CmdResult(str):
+    """Salida de un comando, con memoria de por qué no la hay.
+
+    El mismo criterio que `PSResult`, aplicado a los programas de consola:
+    devolver nada cuando el binario no existe, cuando el sistema no deja
+    ejecutarlo, cuando el propio programa sale con código de error y cuando
+    responde sin decir nada hace que las cuatro cosas se lean igual. Y no son lo
+    mismo: un `fsutil.exe` sustituido que devuelve basura era indistinguible de
+    un `fsutil` ausente, y `check_power_plan` no podía decirle al usuario *por
+    qué* no había podido leer su plan de energía.
+
+    Hereda de `str` para que quien solo quiera el texto no se entere. Sin
+    `__slots__` —a diferencia de `PSResult`— porque Python no los admite en
+    subclases de `str`.
+    """
+
+    def __new__(cls, salida: str = "", ok: bool = True, error: str | None = None):
+        obj = super().__new__(cls, salida)
+        obj.ok = ok
+        obj.error = error
+        return obj
+
+
+class CmdBytes(bytes):
+    """Lo mismo que `CmdResult`, para la salida sin decodificar."""
+
+    def __new__(cls, salida: bytes = b"", ok: bool = True, error: str | None = None):
+        obj = super().__new__(cls, salida)
+        obj.ok = ok
+        obj.error = error
+        return obj
+
+
+def _nombre(args: list[str]) -> str:
+    """El binario, sin la ruta: el motivo lo lee un usuario, no un programador."""
+    return os.path.basename(args[0]) if args else "el comando"
+
+
+def _ejecutar(args: list[str], timeout: int):
+    """Lanza el proceso y traduce el fallo a un motivo en castellano.
+
+    Devuelve `(resultado, None)` o `(None, motivo)`. Los cuatro fallos que se
+    distinguen no significan lo mismo para quien lee el informe: que el binario
+    no esté es un sistema distinto al esperado; que el sistema no lo deje
+    ejecutar es una política o un antivirus; y que no responda a tiempo es un
+    equipo saturado o un disco que no contesta.
+    """
     try:
-        res = subprocess.run(
-            args,
-            capture_output=True,
-            timeout=timeout,
-            creationflags=CREATE_NO_WINDOW,
-        )
-        if res.returncode != 0:
-            return None
-        return res.stdout.decode(encoding or _console_encoding(), errors="replace").strip()
-    except Exception:
-        return None
+        return subprocess.run(args, capture_output=True, timeout=timeout,
+                              creationflags=CREATE_NO_WINDOW), None
+    except FileNotFoundError:
+        return None, f"{_nombre(args)} no está en este sistema"
+    except PermissionError:
+        return None, f"el sistema no permite ejecutar {_nombre(args)}"
+    except subprocess.TimeoutExpired:
+        return None, f"{_nombre(args)} no ha respondido en {timeout} s"
+    except OSError as exc:
+        return None, f"no se ha podido ejecutar {_nombre(args)}: {exc}"
+
+
+def run_cmd(args: list[str], timeout: int = 25, encoding: str | None = None) -> CmdResult:
+    """Ejecuta un comando y devuelve su salida, o el motivo por el que no la hay."""
+    res, error = _ejecutar(args, timeout)
+    if res is None:
+        return CmdResult(ok=False, error=error)
+    codec = encoding or _console_encoding()
+    if res.returncode != 0:
+        # La salida no se devuelve: un programa que ha fallado puede haber
+        # escrito medio resultado, y medio resultado es peor que ninguno.
+        # El stderr sí va en el motivo, recortado, porque suele decir qué pasó.
+        detalle = res.stderr.decode(codec, errors="replace").strip()[:120]
+        return CmdResult(ok=False,
+                         error=f"{_nombre(args)} ha terminado con código {res.returncode}"
+                               + (f": {detalle}" if detalle else ""))
+    return CmdResult(res.stdout.decode(codec, errors="replace").strip())
 
 
 class PSResult(list):
@@ -88,12 +218,12 @@ def _ps_raw(command: str, timeout: int = 30) -> tuple[Any, str | None]:
                f"{command}"
                f" }} catch {{ Write-Output ('{_PS_ERROR}' + $_.Exception.Message) }}")
     out = run_cmd(
-        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        [_sys_exe("powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-Command", wrapped],
         timeout=timeout, encoding="utf-8",
     )
-    if out is None:
-        return None, "powershell no respondió"
+    if not out.ok:
+        return None, out.error
     if out.startswith(_PS_ERROR):
         return None, out[len(_PS_ERROR):].strip()[:120] or "error sin descripción"
     if not out:
@@ -104,19 +234,74 @@ def _ps_raw(command: str, timeout: int = 30) -> tuple[Any, str | None]:
         return out, None
 
 
-def run_cmd_bytes(args: list[str], timeout: int = 25) -> bytes | None:
+def run_cmd_bytes(args: list[str], timeout: int = 25) -> CmdBytes:
     """Igual que `run_cmd` pero sin decodificar.
 
     No todos los programas de consola de Windows usan la misma codificación:
     `fsutil` responde en la página OEM y `netsh wlan` en UTF-8. Cuando hay que
     probar varias, decodificar aquí obligaría a ejecutar el comando dos veces.
     """
-    try:
-        res = subprocess.run(args, capture_output=True, timeout=timeout,
-                             creationflags=CREATE_NO_WINDOW)
-        return res.stdout if res.returncode == 0 else None
-    except Exception:
-        return None
+    res, error = _ejecutar(args, timeout)
+    if res is None:
+        return CmdBytes(ok=False, error=error)
+    if res.returncode != 0:
+        detalle = res.stderr.decode(_console_encoding(), errors="replace").strip()[:120]
+        return CmdBytes(ok=False,
+                        error=f"{_nombre(args)} ha terminado con código {res.returncode}"
+                              + (f": {detalle}" if detalle else ""))
+    return CmdBytes(res.stdout)
+
+
+def _bloque(crudo) -> PSResult:
+    """Un bloque de un lote de consultas, con la forma que devolvía `ps_json`."""
+    if not isinstance(crudo, dict):
+        return PSResult((), ok=False, error="el bloque no ha llegado en el JSON")
+    if not crudo.get("ok"):
+        return PSResult((), ok=False,
+                        error=str(crudo.get("error") or "error sin descripción")[:120])
+    filas = crudo.get("filas")
+    if isinstance(filas, dict):        # PowerShell 5.1 deshace las listas de uno
+        return PSResult([filas])
+    if isinstance(filas, list):
+        return PSResult(f for f in filas if isinstance(f, dict))
+    return PSResult()
+
+
+def guion_de_bloques(consultas: dict[str, str]) -> str:
+    """El guion que deja cada consulta en `$r` dentro de su propio try/catch.
+
+    Es lo que permite meter varias consultas en un solo PowerShell sin perder la
+    distinción entre «esta falló» y «se ejecutó y no devolvió nada»: sin el
+    try/catch por bloque, un `Get-PhysicalDisk` denegado se llevaría por delante
+    la lectura de la BIOS y el informe daría por no comprobado lo que sí estaba.
+
+    Devuelve solo el preámbulo. Quien llame decide qué hacer con `$r`, que no es
+    lo mismo desde un proceso propio —donde se escribe por la salida estándar—
+    que desde uno elevado, que no tiene salida estándar que compartir.
+    """
+    bloques = "".join(f"$r['{clave}'] = Leer {{ {consulta} }};"
+                      for clave, consulta in consultas.items())
+    # Sin esto, la mitad de los fallos de PowerShell no son excepciones: una
+    # clase WMI que no existe escribe el error y devuelve vacío, el try/catch no
+    # se entera y el bloque sale con `ok=True` y cero filas. Es decir, «se
+    # ejecutó y no había nada», que es justo lo contrario de lo que ha pasado.
+    return ("$ErrorActionPreference = 'Stop';"
+            "function Leer([scriptblock]$q) {"
+            "  try { @{ ok = $true; filas = @(& $q) } }"
+            "  catch { @{ ok = $false; error = $_.Exception.Message } } };"
+            "$r = [ordered]@{};" + bloques)
+
+
+def trocear(datos, consultas, motivo: str) -> dict[str, PSResult]:
+    """Un `PSResult` por consulta, con el mismo valor que si fueran por separado.
+
+    Si el lote entero se fue al traste —PowerShell ausente, permisos denegados,
+    timeout— todas las claves salen con el mismo motivo, que es exactamente lo
+    que habría pasado lanzándolas una a una.
+    """
+    if not isinstance(datos, dict):
+        return {clave: PSResult((), ok=False, error=motivo) for clave in consultas}
+    return {clave: _bloque(datos.get(clave)) for clave in consultas}
 
 
 def ps(command: str, timeout: int = 30) -> Any:
@@ -146,48 +331,24 @@ _BOOT_LOG = "Microsoft-Windows-Diagnostics-Performance/Operational"
 _BOOT_EVENTS = (100, 101, 102, 103)
 
 
-def boot_performance(max_boots: int = 30, max_delays: int = 200, timeout: int = 40) -> dict:
+def boot_performance(res) -> dict:
     """Arranques medidos por el propio Windows, en milisegundos.
 
-    Requiere privilegios de administrador: el log tiene una ACL que se los pide
-    incluso para leer. Sin ellos devuelve `{"error": ...}` y quien llame debe
-    tratarlo como «no medido», no como «arranque rápido».
+    Ya no consulta nada: recibe los eventos que trae el lote con permisos, que
+    es lo que puede leer ese log —tiene una ACL que pide privilegios hasta para
+    leerlo—. Sin ellos devuelve `{"error": ...}` y quien llame debe tratarlo
+    como «no medido», no como «arranque rápido».
 
     Los nombres de los campos se devuelven tal cual vienen del XML del evento,
     sin normalizar, para que un esquema distinto al esperado se pueda diagnosticar
     desde el JSON exportado en vez de perderse.
     """
-    if not IS_WINDOWS:
-        return {"error": "solo Windows", "boots": [], "delays": []}
-
-    # Los eventos de duración (100) y los de culpables (101-103) se piden por
-    # separado: en un equipo con muchos retrasos, un único -MaxEvents sobre los
-    # cuatro identificadores puede no llegar a devolver ni un solo arranque.
-    retrasos = ",".join(str(i) for i in _BOOT_EVENTS if i != 100)
-    command = (
-        "$leer = {"
-        "  param($ids, $max)"
-        f"  Get-WinEvent -FilterHashtable @{{LogName='{_BOOT_LOG}'; Id=$ids}}"
-        "    -MaxEvents $max -ErrorAction Stop | ForEach-Object {"
-        "      $d = @{};"
-        "      foreach ($n in ([xml]$_.ToXml()).Event.EventData.Data) { $d[$n.Name] = $n.'#text' };"
-        "      [PSCustomObject]@{ Id = $_.Id; Time = $_.TimeCreated.ToString('s'); Data = $d } } };"
-        "try {"
-        f"  $arranques = @(& $leer @(100) {max_boots});"
-        # Que no haya retrasos anotados es un resultado válido, no un fallo.
-        f"  $retrasos = @(); try {{ $retrasos = @(& $leer @({retrasos}) {max_delays}) }} catch {{ }};"
-        "  @{ ok = $true; events = @($arranques + $retrasos) } | ConvertTo-Json -Depth 6 -Compress"
-        "} catch {"
-        "  @{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress }"
-    )
-    data = ps(command, timeout=timeout)
-    if not isinstance(data, dict):
-        return {"error": "no se pudo leer el registro de arranque", "boots": [], "delays": []}
-    if not data.get("ok"):
-        return {"error": str(data.get("error") or "acceso denegado"), "boots": [], "delays": []}
+    if not getattr(res, "ok", True):
+        return {"error": str(getattr(res, "error", None) or "acceso denegado"),
+                "boots": [], "delays": []}
 
     boots, delays = [], []
-    for event in data.get("events") or []:
+    for event in res or ():
         fields = event.get("Data") or {}
         if not isinstance(fields, dict):
             continue
@@ -195,7 +356,8 @@ def boot_performance(max_boots: int = 30, max_delays: int = 200, timeout: int = 
         if event.get("Id") == 100:
             boots.append(entry)
         else:
-            entry["kind"] = {101: "aplicación", 102: "driver", 103: "servicio"}.get(event.get("Id"))
+            entry["kind"] = {101: "aplicación", 102: "driver",
+                             103: "servicio"}.get(event.get("Id"))
             delays.append(entry)
     return {"error": None, "boots": boots, "delays": delays}
 
@@ -258,7 +420,7 @@ def pending_driver_updates(timeout: int = 90) -> list[str]:
     if not IS_WINDOWS:
         return []
     out = run_cmd(
-        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        [_sys_exe("powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-Command",
          "$ErrorActionPreference='Stop';"
          "try {"
@@ -268,7 +430,34 @@ def pending_driver_updates(timeout: int = 90) -> list[str]:
          "} catch { }"],
         timeout=timeout,
     )
-    return [line.strip() for line in (out or "").splitlines() if line.strip()]
+    # Aquí no se distingue «no hay drivers pendientes» de «no se pudo preguntar»:
+    # el `catch { }` del propio script se traga el fallo de la búsqueda y sale
+    # con código 0, así que `out.ok` no lo sabría. Quien lo arregle tiene que
+    # empezar por ahí, no por aquí.
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def pending_security_updates(timeout: int = 120) -> PSResult:
+    """Actualizaciones de software pendientes, con su severidad según Microsoft.
+
+    Comparte con `pending_driver_updates` el coste y la contrapartida —tarda
+    entre 10 y 30 segundos y necesita conexión, por eso va detrás de un flag—
+    pero no su forma de fallar: aquella se traga el error dentro de un
+    `catch { }` de PowerShell y sale con código 0, así que «no hay nada
+    pendiente» y «no he podido preguntarlo» acaban siendo la misma lista vacía.
+    Aquí el fallo llega por `PSResult.ok`, que es lo que permite decirlo.
+
+    `MsrcSeverity` solo lo traen las actualizaciones de seguridad; las demás lo
+    dejan vacío, y quien llame debe usarlo para no contar como riesgo una
+    actualización de zona horaria.
+    """
+    if not IS_WINDOWS:
+        return PSResult((), ok=False, error="solo Windows")
+    return ps_json(
+        "$( $s = New-Object -ComObject Microsoft.Update.Session;"
+        "   $r = $s.CreateUpdateSearcher().Search(\"IsInstalled=0 and Type='Software'\");"
+        "   $r.Updates | Select-Object Title,MsrcSeverity )",
+        timeout=timeout)
 
 
 def is_admin() -> bool:
@@ -280,32 +469,16 @@ def is_admin() -> bool:
         return False
 
 
-def owns_console() -> bool:
-    """True si somos el unico proceso de esta consola: es decir, doble clic.
-
-    Windows no dice "me han abierto con doble clic", pero al hacerlo se crea una
-    consola nueva cuya lista de procesos solo nos contiene a nosotros; lanzado
-    desde cmd o PowerShell, el interprete tambien esta en la lista. Sirve para
-    distinguir cuando podemos relanzarnos en una ventana nueva sin robarle la
-    sesion a nadie.
-    """
-    if not IS_WINDOWS:
-        return False
-    try:
-        buf = (ctypes.c_uint * 8)()
-        n = ctypes.windll.kernel32.GetConsoleProcessList(buf, 8)
-        return n == 1
-    except Exception:
-        return False
-
-
 if IS_WINDOWS:
     from ctypes import wintypes
 
     class _ShellExecuteInfo(ctypes.Structure):
-        """SHELLEXECUTEINFOW. Se usa la variante "Ex" de ShellExecute porque es
-        la unica que devuelve el handle del proceso creado, y sin handle no se
-        puede esperar al hijo ni recoger su codigo de salida."""
+        """SHELLEXECUTEINFOW, que es como se pide una elevacion en Windows.
+
+        Lo usa `elevacion` para lanzar el proceso corto que lee lo que necesita
+        permisos. Se usa la variante "Ex" de ShellExecute porque es la unica que
+        devuelve el handle del proceso creado; que no admita `STARTUPINFO` es
+        justo el motivo de que el resultado tenga que volver por una tuberia."""
 
         _fields_ = [
             ("cbSize", wintypes.DWORD),
@@ -326,47 +499,6 @@ if IS_WINDOWS:
         ]
 
 
-SEE_MASK_NOCLOSEPROCESS = 0x00000040
 SEE_MASK_NOASYNC = 0x00000100
-ERROR_CANCELLED = 1223
 
 
-def relaunch_as_admin(extra_args: list[str] | None = None,
-                      wait: bool = False) -> int | None:
-    """Vuelve a lanzarse pidiendo elevacion por UAC.
-
-    Devuelve None si el proceso elevado no llego a arrancar —UAC rechazado o
-    politica del equipo—; en otro caso quien llama debe terminar, porque el
-    trabajo continua en la ventana nueva. Con `wait` espera a que el hijo acabe y
-    devuelve su codigo de salida, para que en una terminal el codigo de salida
-    siga significando algo; sin el, devuelve 0 en cuanto arranca.
-
-    No se puede elevar un proceso ya en marcha: hay que crear otro, y el unico
-    camino soportado es el verbo "runas". Se le pasa el directorio actual para
-    que los informes se generen donde el usuario espera y no en system32, que es
-    a donde va a parar un proceso elevado por defecto.
-    """
-    if not IS_WINDOWS:
-        return None
-    try:
-        info = _ShellExecuteInfo()
-        info.cbSize = ctypes.sizeof(info)
-        info.fMask = SEE_MASK_NOASYNC | (SEE_MASK_NOCLOSEPROCESS if wait else 0)
-        info.lpVerb = "runas"
-        info.lpFile = sys.executable
-        info.lpParameters = subprocess.list2cmdline(
-            list(sys.argv[1:]) + list(extra_args or []))
-        info.lpDirectory = os.getcwd()
-        info.nShow = 1   # SW_SHOWNORMAL
-        if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)):
-            return None  # ERROR_CANCELLED (1223) si el usuario dijo que no
-        if not wait or not info.hProcess:
-            return 0
-        kernel32 = ctypes.windll.kernel32
-        kernel32.WaitForSingleObject(info.hProcess, 0xFFFFFFFF)
-        code = wintypes.DWORD()
-        kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
-        kernel32.CloseHandle(info.hProcess)
-        return int(code.value)
-    except Exception:
-        return None

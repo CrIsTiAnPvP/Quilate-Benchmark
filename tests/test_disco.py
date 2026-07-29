@@ -5,10 +5,16 @@ caché de páginas. El componente de disco pesa un 34% de la nota global y se
 pegaba al techo en cualquier equipo con memoria de sobra.
 """
 
+import inspect
+import io
+import itertools
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 
+from quilate import benchmark
 from quilate.benchmark import CACHE_LATENCY_US, SCORE_CAP, WEIGHTS, cache_served
 from quilate.rawio import ALIGN, DiskIO
 
@@ -50,6 +56,187 @@ class PesoDelDisco(unittest.TestCase):
         # Y con la medida real del mismo disco, ya no.
         real = 73 * 0.25 + 151 * 0.3 + 56 * 0.45
         self.assertLess(real, SCORE_CAP)
+
+
+class DivisionesPorElCronometro(unittest.TestCase):
+    """Ninguna cifra se divide por un tiempo sin comprobar que no es cero.
+
+    `speedup` estaba protegido y `tps`, la línea de al lado, no. Haría falta que
+    `perf_counter` devolviera dos veces el mismo valor —prácticamente
+    imposible—, pero la asimetría entre dos líneas contiguas es un olvido, no una
+    decisión, y montar un `Pool` de verdad para probarlo costaría más de lo que
+    vale. Se comprueba sobre el código, que es donde está el criterio.
+    """
+
+    def test_ninguna_division_por_wall_va_desnuda(self):
+        fuente = inspect.getsource(benchmark.Benchmark.run_cpu_multi)
+        desnudas = [linea.strip() for linea in fuente.splitlines()
+                    if "/ wall" in linea and "if wall" not in linea]
+        self.assertEqual(desnudas, [], "una división por el cronómetro sin guarda")
+
+
+class ElFicheroDePruebaNoSeQueda(unittest.TestCase):
+    """Un fallo a mitad de la prueba no puede dejar 512 MB tirados en %TEMP%.
+
+    En Windows un fichero con un handle abierto no se puede borrar, así que si
+    `WriteFile`/`ReadFile` fallaba —disco lleno, una unidad USB desconectada, un
+    `--disk-path` en un recurso de red que se cae— el `unlink` moría con
+    PermissionError, se lo tragaba el `except OSError`, y quedaba un
+    `.quilate_<pid>.tmp` huérfano hasta el final del proceso. Es exactamente la
+    basura que la propia herramienta denuncia en «Archivos grandes».
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def _correr_fallando(self, tras: int) -> list:
+        """Ejecuta la prueba de disco haciendo que la E/S falle a mitad.
+
+        Devuelve los `DiskIO` que se llegaron a crear, para poder comprobar
+        después que ninguno se quedó abierto.
+        """
+        creados = []
+        escrituras = itertools.count()
+
+        class DiskIOQueFalla(DiskIO):
+            def write(self, n):
+                if next(escrituras) >= tras:
+                    raise OSError(28, "No queda espacio en el dispositivo")
+                return super().write(n)
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                creados.append(self)
+
+        original = benchmark.DiskIO
+        benchmark.DiskIO = DiskIOQueFalla
+        try:
+            b = benchmark.Benchmark(disk_size_mb=8, target_dir=self.dir.name)
+            with redirect_stdout(io.StringIO()):
+                b.run_disk()
+        finally:
+            benchmark.DiskIO = original
+        return creados
+
+    def test_no_queda_ningun_handle_abierto(self):
+        creados = self._correr_fallando(tras=2)
+        self.assertTrue(creados, "no se ha llegado a abrir nada: el test no prueba nada")
+        for i, disco in enumerate(creados):
+            with self.subTest(handle=i):
+                self.assertIsNone(disco._handle, "handle de Windows sin cerrar")
+                self.assertIsNone(disco._fd, "descriptor POSIX sin cerrar")
+
+    def test_el_temporal_se_borra_igual(self):
+        # La comprobación que ve el usuario: en Windows esto es imposible si
+        # queda un handle abierto, así que vale por las dos cosas.
+        self._correr_fallando(tras=2)
+        self.assertEqual(list(Path(self.dir.name).glob(".quilate_*.tmp")), [],
+                         "ha quedado el fichero de prueba sin borrar")
+
+    def test_sin_fallos_tampoco_queda_nada(self):
+        b = benchmark.Benchmark(disk_size_mb=8, target_dir=self.dir.name)
+        with redirect_stdout(io.StringIO()):
+            b.run_disk()
+        self.assertEqual(list(Path(self.dir.name).glob(".quilate_*.tmp")), [])
+
+
+class UnaFaseQueFallaNoSeLlevaALasOtras(unittest.TestCase):
+    """Las tres fases de disco fallan por separado.
+
+    El `except Exception` envolvía las tres: si la lectura reventaba, las IOPS
+    ni se intentaban, y la escritura —que ya se había medido y puntuado— se
+    quedaba sin llegar al informe. Un solo error convertía tres pruebas en
+    ninguna, y el usuario solo veía «error: …» sin saber cuál de las tres.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def _correr(self, falla_en: int):
+        """Ejecuta run_disk haciendo que el N-ésimo DiskIO reviente al leer.
+
+        El orden de creación es escritor, lector, lector de IOPS: apuntando al
+        segundo o al tercero se elige qué fase se rompe.
+        """
+        creados = itertools.count()
+
+        class DiskIOQueFallaAlLeer(DiskIO):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._malo = next(creados) == falla_en
+
+            def read(self, n):
+                if self._malo:
+                    raise OSError(5, "Error de dispositivo de E/S")
+                return super().read(n)
+
+        original = benchmark.DiskIO
+        benchmark.DiskIO = DiskIOQueFallaAlLeer
+        try:
+            b = benchmark.Benchmark(disk_size_mb=8, target_dir=self.dir.name)
+            with redirect_stdout(io.StringIO()):
+                b.run_disk()
+        finally:
+            benchmark.DiskIO = original
+        return b
+
+    def test_si_falla_la_lectura_las_iops_se_miden_igual(self):
+        b = self._correr(falla_en=1)
+        self.assertIn("disk_write", b.results, "la escritura ya estaba medida")
+        self.assertNotIn("disk_read", b.results)
+        self.assertIn("disk_iops", b.results, "las IOPS no dependen de la lectura")
+
+    def test_la_fase_que_falla_queda_anotada_como_no_medida(self):
+        b = self._correr(falla_en=1)
+        self.assertIn("disk_read_error", b.metrics)
+        self.assertIn("no medida", b.metrics["disk_read_error"]["label"])
+        self.assertNotIn("disk_write_error", b.metrics)
+
+    def test_si_fallan_las_iops_lo_demas_se_conserva(self):
+        b = self._correr(falla_en=2)
+        self.assertIn("disk_write", b.results)
+        self.assertIn("disk_read", b.results)
+        self.assertNotIn("disk_iops", b.results)
+        self.assertIn("disk_iops_error", b.metrics)
+
+    def test_el_fallo_se_dice_en_castellano(self):
+        # Salía «[Errno 5] Error de dispositivo de E/S»: en inglés, con el
+        # número de error de C, en mitad de un informe escrito para quien no
+        # programa. El texto original se conserva en la métrica, que es donde
+        # sirve —ahí lo lee quien vaya a depurarlo—, no en pantalla.
+        salida = io.StringIO()
+        creados = itertools.count()
+
+        class DiskIOQueFallaAlLeer(DiskIO):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._malo = next(creados) == 1
+
+            def read(self, n):
+                if self._malo:
+                    raise PermissionError(13, "Acceso denegado")
+                return super().read(n)
+
+        original = benchmark.DiskIO
+        benchmark.DiskIO = DiskIOQueFallaAlLeer
+        try:
+            b = benchmark.Benchmark(disk_size_mb=8, target_dir=self.dir.name)
+            with redirect_stdout(salida):
+                b.run_disk()
+        finally:
+            benchmark.DiskIO = original
+        texto = salida.getvalue()
+        self.assertIn("permisos insuficientes", texto)
+        self.assertNotIn("PermissionError", texto)
+        self.assertIn("PermissionError", str(b.metrics["disk_read_error"]))
+
+    def test_el_temporal_se_borra_aunque_falle_una_fase(self):
+        # El `finally` de limpieza sigue siendo uno solo, y sigue haciendo su
+        # trabajo: partir el `try` no podía tocarlo.
+        self._correr(falla_en=1)
+        self.assertEqual(list(Path(self.dir.name).glob(".quilate_*.tmp")), [])
 
 
 class EntradaSalidaReal(unittest.TestCase):

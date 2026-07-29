@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from .audit import Auditor, SEVERITY_ORDER, sev_label
+from .audit import Auditor, SEVERITY_ORDER, security_findings, sev_label
 from .benchmark import (Benchmark, PY_ADJUST, REFERENCE_DATE, REFERENCE_MACHINE,
                         reference_age_months, reference_is_stale)
 from .components import ComponentCard, _no_score_text, build_component_cards
@@ -17,6 +17,9 @@ from .const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
 from .projection import priority_rank
 from .storage_scan import RECLAIMABLE, REVIEWABLE, ScanResult, candidate_bytes
 from .sysinfo import SystemInfo, gpu_label
+# El veredicto es cálculo y no impresión, y lo consumen la consola y el JSON.
+# Se reexporta porque `html_export` lo pide desde aquí desde siempre.
+from .veredicto import build_verdict
 
 
 def print_component_cards(cards: list[ComponentCard]) -> None:
@@ -55,8 +58,18 @@ def print_component_cards(cards: list[ComponentCard]) -> None:
             if card.projected_score is not None and card.gain > 0.005:
                 print(f"        {C.DIM}→ tras aplicarlas: {C.RESET}{C.GREEN}"
                       f"{card.projected_score:.0f} pts{C.RESET}")
-        else:
+        elif not card.riesgos:
+            # Solo si no hay ni mejoras ni riesgos. Un «sin nada pendiente» en
+            # verde sobre un equipo con SMB1 activo y sin cifrar es el aviso que
+            # no hay que dar, y aquí pasaba lo mismo que en el HTML.
             print(f"      {C.GREEN}Sin mejoras pendientes.{C.RESET}")
+
+        if card.riesgos:
+            print(f"      {C.RED}Riesgos de este componente "
+                  f"({len(card.riesgos)}){C.RESET}"
+                  f"{C.DIM}  ·  no suben la nota: ver «Seguridad»{C.RESET}")
+            for f in card.riesgos:
+                print(f"        {sev_label(f.severity)}  {f.title}")
         print()
 
 
@@ -114,6 +127,28 @@ def print_storage_scan(scan: ScanResult | None) -> None:
 
 def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                  projection: dict[str, Any]) -> None:
+    """El informe por consola, seccion a seccion.
+
+    Cada `_seccion_*` era ya un bloque separado por un comentario dentro de una
+    unica funcion de 274 lineas: la division estaba declarada en el codigo y no
+    ejecutada. Separarlas no cambia lo que se imprime ni en que orden — y ese
+    orden importa, porque la seguridad va antes del plan y lo que no se pudo
+    comprobar antes del veredicto.
+    """
+    _seccion_inventario(si)
+    _seccion_benchmark(bench)
+    print_component_cards(build_component_cards(si, bench, auditor))
+    print_storage_scan(getattr(auditor, "scan", None))
+    _seccion_hallazgos(auditor)
+    _seccion_proyeccion(projection)
+    _seccion_seguridad(auditor)
+    _seccion_plan(auditor)
+    _seccion_red(auditor)
+    _seccion_sin_comprobar(auditor)
+    _seccion_veredicto(si, bench, auditor, projection)
+
+
+def _seccion_inventario(si: SystemInfo) -> None:
     # --- Inventario ---
     section("Inventario del equipo")
     kv("Equipo", f"{si.hostname}{'  (portátil)' if si.is_laptop else ''}")
@@ -141,6 +176,8 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
     kv("Privilegios", "administrador" if si.is_admin else
        f"{C.YELLOW}usuario estándar (algunas comprobaciones limitadas){C.RESET}")
 
+
+def _seccion_benchmark(bench: Benchmark | None) -> None:
     # --- Resultados del benchmark ---
     if bench and bench.results:
         section("Resultados del benchmark")
@@ -222,12 +259,8 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                     for line in _wrap(m["note"], 62):
                         print(f"      {C.DIM}{line}{C.RESET}")
 
-    # --- Ficha por componente ---
-    print_component_cards(build_component_cards(si, bench, auditor))
 
-    # --- Archivos grandes ---
-    print_storage_scan(getattr(auditor, "scan", None))
-
+def _seccion_hallazgos(auditor: Auditor) -> None:
     # --- Hallazgos ---
     section("Hallazgos de la auditoría")
     findings = sorted(auditor.findings, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), -f.gain))
@@ -238,8 +271,11 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         counts: dict[str, int] = {}
         for f in findings:
             counts[f.severity] = counts.get(f.severity, 0) + 1
+        # `.get` y no indexación: ver el recuento hermano de `html_export`. Una
+        # severidad no declarada ordena la última en vez de tirar el informe.
         summary = "  ".join(f"{sev_label(s)}: {n}" for s, n in
-                            sorted(counts.items(), key=lambda x: SEVERITY_ORDER[x[0]]))
+                            sorted(counts.items(),
+                                   key=lambda x: SEVERITY_ORDER.get(x[0], 9)))
         print(f"  {auditor.checks_run} comprobaciones · {len(findings)} hallazgos     {summary}\n")
         for i, f in enumerate(findings, 1):
             sev = sev_label(f.severity)
@@ -259,6 +295,8 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                         print(f"       {'•' if j == 0 else ' '} {line}")
             print()
 
+
+def _seccion_proyeccion(projection: dict[str, Any]) -> None:
     # --- Proyección ---
     section("Proyección de mejora")
     if projection.get("current_overall"):
@@ -288,6 +326,27 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
             print(f"    {cat.capitalize().ljust(18)} {C.GREEN}+{gain * 100:>5.0f}%{C.RESET} "
                   f"{bar(min(100, gain * 100), 20)}")
 
+
+def _seccion_seguridad(auditor: Auditor) -> None:
+    # --- Seguridad ---
+    # Antes del plan y no dentro: el plan promete retorno y estos hallazgos no
+    # lo dan. Van primero porque un disco sin cifrar importa más que ocho puntos
+    # de fluidez, aunque no haya forma de ponerle un porcentaje.
+    riesgos = security_findings(auditor.findings)
+    if riesgos:
+        section("Seguridad")
+        print(f"  {C.DIM}Esto no acelera el equipo: son riesgos. No entran en la "
+              f"proyección\n  de mejora porque no hay mejora que proyectar.{C.RESET}\n")
+        for f in riesgos:
+            print(f"  {sev_label(f.severity)}  {C.BOLD}{f.title}{C.RESET}")
+            for linea in _wrap(f.detail, BOX_W - 8):
+                print(f"      {C.DIM}{linea}{C.RESET}")
+            for paso in f.steps:
+                print(f"      {C.GREY}·{C.RESET} {paso}")
+            print()
+
+
+def _seccion_plan(auditor: Auditor) -> None:
     # --- Plan de acción ---
     section("Plan de acción priorizado")
     actionable = [f for f in auditor.findings if f.gain > 0]
@@ -304,6 +363,8 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         print(f"\n  {C.DIM}Recuerda: mide siempre antes y después. Aplicar diez cambios a la vez "
               f"impide saber cuál funcionó.{C.RESET}")
 
+
+def _seccion_red(auditor: Auditor) -> None:
     # --- Red ---
     red = getattr(auditor, "network", {}) or {}
     if red.get("connected"):
@@ -332,6 +393,8 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
             print(f"  {C.DIM}Latencia y DNS no se han medido: se ejecutó con --no-net, "
                   f"que evita contactar con servidores externos.{C.RESET}")
 
+
+def _seccion_sin_comprobar(auditor: Auditor) -> None:
     # --- Lo que no se ha podido comprobar ---
     # Va antes del veredicto a propósito: es la advertencia de hasta dónde llega
     # lo que el informe puede afirmar.
@@ -355,6 +418,9 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
             for line in _wrap(n, 72):
                 print(f"    {C.DIM}{line}{C.RESET}")
 
+
+def _seccion_veredicto(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
+                       projection: dict[str, Any]) -> None:
     # --- Veredicto ---
     section("Veredicto")
     verdict, extra = build_verdict(si, bench, auditor, projection)
@@ -367,50 +433,3 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
     print(f"{C.GOLD}{APP_NAME} v{APP_VERSION}{C.RESET}  ·  {AUTHOR}  ·  "
           f"{C.CYAN}{WEBSITE_URL}{C.RESET}")
     print(f"{C.DIM}Informe generado el {datetime.now():%d/%m/%Y %H:%M}{C.RESET}\n")
-
-
-def build_verdict(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
-                  projection: dict[str, Any]) -> tuple[str, list[str]]:
-    ids = {f.id for f in auditor.findings}
-    extra: list[str] = []
-
-    if "smart_warn" in ids:
-        return ("Antes de cualquier optimización: hay un disco con salud degradada. Haz copia de "
-                "seguridad ahora. Optimizar un equipo con un disco a punto de fallar es perder "
-                "el tiempo en el mejor caso y perder datos en el peor.", extra)
-
-    if "hdd_system" in ids:
-        extra.append("Prioridad absoluta: migrar el sistema a un SSD. Todo lo demás es secundario.")
-        return ("El cuello de botella es físico, no de configuración. Con el sistema en un disco "
-                "mecánico, los ajustes de registro y la limpieza de inicio aportarán mejoras "
-                "marginales. Un SSD de 500 GB cuesta poco y multiplica la respuesta del equipo.",
-                extra)
-
-    if "thermal_critical" in ids or "freq_low" in ids:
-        extra.append("Empieza por la refrigeración: limpieza y pasta térmica antes de tocar software.")
-        return ("El equipo no está entregando el rendimiento de su hardware por motivos térmicos o "
-                "de límites de potencia. Reinstalar Windows no cambiaría nada aquí.", extra)
-
-    headroom = projection.get("headroom_pct", 0.0)
-    exp = projection.get("experiential_pct", 0.0)
-    critical = sum(1 for f in auditor.findings if f.severity in ("critical", "high"))
-
-    if critical == 0 and headroom < 8:
-        extra.append("Mantenimiento: limpieza física anual y drivers al día. Nada más que hacer.")
-        return ("El equipo está bien ajustado. El margen de mejora por software es residual: si "
-                "necesitas más rendimiento, el camino es hardware (RAM, SSD más rápido, CPU/GPU), "
-                "no optimización.", extra)
-
-    if "os_stale" in ids and critical >= 2:
-        extra.append("Orden recomendado: 1) limpieza de inicio y espacio  2) medir de nuevo  "
-                     "3) reinstalación limpia solo si sigue sin ir bien.")
-        return (f"Hay margen real de mejora (aproximadamente +{exp:.0f}% en fluidez percibida). La "
-                "instalación es antigua y está cargada, pero prueba primero los cambios reversibles: "
-                "una reinstalación cuesta varias horas y conviene reservarla para cuando lo barato "
-                "ya se ha agotado.", extra)
-
-    extra.append("Aplica el plan de acción de arriba hacia abajo y vuelve a ejecutar este script "
-                 "para verificar cada cambio.")
-    return (f"Hay margen de mejora sin tocar hardware: se estima en torno a un +{headroom:.0f}% en "
-            f"puntuación sintética y +{exp:.0f}% en fluidez percibida. La mayoría son cambios de "
-            "esfuerzo bajo y reversibles.", extra)

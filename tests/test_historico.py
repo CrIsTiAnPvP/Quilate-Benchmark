@@ -10,15 +10,19 @@ medidas cualesquiera.
 from __future__ import annotations
 
 import json
+import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from quilate.benchmark import (REFERENCE, REFERENCE_DATE, REFERENCE_ORIGIN,
                                REFERENCE_STALE_MONTHS, reference_age_months,
                                reference_is_stale)
+from quilate import history
 from quilate.history import (DERIVA_MINIMA_PCT, MAX_ENTRADAS, MINIMO_PARA_TENDENCIA,
-                             _resumen, append, deriva, load, report, serie)
+                             _resumen, append, deriva, history_path, load, report, serie)
 from datetime import date
 
 
@@ -63,6 +67,234 @@ class Resumen(unittest.TestCase):
         self.assertIn("at", _resumen({}))
 
 
+class NadaQueNoSeaUnaCifra(unittest.TestCase):
+    """Lista negra sobre la forma, no sobre los valores.
+
+    `test_no_arrastra_datos_personales` comprueba que no se cuelan los cuatro
+    textos que planta. Eso cubre lo que ya se sabe que hay, pero no lo que
+    alguien añada mañana: un campo nuevo en `_resumen` que traiga la ruta del
+    disco o el nombre de la GPU pasaría sin que nadie se enterase, porque nadie
+    se acordaría de añadirlo a esa lista.
+
+    Aquí se afirma la propiedad en vez de los ejemplos: en el histórico —que se
+    acumula para siempre y sin caducidad— no puede haber nada que no sea una
+    cifra, una bandera o una fecha. Un campo nuevo que no lo sea falla aquí el
+    día que se escribe.
+    """
+
+    #: Los dos únicos campos de texto, y qué son: una marca de tiempo ISO y la
+    #: versión de Quilate. Ninguno de los dos sale del equipo del usuario.
+    TEXTO_PERMITIDO = {"at", "version"}
+
+    def sucio(self) -> dict:
+        """Un payload con de todo lo que no debe llegar al histórico."""
+        payload = ejecucion(overall=120.0, boot=31.0, temp=68.0)
+        payload["system"] = {"hostname": "PC-DE-ALGUIEN", "user": "alguien",
+                             "cpu_name": "AMD Ryzen 9 5900X",
+                             "system_drive": "C:\\"}
+        payload["top_processes"] = [{"name": "loquesea.exe", "rss": 1, "pid": 42}]
+        payload["startup_items"] = [{"name": "programa", "location": "C:\\Users\\x",
+                                     "command": "C:\\Program Files\\x.exe"}]
+        payload["storage_scan"] = {"items": [{"path": "/home/alguien/peli.mkv"}]}
+        payload["notes"] = ["El disco D:\\ de alguien está lleno"]
+        return payload
+
+    def cadenas(self, valor, ruta="raíz") -> list[tuple[str, str]]:
+        """Todas las cadenas del payload serializado, con dónde estaba cada una.
+
+        Recorre claves además de valores: una clave puede traer tanto texto del
+        sistema como un valor, y en JSON las dos cosas acaban en el fichero.
+        """
+        if isinstance(valor, dict):
+            encontradas = []
+            for clave, sub in valor.items():
+                encontradas += self.cadenas(clave, f"{ruta}(clave)")
+                encontradas += self.cadenas(sub, f"{ruta}.{clave}")
+            return encontradas
+        if isinstance(valor, (list, tuple)):
+            return [c for i, sub in enumerate(valor)
+                    for c in self.cadenas(sub, f"{ruta}[{i}]")]
+        return [(ruta, valor)] if isinstance(valor, str) else []
+
+    def test_solo_hay_cifras_banderas_y_dos_fechas(self):
+        for clave, valor in _resumen(self.sucio()).items():
+            with self.subTest(campo=clave):
+                if clave in self.TEXTO_PERMITIDO:
+                    self.assertIsInstance(valor, str)
+                else:
+                    self.assertIsInstance(
+                        valor, (int, float, bool),
+                        f"«{clave}» no es una cifra: si es un campo nuevo que "
+                        f"trae texto del equipo, no puede ir al histórico")
+
+    def test_ninguna_cadena_parece_una_ruta(self):
+        # Ni separador de Windows ni de POSIX. Es lo que delata una ruta sin
+        # tener que saber qué campo la traía.
+        for ruta, texto in self.cadenas(_resumen(self.sucio())):
+            with self.subTest(campo=ruta):
+                self.assertNotIn("\\", texto)
+                self.assertNotIn("/", texto)
+
+    def test_ninguna_clave_sale_de_las_secciones_prohibidas(self):
+        payload = self.sucio()
+        prohibidas = {clave
+                      for seccion in ("top_processes", "startup_items")
+                      for item in payload[seccion]
+                      for clave in item}
+        self.assertTrue(prohibidas, "el payload de prueba no planta nada")
+        self.assertEqual(set(_resumen(payload)) & prohibidas, set())
+
+    def test_ningun_valor_del_inventario_se_copia(self):
+        payload = self.sucio()
+        volcado = json.dumps(_resumen(payload), ensure_ascii=False).lower()
+        for campo, valor in payload["system"].items():
+            with self.subTest(campo=campo):
+                self.assertNotIn(str(valor).lower(), volcado)
+
+    def test_la_garantia_vale_sobre_el_fichero_escrito(self):
+        # No sobre el dict en memoria: lo que se acumula para siempre es lo que
+        # acaba en disco, y es ahí donde hay que mirarlo.
+        with tempfile.TemporaryDirectory() as d:
+            ruta = Path(d) / "historico.jsonl"
+            append(self.sucio(), ruta)
+            texto = ruta.read_text(encoding="utf-8")
+        self.assertTrue(texto.strip(), "no se ha escrito nada: el test no prueba nada")
+        for ruta_campo, cadena in self.cadenas(json.loads(texto)):
+            with self.subTest(campo=ruta_campo):
+                self.assertNotIn("\\", cadena)
+                self.assertNotIn("/", cadena)
+
+
+class ElReadmeDiceLaVerdad(unittest.TestCase):
+    """La lista de campos del README, contrastada con lo que se escribe.
+
+    El README promete «solo cifras y fechas» y ahora enumera cuáles. Esa
+    promesa es sobre datos personales, así que envejecer mal no es un detalle
+    de documentación: es decirle a alguien que no se guarda algo que sí se
+    guarda. Un campo nuevo en `_resumen` tiene que pasar por el README.
+    """
+
+    RAIZ = Path(__file__).resolve().parent.parent
+
+    def documentados(self) -> set[str]:
+        texto = (self.RAIZ / "README.md").read_text(encoding="utf-8")
+        inicio = texto.index("Dónde está y qué guarda")
+        bloque = texto[inicio:texto.index("El fichero se recorta", inicio)]
+        return set(re.findall(r"`(\w+)`", bloque))
+
+    def escritos(self) -> set[str]:
+        # Con TODOS los componentes: `_resumen` solo escribe los que vienen, y
+        # con la ejecución de ejemplo faltarían tres y el test se los perdería.
+        completo = ejecucion(overall=120.0, boot=31.0, temp=68.0)
+        completo["scores"]["components"] = {
+            c: 100.0 for c in ("cpu_single", "cpu_multi", "memory", "disk", "gpu")}
+        return set(_resumen(completo))
+
+    def test_se_documenta_todo_lo_que_se_escribe(self):
+        self.assertEqual(
+            self.escritos() - self.documentados(), set(),
+            "hay campos en el histórico que el README no menciona: la promesa "
+            "de qué se guarda dejaría de ser cierta")
+
+    def test_no_se_documenta_nada_que_no_se_escriba(self):
+        # Al revés también importa: un campo fantasma en la tabla hace dudar
+        # del resto de la lista.
+        self.assertEqual(self.documentados() - self.escritos(), set())
+
+    def test_la_ruta_de_windows_esta_escrita(self):
+        texto = (self.RAIZ / "README.md").read_text(encoding="utf-8")
+        self.assertIn(r"%LOCALAPPDATA%\Quilate\historico.jsonl", texto)
+
+
+class RecortarSinPerderElHistorico(unittest.TestCase):
+    """El recorte no puede dejar el fichero a medias.
+
+    `write_text` trunca a cero antes de escribir. Un corte de luz o un cierre de
+    sesión en ese hueco dejaba el histórico vacío o partido, y es un fichero que
+    se acumula durante años y que nadie tiene copiado en ninguna parte. Con
+    `os.replace` o está el viejo o está el nuevo.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.ruta = Path(self.dir.name) / "historico.jsonl"
+
+    def _llenar(self, cuantas: int) -> None:
+        # La marca de tiempo tiene que crecer de verdad: `load()` ordena por
+        # ella, y con segundos se desbordaba a los 60 y las entradas salían
+        # desordenadas — un fallo del test, no del recorte.
+        self.ruta.write_text(
+            "".join(json.dumps({"at": f"2026-01-01T{n // 60:02d}:{n % 60:02d}:00",
+                                "overall": n}) + "\n" for n in range(cuantas)),
+            encoding="utf-8")
+
+    def test_recorta_a_las_ultimas(self):
+        self._llenar(MAX_ENTRADAS + 25)
+        history._recortar(self.ruta)
+        entradas = load(self.ruta)
+        self.assertEqual(len(entradas), MAX_ENTRADAS)
+        self.assertEqual(entradas[-1]["overall"], MAX_ENTRADAS + 24)
+
+    def test_por_debajo_del_tope_no_toca_nada(self):
+        self._llenar(10)
+        antes = self.ruta.read_text(encoding="utf-8")
+        history._recortar(self.ruta)
+        self.assertEqual(self.ruta.read_text(encoding="utf-8"), antes)
+
+    def test_si_falla_a_media_escritura_el_historico_sigue_entero(self):
+        # Lo que antes se perdía: el fichero ya estaba truncado a cero cuando
+        # llegaba el fallo. Ahora el que revienta es el temporal, y el bueno no
+        # se ha tocado todavía.
+        self._llenar(MAX_ENTRADAS + 25)
+        original = self.ruta.read_text(encoding="utf-8")
+        real = Path.write_text
+
+        def reventar(self_, *a, **k):
+            if self_.name.endswith(".tmp"):
+                raise OSError(28, "No queda espacio en el dispositivo")
+            return real(self_, *a, **k)
+
+        with mock.patch.object(Path, "write_text", reventar):
+            history._recortar(self.ruta)
+        self.assertEqual(self.ruta.read_text(encoding="utf-8"), original)
+        self.assertEqual(len(load(self.ruta)), MAX_ENTRADAS + 25)
+
+    def test_no_deja_el_temporal_tirado(self):
+        self._llenar(MAX_ENTRADAS + 25)
+        history._recortar(self.ruta)
+        self.assertEqual(list(Path(self.dir.name).glob("*.tmp")), [])
+
+    def test_tampoco_lo_deja_cuando_falla(self):
+        self._llenar(MAX_ENTRADAS + 25)
+        real = os.replace
+
+        def reventar(*a, **k):
+            raise OSError(13, "Acceso denegado")
+
+        with mock.patch.object(os, "replace", reventar):
+            history._recortar(self.ruta)
+        self.assertEqual(list(Path(self.dir.name).glob("*.tmp")), [])
+        self.assertEqual(os.replace, real)
+
+    def test_el_temporal_va_en_la_misma_carpeta(self):
+        # Renombrar entre volúmenes distintos no es atómico: acabaría copiando
+        # byte a byte, que es justo lo que esto viene a evitar.
+        vistos = []
+        real = Path.write_text
+
+        def anotar(self_, *a, **k):
+            vistos.append(self_)
+            return real(self_, *a, **k)
+
+        self._llenar(MAX_ENTRADAS + 25)
+        with mock.patch.object(Path, "write_text", anotar):
+            history._recortar(self.ruta)
+        temporales = [p for p in vistos if p.name.endswith(".tmp")]
+        self.assertTrue(temporales, "no se ha escrito ningún temporal")
+        self.assertEqual(temporales[0].parent, self.ruta.parent)
+
+
 class FicheroDelHistorico(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -85,6 +317,15 @@ class FicheroDelHistorico(unittest.TestCase):
         append(ejecucion(overall=95.0), self.ruta)
         self.assertEqual([e["overall"] for e in load(self.ruta)], [90.0, 95.0])
 
+    def test_una_fecha_que_no_es_texto_tampoco(self):
+        # El fichero es «un fichero de texto que el usuario puede leer, copiar o
+        # borrar»: editarlo a mano es un uso previsto, y un `at` numérico dejaba
+        # `--history` inservible para siempre con un TypeError al ordenar.
+        with self.ruta.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"at": 20260101, "overall": 50.0}) + "\n")
+        append(ejecucion(overall=95.0), self.ruta)
+        self.assertEqual([e["overall"] for e in load(self.ruta)], [95.0])
+
     def test_fichero_inexistente_no_es_un_error(self):
         self.assertEqual(load(Path(self.dir.name) / "no_existe.jsonl"), [])
 
@@ -100,6 +341,157 @@ class FicheroDelHistorico(unittest.TestCase):
         # El análisis ya está hecho: que el histórico falle no puede perderlo.
         imposible = Path(self.dir.name) / "no" / "existe" / "\0" / "h.jsonl"
         self.assertIsNone(append(ejecucion(), imposible))
+
+
+class PrivacidadDelHistorico(unittest.TestCase):
+    """El histórico se acumula para siempre: aquí no puede acabar nada personal.
+
+    `_resumen()` escribe solo cifras y fechas, y eso está bien hoy. Pero es la
+    clase de garantía que se rompe añadiendo un campo con buena intención: basta
+    con que alguien meta `hostname` para «poder distinguir los equipos» y lo que
+    era un fichero de números pasa a ser un registro de a quién pertenece.
+
+    El payload se construye con el `build_payload()` de verdad y no a mano, para
+    que un campo nuevo quede cubierto por este test el día que se añada, sin que
+    nadie tenga que acordarse de venir aquí.
+    """
+
+    def _payload(self) -> dict:
+        # El andamiaje de test_paridad planta cadenas testigo únicas en cada
+        # fuente de datos: si una aparece en el histórico, solo puede venir de
+        # donde se plantó.
+        from tests.test_paridad import T, _auditoria, _benchmark, _sistema
+        from quilate.export.json_export import build_payload
+        from quilate.projection import project_improvement
+        si, bench = _sistema(), _benchmark()
+        auditor = _auditoria(si, bench)
+        return T, build_payload(si, bench, auditor,
+                                project_improvement(bench, auditor.findings))
+
+    # Los testigos que identifican a alguien o dicen qué tiene instalado. Del
+    # resto —el motivo por el que no hay GPU, el título de un hallazgo— no va
+    # esta prueba: no son datos personales.
+    PERSONALES = ("host", "cpu", "proceso", "ambiente", "inicio", "adaptador", "fichero")
+
+    def test_ningun_testigo_llega_al_historico(self):
+        testigos, payload = self._payload()
+        with tempfile.TemporaryDirectory() as d:
+            ruta = Path(d) / "historico.jsonl"
+            self.assertIsNotNone(append(payload, ruta))
+            linea = ruta.read_text(encoding="utf-8")
+
+        completo = json.dumps(payload, default=str)
+        for etiqueta in self.PERSONALES:
+            valor = testigos[etiqueta]
+            # Que el payload lo trae de verdad: sin esto el test pasaría en
+            # verde aunque el andamiaje se hubiera quedado vacío.
+            self.assertIn(valor, completo,
+                          f"el testigo «{etiqueta}» no está ni en el payload: "
+                          f"este test no comprueba nada")
+            self.assertNotIn(valor, linea,
+                             f"se ha colado «{etiqueta}» ({valor}) en el histórico")
+
+    def test_no_se_escribe_ninguna_ruta(self):
+        _, payload = self._payload()
+        linea = json.dumps(_resumen(payload), ensure_ascii=False)
+        for pista in ("C:\\", "C:/", "\\Users", "/home/", ".exe", ".dmp"):
+            self.assertNotIn(pista, linea, f"parece una ruta: «{pista}»")
+
+    def test_solo_cifras_fechas_y_banderas(self):
+        # La garantía en su forma más fuerte: nada de lo que se escribe puede
+        # ser texto libre, salvo la fecha y la versión, que son las dos claves
+        # que el histórico necesita para ordenarse y para saber con qué se midió.
+        _, payload = self._payload()
+        entrada = _resumen(payload)
+        for clave, valor in entrada.items():
+            with self.subTest(clave=clave):
+                if clave in ("at", "version"):
+                    self.assertIsInstance(valor, str)
+                    continue
+                self.assertIsInstance(valor, (int, float, bool),
+                                      f"«{clave}» no es una cifra: {valor!r}")
+
+    def test_las_claves_estan_declaradas(self):
+        # Un campo nuevo tiene que pasar por aquí a propósito, no colarse.
+        _, payload = self._payload()
+        permitidas = {"at", "version", "overall", "findings", "quick",
+                      "cpu_single", "cpu_multi", "memory", "disk", "gpu",
+                      "boot_seconds", "cpu_temp", "max_spread_pct", "busy_pct"}
+        nuevas = set(_resumen(payload)) - permitidas
+        self.assertEqual(nuevas, set(),
+                         "hay claves nuevas en el histórico: compruébalas una a una "
+                         "y añádelas aquí si de verdad no llevan nada personal")
+
+
+class UbicacionDelFichero(unittest.TestCase):
+    """La base sale del entorno, y el proceso elevado hereda el del que no lo está."""
+
+    VARIABLE = "LOCALAPPDATA" if history.IS_WINDOWS else "XDG_DATA_HOME"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.entorno = dict(os.environ)
+        self.admin_original = history.is_admin
+        history.is_admin = lambda: False
+        # Donde tiene que acabar el fichero cuando la base no es de fiar.
+        raiz = Path.home() if history.IS_WINDOWS else Path.home() / ".local" / "share"
+        self.respaldo = raiz / "Quilate" / "historico.jsonl"
+
+    def tearDown(self):
+        history.is_admin = self.admin_original
+        os.environ.clear()
+        os.environ.update(self.entorno)
+        self.dir.cleanup()
+
+    def _con(self, valor: str | None) -> Path:
+        if valor is None:
+            os.environ.pop(self.VARIABLE, None)
+        else:
+            os.environ[self.VARIABLE] = valor
+        return history_path()
+
+    def test_una_base_normal_se_respeta(self):
+        self.assertEqual(self._con(self.dir.name),
+                         Path(self.dir.name) / "Quilate" / "historico.jsonl")
+
+    def test_una_base_relativa_no_vale(self):
+        # Relativa quiere decir «donde el proceso esté trabajando ahora».
+        self.assertEqual(self._con(os.path.join("datos", "quilate")), self.respaldo)
+
+    def test_una_base_que_no_existe_no_vale(self):
+        self.assertEqual(self._con(str(Path(self.dir.name) / "no" / "existe")),
+                         self.respaldo)
+
+    def test_una_base_vacia_no_vale(self):
+        self.assertEqual(self._con(""), self.respaldo)
+
+    def test_sin_la_variable_se_usa_el_perfil(self):
+        self.assertEqual(self._con(None), self.respaldo)
+
+    def test_con_privilegios_solo_se_escribe_dentro_del_perfil(self):
+        # Escribir como Administrador donde diga una variable de entorno que el
+        # usuario controla es cómo se crean directorios en zonas protegidas.
+        # La raíz del volumen existe y es absoluta —pasa las dos primeras
+        # comprobaciones— pero no cuelga del perfil de nadie.
+        history.is_admin = lambda: True
+        self.assertEqual(self._con(Path.home().anchor), self.respaldo)
+
+    def test_sin_privilegios_esa_misma_base_se_acepta(self):
+        # La restricción extra es por la elevación, no por desconfiar del
+        # usuario: sin privilegios no puede escribir donde no le dejen igualmente.
+        raiz = Path.home().anchor
+        self.assertEqual(self._con(raiz), Path(raiz) / "Quilate" / "historico.jsonl")
+
+    def test_con_privilegios_una_base_del_perfil_sigue_valiendo(self):
+        # La comprobación es «dentro del perfil», no «solo el perfil»: en un
+        # equipo normal LOCALAPPDATA es una subcarpeta y tiene que seguir yendo ahí.
+        try:
+            Path(self.dir.name).resolve().relative_to(Path.home().resolve())
+        except ValueError:
+            self.skipTest("el directorio temporal de este sistema no cuelga del perfil")
+        history.is_admin = lambda: True
+        self.assertEqual(self._con(self.dir.name),
+                         Path(self.dir.name) / "Quilate" / "historico.jsonl")
 
 
 class Deriva(unittest.TestCase):

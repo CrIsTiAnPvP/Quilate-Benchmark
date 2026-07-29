@@ -13,7 +13,9 @@ from ..benchmark import (Benchmark, REFERENCE, REFERENCE_DATE, REFERENCE_MACHINE
                          REFERENCE_ORIGIN, reference_age_months, reference_is_stale)
 from ..components import build_component_cards
 from ..const import APP_NAME, APP_VERSION, AUTHOR, WEBSITE_URL
-from ..report import build_verdict
+# De `veredicto` y no de `report`: el exportador de datos no tiene por qué
+# depender del módulo que pinta la consola para obtener una cifra.
+from ..veredicto import build_verdict
 from ..sensors import cpu_temperature, gpu_telemetry, temperature_report, temperature_source
 from ..storage_scan import ScanResult, candidate_bytes
 from ..sysinfo import SystemInfo

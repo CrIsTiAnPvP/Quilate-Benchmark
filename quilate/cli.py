@@ -12,11 +12,12 @@ from .audit import Auditor
 from .benchmark import Benchmark
 from .compare import RunLoadError, compare_runs, load_run
 from .compare_report import print_comparison
-from .console import (C, banner, clear_screen, configure_output, enable_ansi,
-                      read_key, section, spinner_done, spinner_step)
+from .console import (C, _motivo, banner, clear_screen, configure_output,
+                      enable_ansi, read_key, section, spinner_done, spinner_step)
 from .const import APP_NAME, AUTHOR, IS_WINDOWS, WEBSITE_URL
 from .export import build_payload, export_html, export_json, export_plan
-from .platform_utils import is_admin, owns_console, relaunch_as_admin
+from . import elevacion
+from .platform_utils import is_admin
 from .projection import project_improvement
 from .report import print_report
 from .storage_scan import ScanResult, default_roots, scan_large_files
@@ -60,6 +61,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--check-drivers", action="store_true",
                    help="consultar en línea (Windows Update) si hay drivers más nuevos; "
                         "tarda 10-30 s")
+    p.add_argument("--check-updates", action="store_true",
+                   help="consultar en línea (Windows Update) si faltan actualizaciones de "
+                        "seguridad; tarda 10-30 s")
     p.add_argument("--no-files", action="store_true",
                    help="omitir el rastreo de archivos grandes")
     p.add_argument("--scan-path", metavar="RUTA", action="append", default=None,
@@ -75,14 +79,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--export-plan", metavar="FICHERO", nargs="?", const="plan_optimizacion.ps1",
                    help="generar script PowerShell de optimización (solo Windows)")
     p.add_argument("--elevate", action="store_true",
-                   help="pedir permisos de administrador aunque se lance desde una terminal")
+                   help="pedir permisos aunque no haya nadie delante para aceptarlos "
+                        "(salida redirigida, tarea programada)")
     p.add_argument("--no-elevate", action="store_true",
-                   help="no pedir permisos de administrador en ningún caso")
+                   help="no pedir permisos en ningún caso; las comprobaciones que los "
+                        "necesitan saldrán como «sin comprobar»")
     p.add_argument("--no-color", action="store_true", help="desactivar colores ANSI")
     return p.parse_args()
-
-
-_relaunched = False   # lo consulta _wait_before_closing(): ver su docstring
 
 
 def _interactive() -> bool:
@@ -93,82 +96,97 @@ def _interactive() -> bool:
         return False
 
 
-def _ask_elevate() -> bool:
-    """Pregunta antes de relanzarse desde una terminal ya abierta.
+# Lo que se pierde diciendo que no, en el orden en que se echa de menos. No es
+# una lista decorativa: pedir permisos sin decir para qué es lo que enseña a
+# aceptar cualquier aviso sin leerlo.
+_LO_QUE_NECESITA_PERMISOS = (
+    "si el disco está cifrado y si el arranque seguro y el TPM están puestos",
+    "si sigue activo SMB1, el protocolo de red que usó WannaCry",
+    "cuánto tarda de verdad en arrancar y qué lo retrasa",
+    "la salud fina de los discos: desgaste, horas y sectores defectuosos",
+)
 
-    Aquí el aviso de UAC no basta como pregunta: aunque se acepte, el análisis
-    se va a una ventana nueva y esta terminal se queda mirando. Conviene
-    decirlo antes, no después.
+
+def _pedir_permisos(args: argparse.Namespace) -> None:
+    """Pide una vez los permisos con los que se lee el lote, o dice por qué no.
+
+    Quilate ya no se eleva entero. Antes pedía UAC al arrancar y a partir de ahí
+    todo —el banco de pruebas, el rastreo de archivos, la escritura del informe—
+    corría como administrador, que era mucho más de lo que hacía falta y dejaba
+    los informes con propietario Administrador. Ahora el aviso sirve para un
+    proceso aparte que lee ocho cosas y muere; ver `elevacion`.
+
+    Se pide aquí, antes del inventario, y no cuando hagan falta: un diálogo de
+    Windows a los dos minutos, cuando quien lo lanzó ya se ha ido a otra cosa,
+    se queda esperando a nadie y tira por tierra media auditoría.
     """
-    print(f"  {C.BOLD}¿Pedirlos ahora?{C.RESET} {C.DIM}El análisis se abrirá en una "
-          f"ventana nueva.{C.RESET}")
-    print(f"    {C.GOLD}[Enter]{C.RESET} Sí, pedirlos    "
-          f"{C.GOLD}[N]{C.RESET} No, seguir sin permisos    ", end="", flush=True)
-    try:
-        key = read_key()
-    except KeyboardInterrupt:
-        key = "n"
-    print()
-    return key not in ("n", "\x1b")
+    if not IS_WINDOWS or is_admin():
+        return
+    if args.no_elevate:
+        print(f"  {C.DIM}Sin pedir permisos (--no-elevate): unas comprobaciones "
+              f"quedarán sin respuesta.{C.RESET}")
+        return
+    if not _interactive() and not args.elevate:
+        # Un aviso de UAC en una tarea programada o con la salida redirigida se
+        # queda ahí parado hasta que alguien lo cierre. Mejor no sacarlo.
+        print(f"  {C.DIM}Sin pedir permisos: no hay nadie delante que pueda "
+              f"aceptarlos. Con --elevate se piden igualmente.{C.RESET}")
+        return
 
+    print(f"\n  {C.CYAN}▸{C.RESET} Windows va a pedirte permiso. Es para mirar, "
+          f"{C.BOLD}solo leyendo{C.RESET}, cuatro cosas que de otro modo no se ven:")
+    for cosa in _LO_QUE_NECESITA_PERMISOS:
+        print(f"      {C.DIM}·{C.RESET} {cosa}")
+    print(f"    {C.DIM}Si dices que no, el análisis sigue igual y esas salen "
+          f"como «sin comprobar».{C.RESET}")
 
-def _try_elevate(args: argparse.Namespace) -> int | None:
-    """Ofrece relanzarse como administrador.
-
-    Devuelve None para continuar aquí sin permisos, o el código de salida con el
-    que terminar si el trabajo se ha ido a la ventana elevada.
-
-    Sin elevación se cae media auditoría (SMART, TRIM, servicios) sin que el
-    usuario sepa por qué, y con doble clic no hay forma de pedirla salvo el menú
-    contextual, que nadie usa. Se pide en los dos modos, pero de distinta manera:
-
-    - Doble clic: somos los únicos de la consola, así que se va directo al aviso
-      de UAC. Aceptar sustituye esta ventana por la elevada.
-    - Terminal: se pregunta primero, porque relanzarse abre otra ventana.
-    - Salida redirigida a un fichero o a una tubería: no se pide nada. Ahí no hay
-      quien conteste, y la ventana nueva dejaría el destino vacío.
-
-    Solo se espera al proceso elevado cuando no hay nadie delante, es decir con
-    `--elevate` desde un script: allí el código de salida es lo único que le
-    queda a quien nos invocó. Con un usuario delante, esperar dejaría dos
-    ventanas abiertas —una trabajando y otra mirando— durante todo el análisis,
-    que además termina en un menú interactivo. Mejor ceder el turno y salir.
-    """
-    global _relaunched
-    if args.no_elevate or not IS_WINDOWS or not getattr(sys, "frozen", False):
-        return None
-    double_click = owns_console()
-    if not double_click and not args.elevate:
-        if not _interactive() or not _ask_elevate():
-            return None
-
-    print(f"  {C.CYAN}▸{C.RESET} Pidiendo permisos a Windows... "
-          f"{C.DIM}acepta el aviso para el análisis completo.{C.RESET}")
-    wait = not double_click and not _interactive()
-    code = relaunch_as_admin(["--no-elevate"], wait=wait)
-    if code is None:
-        print(f"  {C.DIM}Permisos denegados; se continúa sin ellos.{C.RESET}")
-        return None
-    _relaunched = True
-    if not double_click:
-        print(f"  {C.GREEN}✓{C.RESET} "
-              + ("Análisis completado en la ventana con permisos." if wait else
-                 "El análisis continúa en la ventana con permisos; "
-                 "esta ya puede cerrarse.\n"))
-    return code
+    elevacion.permitir_uac(True)
+    lote = elevacion.recoger()
+    contestadas = sum(1 for res in lote.values() if res.ok)
+    if not contestadas:
+        print(f"  {C.DIM}Sin permisos; se continúa sin ellos.{C.RESET}")
+    else:
+        print(f"  {C.GREEN}✓{C.RESET} Permisos concedidos "
+              f"{C.DIM}(el proceso con permisos ya ha terminado).{C.RESET}")
 
 
 def _run_comparison(rutas: list[str]) -> int:
     antes_path, despues_path = Path(rutas[0]), Path(rutas[1])
     try:
         antes, despues = load_run(antes_path), load_run(despues_path)
+        comparacion = compare_runs(antes, despues)
     except RunLoadError as exc:
-        print(f"\n  {C.RED}No se puede comparar: {exc}{C.RESET}")
-        print(f"  {C.DIM}Genera los ficheros con `quilate --json antes.json`, aplica los "
-              f"cambios y vuelve a ejecutar con otro nombre.{C.RESET}\n")
-        return 2
-    print_comparison(compare_runs(antes, despues), antes_path.name, despues_path.name)
+        return _no_se_puede_comparar(str(exc))
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        # `load_run` criba lo que sabe cribar, pero el fichero viene de fuera y
+        # puede faltarle cualquier otra cosa. Que eso salga como una traza de
+        # Python, justo debajo del mensaje cuidado que ya existe para el fichero
+        # que no es de Quilate, no tiene defensa.
+        #
+        # `AttributeError` es la red del esquema anidado: el módulo indexa dos y
+        # tres niveles, y donde esperaba un objeto puede haber una cadena. Cribar
+        # cada rincón del esquema no compensa; que ninguno saque una traza, sí.
+        if isinstance(exc, KeyError):
+            # De un KeyError sí sale algo que el usuario reconoce: el nombre del
+            # campo que falta, que además está en el JSON que tiene delante.
+            return _no_se_puede_comparar(f"el fichero es de Quilate pero le faltan "
+                                         f"datos: {exc.args[0]}")
+        # De los demás, no. `unsupported operand type(s) for -: 'str' and 'float'`
+        # es el mensaje de CPython, viene en inglés y no le dice a nadie qué
+        # hacer, en un programa cuyo informe entero está en castellano. Lo que
+        # sí es útil es la causa probable, que casi siempre es una de dos.
+        return _no_se_puede_comparar(
+            "el fichero es de Quilate pero hay un valor con un tipo que no encaja "
+            "(¿editado a mano, o generado por otra versión?)")
+    print_comparison(comparacion, antes_path.name, despues_path.name)
     return 0
+
+
+def _no_se_puede_comparar(motivo: str) -> int:
+    print(f"\n  {C.RED}No se puede comparar: {motivo}{C.RESET}")
+    print(f"  {C.DIM}Genera los ficheros con `quilate --json antes.json`, aplica los "
+          f"cambios y vuelve a ejecutar con otro nombre.{C.RESET}\n")
+    return 2
 
 
 def main() -> int:
@@ -189,13 +207,7 @@ def main() -> int:
         return _run_comparison(args.compare)
 
     banner()
-    if not is_admin():
-        print(f"\n  {C.YELLOW}⚠ Sin permisos de administrador: algunas comprobaciones "
-              f"(SMART, TRIM, servicios) pueden no estar disponibles.{C.RESET}")
-        code = _try_elevate(args)
-        if code is not None:
-            return code
-        print(f"  {C.DIM}Para un análisis completo, abre la terminal como administrador.{C.RESET}")
+    _pedir_permisos(args)
 
     section("Recopilando información del sistema")
     spinner_step("Inventario de hardware y SO".ljust(38))
@@ -227,7 +239,7 @@ def main() -> int:
         except KeyboardInterrupt:
             print(f"\n  {C.YELLOW}Rastreo interrumpido.{C.RESET}")
         except Exception as exc:
-            spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
+            spinner_done(f"no se ha podido rastrear: {_motivo(exc)}", ok=False)
 
     section("Red")
     spinner_step("Enlace y adaptadores".ljust(38))
@@ -239,7 +251,7 @@ def main() -> int:
                      ok=bool(enlace))
     except Exception as exc:
         red = {}
-        spinner_done(f"no disponible ({type(exc).__name__})", ok=False)
+        spinner_done(f"no se ha podido consultar la red: {_motivo(exc)}", ok=False)
     if args.no_net:
         print(f"  {C.DIM}Latencia y DNS omitidas por --no-net.{C.RESET}")
     else:
@@ -247,7 +259,8 @@ def main() -> int:
               f"({', '.join(h for h, _, _ in NET_TARGETS)}). Se cronometra el saludo "
               f"TCP; no se envía ningún dato. Omítelas con --no-net.{C.RESET}")
 
-    auditor = Auditor(si, bench, scan, check_drivers=args.check_drivers, network=red)
+    auditor = Auditor(si, bench, scan, check_drivers=args.check_drivers, network=red,
+                      check_updates=args.check_updates)
     try:
         auditor.run()
     except KeyboardInterrupt:
@@ -265,22 +278,7 @@ def main() -> int:
                   f"Míralo con --history.{C.RESET}\n")
 
     # --- Exportaciones ---
-    outputs: list[str] = []
-    if args.json:
-        pj = Path(args.json)
-        export_json(pj, si, bench, auditor, projection)
-        outputs.append(f"JSON  → {pj.resolve()}")
-    if args.html:
-        ph = Path(args.html)
-        export_html(ph, si, bench, auditor, projection)
-        outputs.append(f"HTML  → {ph.resolve()}")
-    if args.export_plan:
-        if not IS_WINDOWS:
-            print(f"  {C.YELLOW}--export-plan solo está disponible en Windows.{C.RESET}")
-        else:
-            pp = Path(args.export_plan)
-            count = export_plan(pp, si, bench, auditor)
-            outputs.append(f"PLAN  → {pp.resolve()}  ({count} bloques automatizables)")
+    outputs = _exportaciones(args, si, bench, auditor, projection)
     if outputs:
         section("Ficheros generados")
         for o in outputs:
@@ -312,6 +310,56 @@ def _menu_line(key: str, label: str, target: str, done: Path | None = None) -> N
           f"{label.ljust(18)} {C.DIM}{target}{C.RESET}")
 
 
+def _exportar(kind: str, path: Path, si, bench, auditor, projection) -> str:
+    """Escribe una exportación en la ruta dada y devuelve su detalle.
+
+    Único sitio que sabe qué función genera cada tipo. Antes había dos listas
+    paralelas de llamadas —la del menú y la de las banderas— y solo la del menú
+    estaba protegida contra un fallo de escritura.
+    """
+    if kind == "html":
+        export_html(path, si, bench, auditor, projection)
+        return ""
+    if kind == "json":
+        export_json(path, si, bench, auditor, projection)
+        return ""
+    count = export_plan(path, si, bench, auditor)
+    return f"{count} bloque{'s' if count != 1 else ''} automatizable" \
+           f"{'s' if count != 1 else ''}"
+
+
+def _exportaciones(args, si, bench, auditor, projection) -> list[str]:
+    """Los ficheros pedidos por bandera, con el mismo cuidado que los del menú.
+
+    Aquí no hay reserva a la carpeta personal como en `_write_export`: la ruta
+    la ha elegido el usuario y escribir en otro sitio sería desobedecerle. Lo
+    que sí se comparte es que un disco lleno o una carpeta sin permiso no salgan
+    como una traza de Python después de haber corrido el análisis entero, y que
+    el fallo de un fichero no se lleve por delante a los otros dos.
+    """
+    peticiones = [("json", "JSON", args.json), ("html", "HTML", args.html)]
+    if args.export_plan:
+        if IS_WINDOWS:
+            peticiones.append(("plan", "PLAN", args.export_plan))
+        else:
+            print(f"  {C.YELLOW}--export-plan solo está disponible en Windows.{C.RESET}")
+
+    outputs: list[str] = []
+    for kind, etiqueta, ruta in peticiones:
+        if not ruta:
+            continue
+        destino = Path(ruta)
+        try:
+            detalle = _exportar(kind, destino, si, bench, auditor, projection)
+        except OSError as exc:
+            print(f"  {C.RED}✗{C.RESET} No se ha podido escribir {destino}: "
+                  f"{_motivo(exc)}.")
+            continue
+        outputs.append(f"{etiqueta}  → {destino.resolve()}"
+                       + (f"  ({detalle})" if detalle else ""))
+    return outputs
+
+
 def _write_export(kind: str, si, bench, auditor, projection) -> tuple[Path, str] | None:
     """Genera un fichero y devuelve (ruta, detalle), o None si no se pudo.
 
@@ -328,18 +376,18 @@ def _write_export(kind: str, si, bench, auditor, projection) -> tuple[Path, str]
         seen.append(base)
         path = base / name
         try:
-            if kind == "html":
-                export_html(path, si, bench, auditor, projection)
-                return path, ""
-            if kind == "json":
-                export_json(path, si, bench, auditor, projection)
-                return path, ""
-            count = export_plan(path, si, bench, auditor)
-            return path, f"{count} bloque{'s' if count != 1 else ''} automatizable" \
-                         f"{'s' if count != 1 else ''}"
+            return path, _exportar(kind, path, si, bench, auditor, projection)
         except OSError as exc:
             error = exc
-    print(f"{C.RED}✗{C.RESET}\n    No se pudo escribir {name}: {error}")
+    # Nombrar las dos ubicaciones intentadas: tras dos fallos, decir solo «no se
+    # pudo escribir» deja al usuario sin saber dónde se probó ni qué hacer.
+    probadas = "\n".join(f"      · {ruta}" for ruta in seen)
+    # La bandera es «--export-plan», no «--plan»: el mensaje solo sirve si lo
+    # que propone se puede copiar y pegar.
+    bandera = {"html": "--html", "json": "--json", "plan": "--export-plan"}[kind]
+    print(f"{C.RED}✗{C.RESET}\n    No se ha podido escribir {name}: {_motivo(error)}.")
+    print(f"    {C.DIM}Se ha intentado en:\n{probadas}\n"
+          f"      Dile tú dónde con `{bandera} C:\\ruta\\que\\elijas\\{name}`.{C.RESET}")
     return None
 
 
@@ -419,10 +467,12 @@ def _wait_before_closing() -> None:
     con terminal interactivo: en línea de comandos o redirigido, estorbaría.
 
     Si el menú final llegó a mostrarse, la pausa ya la puso él y salir de allí es
-    un acto deliberado del usuario: encadenar otro "pulsa Enter" sobraría. Y si
-    nos hemos relanzado con permisos, esta ventana ya no pinta nada: el informe
-    sale en la otra y esta debe cerrarse sola."""
-    if _menu_shown or _relaunched or not getattr(sys, "frozen", False):
+    un acto deliberado del usuario: encadenar otro "pulsa Enter" sobraría.
+
+    Ya no hay caso de «nos hemos relanzado elevados y esta ventana sobra»: el
+    análisis entero ocurre aquí, y lo único que se va a otro proceso es el lote
+    de consultas con permisos, que dura dos segundos y no imprime nada."""
+    if _menu_shown or not getattr(sys, "frozen", False):
         return
     try:
         if _interactive():

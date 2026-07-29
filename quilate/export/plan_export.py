@@ -6,10 +6,11 @@ primero crea un punto de restauracion.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
-from ..audit import Auditor
+from ..audit import Auditor, security_findings
 from ..benchmark import BUSY_CPU_PCT, Benchmark
 from ..components import ComponentCard, build_component_cards
 from ..console import human_bytes
@@ -316,6 +317,23 @@ def _ps_str(texto: str) -> str:
     return (texto.replace("`", "``").replace('"', '`"').replace("$", "`$"))
 
 
+def _comentario(texto) -> str:
+    """Ninguna cadena del sistema puede salirse de su linea de comentario.
+
+    `_ps_str` no escapa CR/LF, y hace bien: dentro de unas comillas dobles de
+    PowerShell son legitimos. Pero en un comentario `#` un salto de linea lo
+    termina, y lo que venga detras se parsea como codigo. La diferencia importa
+    porque parte de estos textos no los escribe ni el usuario ni el sistema
+    operativo: el titulo de `smart_warn`, `disk_wear` o `disk_hot` lleva el
+    FriendlyName que declara el firmware del disco, y este fichero se ejecuta
+    como Administrador por diseño.
+
+    El recorte a 300 es por legibilidad: un comentario mas largo que eso no lo
+    lee nadie y solo sirve para esconder el resto del script.
+    """
+    return re.sub(r"[\r\n\x00]+", " ", str(texto))[:300]
+
+
 def _plan_system_summary(si: SystemInfo, bench: Benchmark | None) -> str:
     """Para que equipo se genero este plan.
 
@@ -332,17 +350,19 @@ def _plan_system_summary(si: SystemInfo, bench: Benchmark | None) -> str:
              "#  EQUIPO PARA EL QUE SE GENERO ESTE PLAN",
              "#  Comprueba que coincide antes de ejecutarlo en otra maquina.",
              "# ==============================================================================",
-             f"#  Nombre: {si.hostname}  |  {si.os_name} {si.os_build}",
-             f"#  CPU:    {si.cpu_name} ({si.cpu_cores}C/{si.cpu_threads}T)",
+             f"#  Nombre: {_comentario(si.hostname)}  |  "
+             f"{_comentario(si.os_name)} {_comentario(si.os_build)}",
+             f"#  CPU:    {_comentario(si.cpu_name)} ({si.cpu_cores}C/{si.cpu_threads}T)",
              f"#  RAM:    {ram}",
-             f"#  Disco:  {si.system_drive} {si.system_drive_media}"]
+             f"#  Disco:  {_comentario(si.system_drive)} {_comentario(si.system_drive_media)}"]
     for g in si.gpus:
-        lines.append(f"#  GPU:    {gpu_label(g)}  |  driver {g.get('driver') or 'n/d'}")
+        lines.append(f"#  GPU:    {_comentario(gpu_label(g))}  |  "
+                     f"driver {_comentario(g.get('driver') or 'n/d')}")
     medida = (bench.gpu_info if bench else {}) or {}
     if medida.get("device", {}).get("name"):
-        lines.append(f"#  GPU medida por OpenCL: {medida['device']['name']}")
+        lines.append(f"#  GPU medida por OpenCL: {_comentario(medida['device']['name'])}")
     elif bench is not None and getattr(bench, "gpu_unavailable", ""):
-        lines.append(f"#  GPU no medible: {bench.gpu_unavailable}")
+        lines.append(f"#  GPU no medible: {_comentario(bench.gpu_unavailable)}")
     if bench is not None and bench.busy_during_run() >= BUSY_CPU_PCT:
         lines.append(f"#  AVISO: al medir habia un {bench.busy_during_run():.0f}% de CPU "
                      f"ocupada por otros programas; las notas de abajo estan tocadas.")
@@ -357,11 +377,12 @@ def _plan_component_summary(cards: list[ComponentCard]) -> str:
         note = (f"{card.score:.0f} pts (nota {card.letter})" if card.score is not None
                 else "sin medir" if card.measurable else "sin nota sintetica")
         margin = f"margen +{card.gain * 100:.0f}%" if card.gain > 0.005 else "sin margen estimado"
-        lines.append(f"#  {card.label}: {note} | {margin} | {len(card.findings)} hallazgo(s)")
+        lines.append(f"#  {_comentario(card.label)}: {note} | {margin} | "
+                     f"{len(card.findings)} hallazgo(s)")
         for f in card.findings:
             gain = f"+{f.gain * 100:.0f}%" if f.gain > 0 else "n/a"
             auto = "automatizado abajo" if f.id in PLAN_ACTIONS else "manual"
-            lines.append(f"#      - [{gain}] {f.title}  ({auto})")
+            lines.append(f"#      - [{gain}] {_comentario(f.title)}  ({auto})")
     return "\n".join(lines) + "\n"
 
 
@@ -382,21 +403,46 @@ def _plan_large_files(scan: ScanResult | None) -> str:
         lines.append("#  Rastreo parcial: se agoto el presupuesto de tiempo (--scan-time)")
     lines.append("#")
     for f in scan.files[:20]:
-        lines.append(f"#  {human_bytes(f['size']).rjust(9)}  {f['category'][:18].ljust(19)}"
-                     f"{f['age_days']:>5}d  {f['path']}")
+        lines.append(f"#  {human_bytes(f['size']).rjust(9)}  "
+                     f"{_comentario(f['category'])[:18].ljust(19)}"
+                     f"{f['age_days']:>5}d  {_comentario(f['path'])}")
     if scan.special:
         lines.append("#")
         lines.append("#  Archivos de sistema (NO borrar a mano):")
         for s in scan.special:
             size = human_bytes(s["size"]) if s["size"] else "-"
-            lines.append(f"#  {size.rjust(9)}  {s['name'].ljust(16)} {s['note']}")
+            lines.append(f"#  {size.rjust(9)}  {_comentario(s['name']).ljust(16)} "
+                         f"{_comentario(s['note'])}")
+    return "\n".join(lines) + "\n"
+
+
+def _plan_security(auditor: Auditor) -> str:
+    """Los riesgos, como comentario y por delante de todo lo automatizado.
+
+    Aqui no se automatiza nada a proposito: activar BitLocker sin haber guardado
+    antes la clave de recuperacion, o tocar la configuracion del antivirus desde
+    un script, son decisiones que tiene que tomar una persona sabiendo lo que
+    hace. Se enumeran y se dice como, que es lo util.
+    """
+    riesgos = security_findings(auditor.findings)
+    if not riesgos:
+        return ""
+    lines = ["\n# ==============================================================================",
+             "#  SEGURIDAD - REVISALO ANTES DE OPTIMIZAR NADA",
+             "#  Esto no acelera el equipo. Son riesgos, y aqui no se toca ninguno solo.",
+             "# =============================================================================="]
+    for f in riesgos:
+        lines.append(f"#  [{_comentario(f.severity).upper()}] {_comentario(f.title)}")
+        for paso in f.steps:
+            lines.append(f"#      - {_comentario(paso)}")
     return "\n".join(lines) + "\n"
 
 
 def export_plan(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Auditor) -> int:
     blocks: list[str] = [_plan_system_summary(si, bench),
                          _plan_component_summary(build_component_cards(si, bench, auditor)),
-                         _plan_large_files(getattr(auditor, "scan", None))]
+                         _plan_large_files(getattr(auditor, "scan", None)),
+                         _plan_security(auditor)]
     n = 0
     for f in sorted([x for x in auditor.findings if x.gain > 0], key=priority_rank):
         action = PLAN_ACTIONS.get(f.id)
@@ -404,12 +450,20 @@ def export_plan(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
             continue
         n += 1
         desc, code, capture = action
-        gain = f"ganancia estimada +{f.gain * 100:.0f}% ({f.gain_note})"
+        # `gain_note` es prosa libre —no hay conjunto cerrado con el que validarla
+        # en origen, como si se hace con la severidad o el esfuerzo—, asi que se
+        # escapa aqui. Cae dentro de las comillas dobles de `-Impacto`, donde una
+        # comilla parte la cadena y un `$` inyecta una variable.
+        nota = _ps_str(_comentario(f.gain_note))
+        gain = f"ganancia estimada +{f.gain * 100:.0f}% ({nota})"
         deshacer = f" -Deshacer {{\n    {capture}\n}}" if capture else ""
         blocks.append(
             f"\n# --- BLOQUE {n}: {desc} ---\n"
             f'Bloque -Titulo "{desc}" `\n'
-            f'  -Hallazgo "Hallazgo: {_ps_str(f.title)}" `\n'
+            # `_comentario` antes que `_ps_str`: un salto de linea es legitimo
+            # dentro de unas comillas dobles de PowerShell, pero aqui partiria la
+            # llamada a `Bloque` en dos y dejaria media orden suelta a la vista.
+            f'  -Hallazgo "Hallazgo: {_ps_str(_comentario(f.title))}" `\n'
             f'  -Impacto "{gain} | esfuerzo {f.effort} | riesgo {f.risk}"'
             f"{deshacer} -Accion {{\n    {code}\n}}\n"
         )
@@ -421,9 +475,9 @@ def export_plan(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
                  "#  ACCIONES QUE NO SE PUEDEN AUTOMATIZAR (requieren decision o hardware)",
                  "# =============================================================================="]
         for f in manual:
-            lines.append(f"#  · {f.title}  (+{f.gain * 100:.0f}%)")
+            lines.append(f"#  · {_comentario(f.title)}  (+{f.gain * 100:.0f}%)")
             for s in f.steps:
-                lines.append(f"#      - {s}")
+                lines.append(f"#      - {_comentario(s)}")
         blocks.append("\n".join(lines) + "\n")
 
     content = (PLAN_HEADER.format(date=f"{datetime.now():%d/%m/%Y %H:%M}", app=APP_NAME,
