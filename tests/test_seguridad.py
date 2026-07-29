@@ -774,6 +774,54 @@ class LoQueLasSalidasNoEscapan(unittest.TestCase):
             self._añadir(id="Disco SanDisk")
         self.assertIn("a-z0-9_", str(caso.exception))
 
+    def test_el_html_escapa_la_severidad_aunque_add_no_la_haya_visto(self):
+        """`add()` no es la única puerta por la que entra un `Finding`.
+
+        Varios módulos y varios tests construyen `Finding(...)` directamente,
+        sin pasar por la validación. Mientras el HTML interpolaba `f.severity`
+        crudo, la garantía del escapado dependía de que nadie lo hiciera nunca
+        —y ya lo hacen—. Ahora el HTML escapa en los cinco sitios, así que la
+        validación de `add()` cubre el ancla `#h-{id}`, que no se puede escapar,
+        y no tiene que cubrir además esto.
+        """
+        hostil = Finding(
+            id="hostil", title="T", severity='high"><script>alert(1)</script>',
+            category="fluidez", component="disk", detail="d", gain=0.1,
+            gain_note="n", effort="bajo", risk="nulo", steps=["un paso"])
+        a = Auditor(SystemInfo(), None)
+        a.findings = [hostil]
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "informe.html"
+            export_html(destino, SystemInfo(), None, a,
+                        project_improvement(None, a.findings))
+            html = destino.read_text(encoding="utf-8")
+        # El informe embebe JS propio, así que `<script>` aparece de forma
+        # legítima: lo que no puede aparecer es el que venía en el hallazgo.
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+
+    def test_una_severidad_no_declarada_no_tira_el_informe(self):
+        # Antes ni se llegaba al escapado: el recuento de hallazgos indexaba
+        # `SEVERITY_ORDER[...]` y saltaba un KeyError con el informe a medias.
+        # Ordena la última, que es lo que significa «no la conozco».
+        hostil = Finding(id="hostil", title="T", severity="inventada",
+                         category="fluidez", component="disk", detail="d",
+                         gain=0.1, gain_note="n", effort="bajo", risk="nulo",
+                         steps=["un paso"])
+        a = Auditor(SystemInfo(), None)
+        a.findings = [hostil]
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "informe.html"
+            export_html(destino, SystemInfo(), None, a,
+                        project_improvement(None, a.findings))
+            self.assertIn("inventada", destino.read_text(encoding="utf-8"))
+        # Y la consola, que tenía el mismo recuento con la misma indexación.
+        from quilate.report import print_report
+        salida = io.StringIO()
+        with redirect_stdout(salida):
+            print_report(SystemInfo(), None, a, project_improvement(None, a.findings))
+        self.assertIn("INVENTADA", salida.getvalue())
+
     def test_todos_los_hallazgos_del_auditor_cumplen(self):
         # Sobre el código, no sobre lo que los tests ejerciten: una comprobación
         # que solo salta en un equipo concreto no puede reventar allí.

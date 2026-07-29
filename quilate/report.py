@@ -238,8 +238,11 @@ def print_report(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
         counts: dict[str, int] = {}
         for f in findings:
             counts[f.severity] = counts.get(f.severity, 0) + 1
+        # `.get` y no indexación: ver el recuento hermano de `html_export`. Una
+        # severidad no declarada ordena la última en vez de tirar el informe.
         summary = "  ".join(f"{sev_label(s)}: {n}" for s, n in
-                            sorted(counts.items(), key=lambda x: SEVERITY_ORDER[x[0]]))
+                            sorted(counts.items(),
+                                   key=lambda x: SEVERITY_ORDER.get(x[0], 9)))
         print(f"  {auditor.checks_run} comprobaciones · {len(findings)} hallazgos     {summary}\n")
         for i, f in enumerate(findings, 1):
             sev = sev_label(f.severity)

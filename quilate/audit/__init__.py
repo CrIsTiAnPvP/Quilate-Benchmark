@@ -67,19 +67,25 @@ class Auditor(ChecksRendimiento, ChecksSeguridad,
     def add(self, **kwargs) -> None:
         """Registra un hallazgo, validando antes lo que el HTML no escapa.
 
-        `export_html` interpola `f.severity` y `f.id` sin pasarlos por `_e()`,
-        y `export_plan` hace lo propio con `f.effort` y `f.risk` dentro de unas
-        comillas dobles de PowerShell. Hoy es seguro porque los cuatro salen de
-        constantes escritas en este fichero. Pero es una invariante que nadie ha
-        declarado: el día que una comprobación nueva construya un `id` con el
-        nombre de un disco —cosa que el firmware del dispositivo decide, no
-        nosotros— el escape no está.
+        Qué depende hoy de cada validación, que ya no es lo mismo para las tres:
 
-        Se valida aquí, en el origen, y no aplicando `_e()` en el HTML, porque
-        así la garantía vale para las cuatro salidas y no solo para una. Falla
-        ruidosamente a propósito: es un error de programación del propio
-        Quilate, no un dato del sistema que haya que tolerar, y el sitio donde
-        tiene que saltar es el del programador y no el informe del usuario.
+        · `id` — el HTML lo usa como ancla (`#h-{id}`) y como destino del enlace
+          que apunta a ella. Un ancla no se puede escapar sin dejar de ser la
+          misma ancla, así que **esto sigue siendo la única garantía que hay**.
+          Es la razón principal de que este método valide.
+        · `severity` — el HTML ya lo pasa por `_e()` en los cinco sitios donde
+          lo interpola, así que el escapado no depende de aquí. Se sigue
+          validando porque el valor también da nombre a una clase CSS (`b-high`)
+          y porque una severidad inventada rompería el orden del informe.
+        · `effort` y `risk` — van al `.ps1` sin escapar, dentro de unas comillas
+          dobles de PowerShell. Ahí esta validación sí es lo único que hay.
+
+        Se valida en el origen, y no solo en cada destino, porque así la
+        garantía vale para las cuatro salidas y no hay que acordarse en cada
+        una. Falla ruidosamente a propósito: es un error de programación del
+        propio Quilate, no un dato del sistema que haya que tolerar, y el sitio
+        donde tiene que saltar es el del programador y no el informe del
+        usuario.
         """
         severity = kwargs.get("severity")
         if severity not in SEVERITY_ORDER:

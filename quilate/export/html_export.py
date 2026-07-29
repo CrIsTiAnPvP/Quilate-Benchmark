@@ -1348,14 +1348,19 @@ def _findings_panel(auditor: Auditor, bench: Benchmark | None) -> str:
     counts: dict[str, int] = {}
     for f in auditor.findings:
         counts[f.severity] = counts.get(f.severity, 0) + 1
-    chips = "".join(f'<span class="badge b-{s}">{n} {SEVERITY_LABELS.get(s, s)}</span>'
-                    for s, n in sorted(counts.items(), key=lambda x: SEVERITY_ORDER[x[0]]))
+    chips = "".join(f'<span class="badge b-{_e(s)}">{n} {_e(SEVERITY_LABELS.get(s, s))}</span>'
+                    # `.get` y no indexación: una severidad que no esté declarada
+                    # ordena la última, pero no tira el informe entero. Es la
+                    # convención del resto del proyecto; estos dos recuentos —el
+                    # del HTML y el de la consola— eran los únicos que indexaban.
+                    for s, n in sorted(counts.items(),
+                                       key=lambda x: SEVERITY_ORDER.get(x[0], 9)))
     hint = ""
     comp = bench.component_scores() if bench else {}
     if comp:
         weakest = min(comp, key=lambda k: comp[k])
         hint = (f'<div class="hint">Cuello de botella: '
-                f"<b>{COMPONENT_LABELS.get(weakest, weakest)}</b> "
+                f"<b>{_e(COMPONENT_LABELS.get(weakest, weakest))}</b> "
                 f"({comp[weakest]:.0f} pts)</div>")
     return (f'<div class="panel"><div class="lbl">Hallazgos</div>'
             f'<div class="chips">{chips or "ninguno"}</div>{hint}</div>')
@@ -1601,7 +1606,7 @@ def _howto_subcard(card: ComponentCard) -> str:
         steps = "".join(f"<li>{_e(s)}</li>" for s in f.steps)
         gain = (f'<span class="gain">+{f.gain * 100:.0f}%</span> ' if f.gain else "")
         blocks += (f'<div class="howto-item"><h4>{i}. {_e(f.title)}</h4>'
-                   f'<div class="tags">{gain}<span class="badge b-{f.severity}">{f.severity}'
+                   f'<div class="tags">{gain}<span class="badge b-{_e(f.severity)}">{_e(f.severity)}'
                    f"</span> &nbsp; esfuerzo {_e(f.effort)} · riesgo {_e(f.risk)}"
                    f"{' · ' + _e(f.gain_note) if f.gain_note else ''}</div>"
                    f"<ol>{steps}</ol></div>")
@@ -1655,7 +1660,7 @@ def _html_component_cards(cards: list[ComponentCard]) -> str:
                 gain = (f'<span class="gain">+{f.gain * 100:.0f}%</span>' if f.gain
                         else '<span style="color:var(--dim)">sin ganancia directa</span>')
                 items += (f'<li>{gain} &nbsp; <a href="#h-{_e(f.id)}">{_e(f.title)}</a>'
-                          f'<div class="tags"><span class="badge b-{f.severity}">{f.severity}'
+                          f'<div class="tags"><span class="badge b-{_e(f.severity)}">{_e(f.severity)}'
                           f"</span> &nbsp; {_e(f.category)} · esfuerzo {_e(f.effort)} · riesgo "
                           f"{_e(f.risk)} · {_e(f.gain_note)}</div></li>")
             block.append(f'<div class="sub-h">{head}</div><ul class="imp">{items}</ul>')
@@ -2018,7 +2023,7 @@ def _projection_tables(projection: dict[str, Any]) -> str:
     for k, cur in projection["current_components"].items():
         gain = projection["component_gain"].get(k, 0.0)
         proj = projection["projected_components"][k]
-        trs += (f"<tr><td>{COMPONENT_LABELS.get(k, k)}</td><td>{cur:.0f} pts</td>"
+        trs += (f"<tr><td>{_e(COMPONENT_LABELS.get(k, k))}</td><td>{cur:.0f} pts</td>"
                 f"<td>{proj:.0f} pts</td>"
                 f"<td class=\"gain\">{'+' + format(gain * 100, '.0f') + '%' if gain else '—'}</td>"
                 f"<td>{_html_bar(proj)}</td></tr>")
@@ -2153,7 +2158,7 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
             trs += (f'<tr><td>{i}</td><td><a href="#h-{_e(f.id)}">{_e(f.title)}</a></td>'
                     f'<td class="gain">+{f.gain * 100:.0f}%</td>'
                     f"<td>{_e(f.effort)}</td><td>{_e(f.risk)}</td>"
-                    f'<td><span class="badge b-{f.severity}">{f.severity}</span></td></tr>')
+                    f'<td><span class="badge b-{_e(f.severity)}">{_e(f.severity)}</span></td></tr>')
         secs.append(Seccion("plan", "Plan de acción priorizado", "i-list",
                             '<div class="card"><div class="tw"><table>'
                             "<tr><th>#</th><th>Acción</th><th>Ganancia est.</th>"
@@ -2181,7 +2186,7 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
                           f"Los {len(f.steps)} pasos para solucionarlo están en la ficha de "
                           f"{_e(labels[group])}</a></p>")
             detail += (f'<div class="card finding" id="h-{_e(f.id)}"><h3>{_e(f.title)}</h3>'
-                       f'<div class="tags"><span class="badge b-{f.severity}">{f.severity}</span>'
+                       f'<div class="tags"><span class="badge b-{_e(f.severity)}">{_e(f.severity)}</span>'
                        f" &nbsp; {_e(f.category)} · esfuerzo {_e(f.effort)} · riesgo "
                        f"{_e(f.risk)} &nbsp; {gain}</div><p>{_e(f.detail)}</p>{enlace}</div>")
         secs.append(Seccion("hallazgos", "Hallazgos en detalle", "i-alert", detail,
@@ -2199,7 +2204,7 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
     for s in secs:
         # Punto de severidad en la propia navegación: dónde está lo urgente sin
         # tener que entrar a mirar sección por sección.
-        punto = f'<span class="sev s-{s.severity}"></span>' if s.severity else ""
+        punto = f'<span class="sev s-{_e(s.severity)}"></span>' if s.severity else ""
         nav += (f'<a href="#{s.sid}" data-target="{s.sid}" title="{_e(s.label)}">'
                 f"{_icon(s.icon)}{_e(NAV_LABELS.get(s.sid, s.label))}{punto}</a>")
     body = "".join(_section(s) for s in secs)
