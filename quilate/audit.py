@@ -50,6 +50,14 @@ SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 # apunta a él, sin pasar por `_e()`. Restringirlos aquí convierte esa convención
 # en una garantía: ver `Auditor.add`.
 _ID_VALIDO = re.compile(r"^[a-z0-9_]+$")
+
+# Los otros dos campos de conjunto cerrado. Se declaran igual que la severidad y
+# por el mismo motivo: acaban interpolados en el `.ps1` que se ejecuta como
+# Administrador, dentro de unas comillas dobles donde una comilla parte la cadena.
+# `gain_note` no puede entrar aquí —es prosa libre— y se escapa en su destino.
+_ESFUERZOS = ("bajo", "medio", "alto")
+_RIESGOS = ("nulo", "bajo", "medio", "alto")
+
 SEVERITY_TEXT = {"critical": "CRÍTICO", "high": "ALTO", "medium": "MEDIO",
                  "low": "BAJO", "info": "INFO"}
 SEVERITY_COLOR = {"critical": "RED", "high": "RED", "medium": "YELLOW",
@@ -188,10 +196,12 @@ class Auditor:
         """Registra un hallazgo, validando antes lo que el HTML no escapa.
 
         `export_html` interpola `f.severity` y `f.id` sin pasarlos por `_e()`,
-        y hoy es seguro porque los dos salen de constantes escritas en este
-        fichero. Pero es una invariante que nadie ha declarado: el día que una
-        comprobación nueva construya un `id` con el nombre de un disco —cosa
-        que el firmware del dispositivo decide, no nosotros— el escape no está.
+        y `export_plan` hace lo propio con `f.effort` y `f.risk` dentro de unas
+        comillas dobles de PowerShell. Hoy es seguro porque los cuatro salen de
+        constantes escritas en este fichero. Pero es una invariante que nadie ha
+        declarado: el día que una comprobación nueva construya un `id` con el
+        nombre de un disco —cosa que el firmware del dispositivo decide, no
+        nosotros— el escape no está.
 
         Se valida aquí, en el origen, y no aplicando `_e()` en el HTML, porque
         así la garantía vale para las cuatro salidas y no solo para una. Falla
@@ -210,6 +220,12 @@ class Auditor:
                 f"identificador de hallazgo no válido: {identificador!r}. Tiene que "
                 f"casar con {_ID_VALIDO.pattern}: se usa como ancla del HTML "
                 f"(«#h-{{id}}») y ahí no se escapa nada")
+        for campo, validos in (("effort", _ESFUERZOS), ("risk", _RIESGOS)):
+            valor = kwargs.get(campo)
+            if valor not in validos:
+                raise ValueError(
+                    f"{campo} no declarado: {valor!r}. Los válidos son "
+                    f"{', '.join(validos)}: van al `.ps1` sin escapar")
         self.findings.append(Finding(**kwargs))
 
     # ------------------------------------------------------------------ core --

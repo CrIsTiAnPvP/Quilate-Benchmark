@@ -450,7 +450,12 @@ def export_plan(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
             continue
         n += 1
         desc, code, capture = action
-        gain = f"ganancia estimada +{f.gain * 100:.0f}% ({f.gain_note})"
+        # `gain_note` es prosa libre —no hay conjunto cerrado con el que validarla
+        # en origen, como si se hace con la severidad o el esfuerzo—, asi que se
+        # escapa aqui. Cae dentro de las comillas dobles de `-Impacto`, donde una
+        # comilla parte la cadena y un `$` inyecta una variable.
+        nota = _ps_str(_comentario(f.gain_note))
+        gain = f"ganancia estimada +{f.gain * 100:.0f}% ({nota})"
         deshacer = f" -Deshacer {{\n    {capture}\n}}" if capture else ""
         blocks.append(
             f"\n# --- BLOQUE {n}: {desc} ---\n"

@@ -27,7 +27,8 @@ from pathlib import Path
 
 from quilate import audit
 from quilate.audit import (SEGURIDAD, SEVERITY_ORDER, Auditor, Finding, NoAplica,
-                           SinDato, _estado_antivirus, security_findings)
+                           SinDato, _ESFUERZOS, _RIESGOS, _estado_antivirus,
+                           security_findings)
 from quilate.const import IS_WINDOWS
 from quilate.platform_utils import PSResult, _system_drive
 from quilate.export.html_export import export_html
@@ -666,13 +667,19 @@ class ActualizacionesDeSeguridad(unittest.TestCase):
         self.assertTrue(con_flag.check_updates)
 
 
-class LoQueElHtmlNoEscapa(unittest.TestCase):
-    """`f.severity` y `f.id` se interpolan en el HTML sin pasar por `_e()`.
+class LoQueLasSalidasNoEscapan(unittest.TestCase):
+    """Los cuatro campos que se interpolan crudos, y el que no puede validarse.
 
-    Hoy es seguro porque los dos salen de constantes escritas en `audit.py`,
-    pero era una invariante que nadie había declarado. Validarla en `add()` la
-    convierte en garantía, y encima vale para las cuatro salidas y no solo para
-    el HTML. Ver `Auditor.add`.
+    `f.severity` y `f.id` van al HTML sin pasar por `_e()`; `f.effort` y
+    `f.risk` van al `.ps1` dentro de unas comillas dobles de PowerShell, en un
+    fichero que se ejecuta como Administrador por diseño. Los cuatro salen hoy
+    de constantes escritas en `audit.py`, pero era una invariante que nadie
+    había declarado: validarla en `add()` la convierte en garantía, y vale para
+    las cuatro salidas de una vez.
+
+    `gain_note` no entra en ese trato porque es prosa libre y no hay conjunto
+    cerrado con el que validarla. Esa se escapa en su destino, y aquí se
+    comprueba que no puede partir el script.
     """
 
     def _añadir(self, **cambios):
@@ -697,6 +704,60 @@ class LoQueElHtmlNoEscapa(unittest.TestCase):
             with self.subTest(severidad=severidad):
                 with self.assertRaises(ValueError):
                     self._añadir(severity=severidad)
+
+    def test_todos_los_esfuerzos_y_riesgos_declarados_valen(self):
+        for esfuerzo in _ESFUERZOS:
+            with self.subTest(effort=esfuerzo):
+                self._añadir(effort=esfuerzo)
+        for riesgo in _RIESGOS:
+            with self.subTest(risk=riesgo):
+                self._añadir(risk=riesgo)
+
+    def test_un_esfuerzo_o_un_riesgo_inventados_no_pasan(self):
+        hostiles = ('" -Accion { Remove-Item C:\\ }', "$(whoami)", "BAJO", "",
+                    None, 1, "bajo ", "ninguno")
+        for valor in hostiles:
+            with self.subTest(effort=valor):
+                with self.assertRaises(ValueError):
+                    self._añadir(effort=valor)
+            with self.subTest(risk=valor):
+                with self.assertRaises(ValueError):
+                    self._añadir(risk=valor)
+
+    def test_nulo_solo_vale_para_el_riesgo(self):
+        # Los dos conjuntos no son el mismo: un esfuerzo «nulo» no existe —algo
+        # habrá que hacer— y confundirlos delataría una copia sin leer.
+        self._añadir(risk="nulo")
+        with self.assertRaises(ValueError):
+            self._añadir(effort="nulo")
+
+    def test_la_nota_de_ganancia_no_puede_partir_el_script(self):
+        # La que no se puede validar en origen. Cae dentro de las comillas
+        # dobles de `-Impacto`, donde una comilla cierra la cadena y lo que
+        # venga detrás lo parsea PowerShell como más argumentos de `Bloque`.
+        a = Auditor(SystemInfo(), None)
+        a.add(id="trim_off", title="T", severity="high", category="almacenamiento",
+              component="disk", detail="d", gain=0.1,
+              gain_note='fluidez" -Accion { Remove-Item C:\\ } #',
+              effort="bajo", risk="nulo", steps=[])
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "plan.ps1"
+            export_plan(destino, SystemInfo(), None, a)
+            script = destino.read_text(encoding="utf-8")
+        self.assertNotIn('fluidez" -Accion', script)
+        self.assertIn('fluidez`" -Accion', script)
+
+    def test_la_nota_de_ganancia_no_puede_inyectar_una_variable(self):
+        a = Auditor(SystemInfo(), None)
+        a.add(id="trim_off", title="T", severity="high", category="almacenamiento",
+              component="disk", detail="d", gain=0.1, gain_note="coste $(whoami)",
+              effort="bajo", risk="nulo", steps=[])
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "plan.ps1"
+            export_plan(destino, SystemInfo(), None, a)
+            script = destino.read_text(encoding="utf-8")
+        self.assertNotIn("coste $(whoami)", script)
+        self.assertIn("coste `$(whoami)", script)
 
     def test_un_id_con_html_no_pasa(self):
         # El caso que esto viene a impedir: un `id` construido con el nombre de
@@ -723,6 +784,12 @@ class LoQueElHtmlNoEscapa(unittest.TestCase):
         for severidad in set(re.findall(r'severity="([^"]+)"', fuente)):
             with self.subTest(severidad=severidad):
                 self.assertIn(severidad, SEVERITY_ORDER)
+        for esfuerzo in set(re.findall(r'effort="([^"]+)"', fuente)):
+            with self.subTest(esfuerzo=esfuerzo):
+                self.assertIn(esfuerzo, _ESFUERZOS)
+        for riesgo in set(re.findall(r'risk="([^"]+)"', fuente)):
+            with self.subTest(riesgo=riesgo):
+                self.assertIn(riesgo, _RIESGOS)
 
 
 class Decodificador(unittest.TestCase):
