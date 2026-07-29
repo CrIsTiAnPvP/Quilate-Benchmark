@@ -58,6 +58,72 @@ def variables() -> dict[str, str]:
                                             raiz.group(1))}
 
 
+class NavegarSinRaton(unittest.TestCase):
+    """Dos cosas concretas, no una auditoría de accesibilidad entera.
+
+    El informe se maqueta con una barra superior de una docena de enlaces antes
+    del contenido, y trae un buscador que filtra secciones sin recargar nada.
+    Las dos cosas son cómodas con ratón y un estorbo sin él: llegar al informe
+    obliga a tabular por toda la navegación en cada carga, y el resultado del
+    filtro solo existe como un número que aparece en pantalla.
+    """
+
+    def informe(self) -> str:
+        import io
+        import tempfile
+        from pathlib import Path
+        from quilate.audit import Auditor
+        from quilate.export.html_export import export_html
+        from quilate.projection import project_improvement
+        from quilate.sysinfo import SystemInfo
+
+        si = SystemInfo()
+        auditor = Auditor(si, None)
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "informe.html"
+            export_html(destino, si, None, auditor, project_improvement(None, []))
+            return destino.read_text(encoding="utf-8")
+
+    def test_hay_un_enlace_para_saltar_al_contenido(self):
+        html = self.informe()
+        self.assertIn('href="#contenido"', html)
+        self.assertIn("Saltar al contenido", html)
+
+    def test_el_destino_del_salto_existe(self):
+        # Un enlace de salto que apunta a un ancla inexistente no salta a
+        # ningún sitio y encima parece que funciona.
+        self.assertIn('id="contenido"', self.informe())
+
+    def test_el_salto_es_lo_primero_del_cuerpo(self):
+        # Si va después de la navegación no sirve para nada: lo que ahorra es
+        # precisamente pasar por ella.
+        html = self.informe()
+        cuerpo = html[html.index("<body"):]
+        self.assertLess(cuerpo.index("Saltar al contenido"),
+                        cuerpo.index('class="topbar"'))
+
+    def test_el_salto_se_ve_al_recibir_el_foco(self):
+        # Escondido siempre sirve al lector de pantalla pero no a quien tabula
+        # mirando: un enlace que actúa sin aparecer es peor que no tenerlo.
+        self.assertIn(".skip:focus", HTML_CSS)
+        regla = HTML_CSS[HTML_CSS.index(".skip:focus"):][:400]
+        self.assertIn("clip:auto", regla, "sin deshacer el recorte sigue invisible")
+
+    def test_el_contador_del_filtro_se_anuncia(self):
+        # Cambia sin recargar nada: sin esto, quien no ve la pantalla escribe en
+        # el buscador y no se entera de que no queda ninguna sección.
+        html = self.informe()
+        contador = html[html.index('id="buscar-cnt"') - 60:][:200]
+        self.assertIn('aria-live="polite"', contador)
+
+    def test_el_contador_no_interrumpe_en_cada_tecla(self):
+        # `assertive` interrumpiría al lector con cada pulsación mientras se
+        # escribe, que es justo cuando la persona está haciendo otra cosa.
+        html = self.informe()
+        contador = html[html.index('id="buscar-cnt"') - 60:][:200]
+        self.assertNotIn('aria-live="assertive"', contador)
+
+
 class Formula(unittest.TestCase):
     """Los extremos conocidos, para que un error en la fórmula no pase por bueno."""
 

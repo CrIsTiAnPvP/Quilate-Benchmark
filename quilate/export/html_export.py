@@ -209,6 +209,16 @@ a{color:var(--acc);text-underline-offset:2px}
 .vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
 clip:rect(0 0 0 0);white-space:nowrap;border:0}
 
+/* El enlace de salto se esconde con .vh como cualquier otra etiqueta para
+   lectores, pero al recibir el foco tiene que verse: quien tabula mirando la
+   pantalla necesita saber dónde ha ido a parar el foco, y un enlace que actúa
+   sin aparecer es peor que no tenerlo. Deshacer el recorte hace falta entero:
+   con `clip` puesto, cambiar solo la posición lo deja igual de invisible. */
+.skip:focus{position:fixed;top:10px;left:10px;z-index:100;width:auto;height:auto;
+margin:0;padding:10px 16px;clip:auto;overflow:visible;border-radius:var(--r-xs);
+background:var(--ink2);border:1px solid var(--acc);color:var(--acc);
+font-weight:600;box-shadow:var(--sh-lg)}
+
 /* Las cifras se comparan en vertical por columnas: sin cifras de ancho fijo,
    los millares bailan y dos números del mismo orden parecen distintos. */
 table,.gnum,.n,.cs-num,.big,.kvs div,.chead .note,.mm-n{font-variant-numeric:tabular-nums}
@@ -2271,6 +2281,12 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         f"<style>{HTML_CSS}</style></head>"
         f'<body data-host="{_e(_slug(si.hostname))}" data-stamp="{date}">'
         f"{_sprite()}"
+        # Lo primero que encuentra el tabulador, antes del logo y de la
+        # navegación entera. Sin esto, llegar al informe con teclado obliga a
+        # pasar por los ~12 enlaces de la barra superior en cada carga, y quien
+        # usa lector de pantalla los oye todos. Va con la clase `.vh`, que ya
+        # existe: invisible hasta que recibe el foco.
+        '<a class="vh skip" href="#contenido">Saltar al contenido</a>'
         '<header class="topbar"><div class="prog"></div><div class="tb">'
         f'<a class="logo" href="#resumen" data-target="resumen">{_logo(uid="nav")}'
         "<span>Quilate <b>Suite</b></span></a>"
@@ -2280,7 +2296,11 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         '<input id="buscar" type="search" placeholder="Filtrar el informe…" '
         'autocomplete="off" list="sugerencias">'
         f"{lista_sugerencias}"
-        '<span class="cnt" id="buscar-cnt"></span>'
+        # El contador del filtro cambia sin que se recargue nada: sin
+        # `aria-live`, quien no ve la pantalla escribe en el buscador y no se
+        # entera de que ha pasado de 40 secciones a 2, ni de que no queda
+        # ninguna. «polite» y no «assertive» porque se actualiza en cada tecla.
+        '<span class="cnt" id="buscar-cnt" role="status" aria-live="polite"></span>'
         f"{chips_sugerencias}</div>"
         '<button class="btn" type="button" id="export-sel" disabled '
         'title="Marca secciones con su casilla para exportarlas juntas en un solo fichero">'
@@ -2294,7 +2314,7 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         "</header>"
         '<div class="layout">'
         f"{_sidebar(si, bench, auditor, projection, secs)}"
-        '<main class="main">'
+        '<main class="main" id="contenido">'
         '<header class="page">'
         f'{_logo("brandmark hero", uid="cab")}'
         '<div class="htxt"><div class="kicker">Quilate Suite</div>'
