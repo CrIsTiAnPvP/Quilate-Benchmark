@@ -146,8 +146,16 @@ class ChecksSeguridad:
         if protegido is None:
             raise SinDato(f"estado de BitLocker no reconocido en {unidad}: "
                           f"«{sistema.get('ProtectionStatus')}»")
+
+        # La misma respuesta ya trae los demás volúmenes: mirarlos no cuesta
+        # nada y cifrar solo el disco del sistema deja fuera justo donde mucha
+        # gente guarda lo que le importa.
+        sin_cifrar_datos = self._volumenes_de_datos_sin_cifrar(rows, unidad)
+
         if protegido:
-            return f"{unidad} cifrado"
+            return (f"{unidad} cifrado"
+                    + (f" · {len(sin_cifrar_datos)} volumen(es) de datos sin cifrar"
+                       if sin_cifrar_datos else ""))
 
         self.add(
             id="sin_cifrado", title=f"El disco del sistema ({unidad}) no está cifrado",
@@ -165,6 +173,61 @@ class ChecksSeguridad:
                    "El cifrado inicial tarda y conviene hacerlo con el portátil enchufado",
                    "Si tu edición de Windows no lo incluye, VeraCrypt hace lo mismo"])
         return f"{unidad} SIN cifrar"
+
+    def _volumenes_de_datos_sin_cifrar(self, rows, unidad: str) -> list[str]:
+        """Los demás volúmenes fijos que están sin cifrar. Devuelve sus letras.
+
+        Sale de la misma respuesta que ya llegó, así que no cuesta ni una
+        consulta. Se emite aparte del disco de sistema y con menos gravedad
+        porque son dos situaciones distintas: sin cifrar el de sistema, quien
+        se lleve el equipo entra en la sesión y en todo; sin cifrar un disco de
+        datos, se lleva los archivos que haya en él. Malo, pero no lo mismo.
+
+        Los extraíbles se excluyen a propósito. Un USB o un disco externo sin
+        cifrar es lo normal y avisar de cada uno convertiría la comprobación en
+        ruido que se aprende a ignorar — que es como se pierde también el aviso
+        del disco de sistema.
+        """
+        fijos = {str(v.get("mount") or "").rstrip("\\").upper()
+                 for v in self.si.disks
+                 if v.get("kind") == "local" and not v.get("ignored")}
+        sin_cifrar = []
+        for fila in rows:
+            punto = str(fila.get("MountPoint") or "").rstrip("\\").upper()
+            if not punto or punto == unidad.upper() or punto not in fijos:
+                continue
+            estado = self._estado_cifrado(fila.get("ProtectionStatus"))
+            if estado is None:
+                estado = self._estado_cifrado(fila.get("VolumeStatus"))
+            # Un estado que no se reconoce no es «sin cifrar»: se salta, igual
+            # que se hace con el volumen de sistema.
+            if estado is False:
+                sin_cifrar.append(punto)
+        if not sin_cifrar:
+            return []
+
+        lista = ", ".join(sorted(sin_cifrar))
+        self.add(
+            id="sin_cifrado_datos",
+            title=f"Volúmenes de datos sin cifrar ({lista})",
+            severity="medium", category=SEGURIDAD, component="disk",
+            detail="El disco del sistema no es el único que guarda cosas. Estos volúmenes "
+                   "fijos no están cifrados, así que quien se lleve el equipo o solo esa "
+                   "unidad lee lo que haya dentro sin necesidad de tu contraseña. Es "
+                   "frecuente después de cifrar el disco de sistema y dar el trabajo por "
+                   "hecho: el segundo disco, donde suelen estar las fotos y los documentos "
+                   "grandes, se queda como estaba. Los discos externos y las memorias USB no "
+                   "se cuentan aquí.",
+            gain=0.0,
+            gain_note="no es una optimización: es confidencialidad de tus archivos",
+            effort="medio", risk="medio",
+            steps=["Panel de control → Cifrado de unidad BitLocker → Activar en esa unidad",
+                   "GUARDA LA CLAVE DE RECUPERACIÓN de cada volumen por separado y fuera "
+                   "de este equipo: son claves distintas",
+                   "Marca «Desbloquear automáticamente» si no quieres teclearla en cada "
+                   "arranque; la unidad sigue cifrada frente a quien se lleve el disco",
+                   "Cifra con el equipo enchufado: el primer pase tarda según lo que ocupe"])
+        return sin_cifrar
 
 
     def check_secure_boot(self) -> str:

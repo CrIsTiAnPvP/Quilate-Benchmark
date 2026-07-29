@@ -858,6 +858,68 @@ class CifradoDelDisco(unittest.TestCase):
         with self.assertRaises(NoAplica):
             self._auditar(PSResult([{"disponible": False}]))
 
+    def _con_volumenes(self, filas, discos):
+        si = SystemInfo()
+        si.system_drive = "C:"
+        si.disks = discos
+        a = Auditor(si, None)
+        with patched(audit.seguridad, elevado={"bitlocker": PSResult(filas)}):
+            return a, a.check_disk_encryption()
+
+    def volumen_local(self, mount, kind="local"):
+        return {"mount": mount, "kind": kind, "ignored": kind != "local"}
+
+    def test_un_disco_de_datos_sin_cifrar_se_avisa_aparte(self):
+        # Cifrar el sistema y dar el trabajo por hecho es el caso frecuente: el
+        # segundo disco, donde suelen estar las fotos, se queda como estaba.
+        a, resumen = self._con_volumenes(
+            [self.volumen("C:"), self.volumen("D:", proteccion=0, estado=0)],
+            [self.volumen_local("C:\\"), self.volumen_local("D:\\")])
+        self.assertEqual([f.id for f in a.findings], ["sin_cifrado_datos"])
+        f = a.findings[0]
+        self.assertEqual((f.severity, f.category, f.gain), ("medium", SEGURIDAD, 0.0))
+        self.assertIn("D:", f.title)
+        self.assertIn("sin cifrar", resumen)
+
+    def test_los_extraibles_no_cuentan(self):
+        # Un USB sin cifrar es lo normal. Avisar de cada uno convertiría esto en
+        # ruido que se aprende a ignorar, y con él el aviso del disco de sistema.
+        a, _ = self._con_volumenes(
+            [self.volumen("C:"), self.volumen("E:", proteccion=0, estado=0)],
+            [self.volumen_local("C:\\"), self.volumen_local("E:\\", kind="removable")])
+        self.assertEqual(a.findings, [])
+
+    def test_los_volumenes_de_datos_cifrados_no_generan_nada(self):
+        a, resumen = self._con_volumenes(
+            [self.volumen("C:"), self.volumen("D:")],
+            [self.volumen_local("C:\\"), self.volumen_local("D:\\")])
+        self.assertEqual(a.findings, [])
+        self.assertNotIn("sin cifrar", resumen)
+
+    def test_el_sistema_sin_cifrar_sigue_siendo_lo_grave(self):
+        # Las dos cosas a la vez: dos hallazgos, y el del sistema con más peso.
+        a, _ = self._con_volumenes(
+            [self.volumen("C:", proteccion=0, estado=0),
+             self.volumen("D:", proteccion=0, estado=0)],
+            [self.volumen_local("C:\\"), self.volumen_local("D:\\")])
+        por_id = {f.id: f for f in a.findings}
+        self.assertEqual(set(por_id), {"sin_cifrado", "sin_cifrado_datos"})
+        self.assertEqual(por_id["sin_cifrado"].severity, "high")
+        self.assertEqual(por_id["sin_cifrado_datos"].severity, "medium")
+
+    def test_un_estado_ilegible_en_un_volumen_de_datos_no_acusa(self):
+        a, _ = self._con_volumenes(
+            [self.volumen("C:"), {"disponible": True, "MountPoint": "D:",
+                                  "VolumeStatus": "?", "ProtectionStatus": "?"}],
+            [self.volumen_local("C:\\"), self.volumen_local("D:\\")])
+        self.assertEqual(a.findings, [])
+
+    def test_no_cuesta_una_consulta_nueva(self):
+        # La condición del informe: sale de la misma respuesta que ya llegaba.
+        fuente = inspect.getsource(Auditor._volumenes_de_datos_sin_cifrar)
+        self.assertNotIn("ps_json", fuente)
+        self.assertNotIn("recoger", fuente)
+
     def test_sin_privilegios_es_sin_dato(self):
         with self.assertRaises(SinDato):
             self._auditar(PSResult((), ok=False, error="Acceso denegado"))
