@@ -32,8 +32,7 @@ class ChecksSeguridad:
     el lote de consultas con permisos, que los pone el `__init__` del paquete."""
 
     def check_antivirus(self) -> str:
-        rows = ps_json('Get-CimInstance -Namespace "root/SecurityCenter2" -ClassName AntiVirusProduct '
-                       '-ErrorAction SilentlyContinue | Select-Object displayName,productState')
+        rows = self._consulta("antivirus")
         if not getattr(rows, "ok", True):
             raise SinDato(f"no se ha podido consultar el Centro de seguridad ({rows.error})")
         names = [str(r.get("displayName")) for r in rows if r.get("displayName")]
@@ -368,8 +367,7 @@ class ChecksSeguridad:
         una política central que lo gestiona y un cortafuegos perimetral
         delante; los otros dos son la red de casa y la del bar.
         """
-        rows = ps_json("Get-NetFirewallProfile -ErrorAction SilentlyContinue | "
-                       "Select-Object Name,Enabled")
+        rows = self._consulta("cortafuegos")
         if not getattr(rows, "ok", True):
             raise SinDato(f"no se ha podido consultar el cortafuegos ({rows.error})")
         if not rows:
@@ -606,11 +604,7 @@ class ChecksSeguridad:
         `run()` llama a las dos comprobaciones seguidas.
         """
         if self._cuentas is None:
-            self._cuentas = ps_json(
-                "$( if (-not (Get-Command Get-LocalUser -ErrorAction SilentlyContinue)) {"
-                "     [PSCustomObject]@{ disponible = $false } } else {"
-                "     Get-LocalUser | Select-Object @{n='disponible';e={$true}},"
-                "       Name,Enabled,PasswordRequired,@{n='SID';e={$_.SID.Value}} } )")
+            self._cuentas = self._consulta("cuentas")
         rows = self._cuentas
         if not rows.ok:
             raise SinDato(f"no se han podido enumerar las cuentas locales ({rows.error})")

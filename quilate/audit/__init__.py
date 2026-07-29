@@ -10,10 +10,13 @@ from __future__ import annotations
 from ..benchmark import Benchmark
 from ..console import section, spinner_done, spinner_step
 from ..const import IS_LINUX, IS_WINDOWS
+from ..platform_utils import PSResult, ps_json
 from ..storage_scan import ScanResult
 from ..sysinfo import SystemInfo
 
 from .almacenamiento import ChecksAlmacenamiento
+from .lote import CONSULTAS
+from .lote import recoger as recoger_lote
 from .linux import ChecksLinux
 from .modelo import (SEGURIDAD, SEVERITY_COLOR, SEVERITY_ORDER, SEVERITY_TEXT,
                      Finding, NoAplica, SinDato, _ESFUERZOS, _ID_VALIDO,
@@ -62,7 +65,12 @@ class Auditor(ChecksRendimiento, ChecksSeguridad,
         # mismo que «rápido»: el log pide privilegios de administrador.
         self.boot_report: dict = {}
         self.boot_seconds: float | None = None
-        # `Get-LocalUser` la piden dos comprobaciones seguidas. Se lanza una vez.
+        # El lote común de consultas, si `run()` ha llegado a prepararlo. Ver
+        # `_consulta`: mientras esté vacío, cada comprobación pregunta por su
+        # cuenta, que es lo que hacían todas antes.
+        self._lote: dict = {}
+        # `Get-LocalUser` la piden dos comprobaciones. Con el lote preparado da
+        # igual, pero por la vía suelta esto evita preguntarla dos veces.
         self._cuentas = None
 
 
@@ -109,9 +117,28 @@ class Auditor(ChecksRendimiento, ChecksSeguridad,
         self.findings.append(Finding(**kwargs))
 
 
+    def _consulta(self, clave: str) -> PSResult:
+        """La respuesta de una de las consultas del lote común.
+
+        Si `run()` preparó el lote, sale de ahí y no cuesta nada. Si no —una
+        comprobación llamada suelta, que es como la ejercitan los tests y como
+        se puede usar el `Auditor` desde fuera— se pregunta esa sola, que es
+        exactamente lo que hacía antes. La fusión cambia cuándo se pregunta,
+        no qué, y ninguna comprobación deja de poder valerse por sí misma.
+        """
+        if clave in self._lote:
+            return self._lote[clave]
+        return ps_json(CONSULTAS[clave])
+
     # ------------------------------------------------------------------ core --
     def run(self) -> None:
         section("Auditoría del sistema")
+        # Ocho consultas en un proceso en vez de ocho procesos. Arrancar
+        # PowerShell cuesta más que la consulta que se le pide, así que esto es
+        # casi todo el ahorro. Ver `lote`, que explica por qué
+        # `check_old_drivers` se queda fuera.
+        if IS_WINDOWS:
+            self._lote = recoger_lote()
         checks = [
             ("Espacio en disco", self.check_disk_space),
             ("Archivos grandes y espacio recuperable", self.check_large_files),

@@ -449,7 +449,7 @@ class Cortafuegos(unittest.TestCase):
 
     def _auditar(self, perfiles):
         a = Auditor(SystemInfo(), None)
-        with patched(audit.seguridad, ps_json=lambda *a_, **k: perfiles):
+        with patched(audit, ps_json=lambda *a_, **k: perfiles):
             return a, a.check_firewall()
 
     def perfil(self, nombre, activo=1):
@@ -609,7 +609,7 @@ class MotorDePowerShell2(unittest.TestCase):
 
     def _auditar(self, estado):
         a = Auditor(SystemInfo(), None)
-        with patched(audit.seguridad, elevado={"powershell2": estado}):
+        with patched(audit, elevado={"powershell2": estado}):
             return a, a.check_powershell_v2()
 
     def test_desinstalado_no_genera_nada(self):
@@ -646,7 +646,7 @@ class MotorDePowerShell2(unittest.TestCase):
     def test_sin_permisos_es_sin_dato(self):
         # Sin privilegios no se sabe, y no saber no es «está desinstalado».
         a = Auditor(SystemInfo(), None)
-        with patched(audit.seguridad):
+        with patched(audit):
             with self.assertRaises(SinDato):
                 a.check_powershell_v2()
 
@@ -675,7 +675,7 @@ class EscritorioRemoto(unittest.TestCase):
         if nla is not None:
             arbol[f"HKLM\\{_RDP_TCP_CLAVE}"] = {"UserAuthentication": nla}
         a = Auditor(SystemInfo(), None)
-        with patched(audit.seguridad, registry=FakeRegistry(arbol)):
+        with patched(audit, registry=FakeRegistry(arbol)):
             return a, a.check_escritorio_remoto()
 
     def test_desactivado_no_genera_nada(self):
@@ -728,7 +728,7 @@ class CuentaAdministradorDeFabrica(unittest.TestCase):
     def _auditar(self, cuentas):
         respuesta = cuentas if isinstance(cuentas, PSResult) else PSResult(cuentas)
         a = Auditor(SystemInfo(), None)
-        with patched(audit.seguridad, ps_json=lambda *a_, **k: respuesta):
+        with patched(audit, ps_json=lambda *a_, **k: respuesta):
             return a, a.check_cuenta_administrador()
 
     def cuenta(self, nombre, sid, habilitada=True):
@@ -789,7 +789,7 @@ class CuentaAdministradorDeFabrica(unittest.TestCase):
                                          habilitada=False)])
 
         a = Auditor(SystemInfo(), None)
-        with patched(audit.seguridad, ps_json=contar):
+        with patched(audit, ps_json=contar):
             a.check_local_accounts()
             a.check_cuenta_administrador()
         self.assertEqual(len(llamadas), 1, "se ha lanzado Get-LocalUser dos veces")
@@ -863,7 +863,7 @@ class CifradoDelDisco(unittest.TestCase):
         si.system_drive = "C:"
         si.disks = discos
         a = Auditor(si, None)
-        with patched(audit.seguridad, elevado={"bitlocker": PSResult(filas)}):
+        with patched(audit, elevado={"bitlocker": PSResult(filas)}):
             return a, a.check_disk_encryption()
 
     def volumen_local(self, mount, kind="local"):

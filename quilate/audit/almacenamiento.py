@@ -233,7 +233,7 @@ class ChecksAlmacenamiento:
 
 
     def check_smart(self) -> str:
-        rows = ps_json("Get-PhysicalDisk | Select-Object FriendlyName,HealthStatus,OperationalStatus")
+        rows = self._consulta("discos")
         if not getattr(rows, "ok", True) or not rows:
             raise SinDato("no se ha podido consultar el estado de los discos"
                           + (f" ({rows.error})" if getattr(rows, "error", None) else ""))

@@ -354,8 +354,7 @@ class ChecksRendimiento:
         con el nombre del .lnk. Las entradas de registro que devuelve la misma
         consulta se ignoran: ya se leen del registro, y ahí llegan duplicadas
         por cada perfil de usuario (incluido .DEFAULT)."""
-        data = ps_json("Get-CimInstance Win32_StartupCommand | Select-Object Name,Location",
-                       timeout=25)
+        data = self._consulta("inicio")
         if not getattr(data, "ok", True):
             self.notes.append("No se han podido leer las carpetas de Inicio "
                               f"({data.error}): el recuento de programas de arranque "
@@ -549,9 +548,7 @@ class ChecksRendimiento:
         equipo sano acabaría contado como «Sin comprobar». El filtro WQL devuelve
         lista vacía, que es la respuesta correcta y además cuesta 0,26 s.
         """
-        rows = ps_json("Get-CimInstance Win32_PnPEntity "
-                       "-Filter 'ConfigManagerErrorCode <> 0' | "
-                       "Select-Object Name,PNPClass,ConfigManagerErrorCode")
+        rows = self._consulta("dispositivos")
         if not rows.ok:
             raise SinDato("no se ha podido consultar el estado de los dispositivos"
                           f" ({rows.error})")
@@ -920,7 +917,7 @@ class ChecksRendimiento:
 
 
     def check_pagefile(self) -> str:
-        data = ps_json("Get-CimInstance Win32_PageFileUsage | Select-Object Name,AllocatedBaseSize,CurrentUsage")
+        data = self._consulta("pagefile")
         if not getattr(data, "ok", True):
             # Sin esta distinción, una consulta fallida se leía como «no hay
             # archivo de paginación» y se emitía el hallazgo igualmente.
@@ -970,8 +967,7 @@ class ChecksRendimiento:
 
 
     def check_services(self) -> str:
-        rows = ps_json("Get-Service | Where-Object {$_.Status -eq 'Running'} | "
-                       "Select-Object Name,DisplayName,StartType")
+        rows = self._consulta("servicios")
         if not getattr(rows, "ok", True) or not rows:
             raise SinDato("no se ha podido enumerar los servicios"
                           + (f" ({rows.error})" if getattr(rows, "error", None) else ""))
