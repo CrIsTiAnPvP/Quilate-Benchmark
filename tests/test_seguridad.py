@@ -89,6 +89,108 @@ class ElOrden(unittest.TestCase):
                          priority_rank(riesgo("b", "low"))[0])
 
 
+class EnLaFichaDeComponente(unittest.TestCase):
+    """Un riesgo de seguridad no es una «mejora aplicable».
+
+    La ficha por componente metía en un solo bloque todo lo que caía en ese
+    grupo y lo titulaba «Mejoras aplicables». Sobre «SMB1 activo» o «el disco no
+    está cifrado» eso no es un matiz de redacción: dice que arreglarlo mejora el
+    rendimiento, que es falso, y los mete en la misma lista que un plan de
+    energía. Nueve de los diez riesgos caen en la ficha «Sistema y software», así
+    que era el caso normal y no un borde.
+    """
+
+    def ficha(self, auditor: Auditor, clave: str = "system"):
+        from quilate.components import build_component_cards
+        fichas = build_component_cards(SystemInfo(), None, auditor)
+        return next((c for c in fichas if c.key == clave), None)
+
+    def html(self, auditor: Auditor, clave: str = "system") -> str:
+        """El HTML de UNA ficha, no el informe entero.
+
+        Las demás fichas dicen «Sin mejoras pendientes» con toda la razón —un
+        equipo puede tener la CPU impecable y el sistema comprometido—, así que
+        buscar esa frase en el documento completo no probaría nada.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "informe.html"
+            export_html(destino, SystemInfo(), None, auditor,
+                        project_improvement(None, auditor.findings))
+            completo = destino.read_text(encoding="utf-8")
+        inicio = completo.index(f'id="c-{clave}"')
+        siguiente = completo.find('<div class="card" id="c-', inicio + 1)
+        return completo[inicio:siguiente if siguiente != -1 else len(completo)]
+
+    def test_los_riesgos_no_van_en_las_mejoras(self):
+        card = self.ficha(auditor_con(riesgo("smb1_activo"), mejora("sysmain")))
+        self.assertEqual([f.id for f in card.riesgos], ["smb1_activo"])
+        self.assertNotIn("smb1_activo", [f.id for f in card.findings])
+
+    def test_el_corte_es_por_categoria_y_no_por_quien_lo_emite(self):
+        # `av_stack` lo emite `check_antivirus`, que vive entre las
+        # comprobaciones de seguridad, pero es un hallazgo de fluidez: dos
+        # motores en tiempo real cuestan E/S. Su sitio son las mejoras.
+        av_stack = Finding(id="av_stack", title="Varios antivirus", severity="high",
+                           category="fluidez", component="system", detail="d",
+                           gain=0.08, gain_note="n", effort="bajo", risk="nulo",
+                           steps=["paso"])
+        card = self.ficha(auditor_con(av_stack, riesgo("smb1_activo")))
+        self.assertEqual([f.id for f in card.findings], ["av_stack"])
+        self.assertEqual([f.id for f in card.riesgos], ["smb1_activo"])
+
+    def test_los_riesgos_no_inventan_ganancia_en_la_ficha(self):
+        card = self.ficha(auditor_con(riesgo("smb1_activo"), riesgo("sin_tpm")))
+        self.assertEqual(card.gain, 0.0)
+
+    def test_una_ficha_con_solo_riesgos_no_desaparece(self):
+        # Si la condición de incluir la ficha solo mirase `findings`, un equipo
+        # cuyo único problema fuera de seguridad se quedaría sin ficha.
+        self.assertIsNotNone(self.ficha(auditor_con(riesgo("smb1_activo"))))
+
+    def test_el_html_les_da_encabezado_propio_y_enlace(self):
+        html = self.html(auditor_con(riesgo("smb1_activo")))
+        self.assertIn("Riesgos de este componente", html)
+        self.assertIn('href="#s-smb1_activo"', html)
+
+    def test_el_html_no_canta_victoria_con_riesgos_delante(self):
+        # Lo peor que podía pasar al separar las listas: la ficha del sistema de
+        # un equipo con SMB1 activo enseñando un «sin nada pendiente» en verde.
+        html = self.html(auditor_con(riesgo("smb1_activo")))
+        self.assertNotIn("Sin mejoras pendientes", html)
+
+    def test_el_html_sigue_diciendolo_cuando_de_verdad_no_hay_nada(self):
+        self.assertIn("Sin mejoras pendientes", self.html(auditor_con(mejora("sysmain"))))
+
+    def test_la_consola_hace_lo_mismo(self):
+        from quilate.console import C
+        from quilate.report import print_report
+        C.disable()
+        auditor = auditor_con(riesgo("smb1_activo"))
+        salida = io.StringIO()
+        with redirect_stdout(salida):
+            print_report(SystemInfo(), None, auditor,
+                         project_improvement(None, auditor.findings))
+        # Solo el bloque de «Sistema y software», por lo mismo que en el HTML:
+        # que la ficha del procesador diga que no tiene mejoras pendientes es
+        # correcto y no tiene nada que ver con esto.
+        texto = salida.getvalue()
+        inicio = texto.index("SISTEMA Y SOFTWARE")
+        ficha = texto[inicio:texto.index("▌", inicio)]
+        self.assertIn("Riesgos de este componente", ficha)
+        self.assertNotIn("Sin mejoras pendientes", ficha)
+
+    def test_el_json_expone_los_dos_campos(self):
+        # El informe pide que no se pierda información: el JSON tiene que seguir
+        # diciendo qué hay en cada ficha, ahora en dos listas en vez de una.
+        from quilate.export.json_export import build_payload
+        auditor = auditor_con(riesgo("smb1_activo"), mejora("sysmain"))
+        payload = build_payload(SystemInfo(), None, auditor,
+                                project_improvement(None, auditor.findings))
+        sistema = next(c for c in payload["components"] if c["key"] == "system")
+        self.assertEqual([f["id"] for f in sistema["riesgos"]], ["smb1_activo"])
+        self.assertNotIn("smb1_activo", [f["id"] for f in sistema["findings"]])
+
+
 class EnLaConsola(unittest.TestCase):
     def _informe(self, auditor: Auditor) -> str:
         from quilate.report import print_report

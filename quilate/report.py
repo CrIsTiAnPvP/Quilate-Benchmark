@@ -55,8 +55,18 @@ def print_component_cards(cards: list[ComponentCard]) -> None:
             if card.projected_score is not None and card.gain > 0.005:
                 print(f"        {C.DIM}→ tras aplicarlas: {C.RESET}{C.GREEN}"
                       f"{card.projected_score:.0f} pts{C.RESET}")
-        else:
+        elif not card.riesgos:
+            # Solo si no hay ni mejoras ni riesgos. Un «sin nada pendiente» en
+            # verde sobre un equipo con SMB1 activo y sin cifrar es el aviso que
+            # no hay que dar, y aquí pasaba lo mismo que en el HTML.
             print(f"      {C.GREEN}Sin mejoras pendientes.{C.RESET}")
+
+        if card.riesgos:
+            print(f"      {C.RED}Riesgos de este componente "
+                  f"({len(card.riesgos)}){C.RESET}"
+                  f"{C.DIM}  ·  no suben la nota: ver «Seguridad»{C.RESET}")
+            for f in card.riesgos:
+                print(f"        {sev_label(f.severity)}  {f.title}")
         print()
 
 

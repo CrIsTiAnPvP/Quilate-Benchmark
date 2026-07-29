@@ -1665,9 +1665,26 @@ def _html_component_cards(cards: list[ComponentCard]) -> str:
                           f"{_e(f.risk)} · {_e(f.gain_note)}</div></li>")
             block.append(f'<div class="sub-h">{head}</div><ul class="imp">{items}</ul>')
             block.append(_howto_subcard(card))
-        else:
+        elif not card.riesgos:
+            # Solo cuando no hay ni lo uno ni lo otro. Con riesgos delante, un
+            # «sin nada pendiente» en verde sobre la ficha de un equipo con SMB1
+            # activo y sin cifrar es exactamente el aviso que no hay que dar.
             block.append('<div class="sub-h">Mejoras aplicables</div>'
                          '<p class="ok-note">Sin mejoras pendientes.</p>')
+
+        if card.riesgos:
+            items = ""
+            for f in card.riesgos:
+                items += (f'<li><a href="#s-{_e(f.id)}">{_e(f.title)}</a>'
+                          f'<div class="tags">'
+                          f'<span class="badge b-{_e(f.severity)}">{_e(f.severity)}</span>'
+                          f" &nbsp; esfuerzo {_e(f.effort)} · riesgo {_e(f.risk)}</div></li>")
+            block.append(
+                '<div class="sub-h">Riesgos de este componente</div>'
+                '<p class="scan-note">No son mejoras de rendimiento y por eso van '
+                'aparte: arreglarlos no sube la nota. Los pasos están en la '
+                'sección <a href="#seguridad">Seguridad</a>.</p>'
+                f'<ul class="imp">{items}</ul>')
 
         block.append("</div>")
         parts.append("".join(block))
