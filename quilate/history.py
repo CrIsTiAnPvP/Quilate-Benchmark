@@ -155,12 +155,34 @@ def append(payload: dict, path: Path | None = None) -> Path | None:
 
 
 def _recortar(destino: Path) -> None:
+    """Deja el histórico en las últimas `MAX_ENTRADAS` líneas.
+
+    Se escribe al lado y se renombra encima, y no directamente sobre el
+    fichero. `write_text` lo trunca a cero antes de escribir: un corte de luz o
+    un cierre de sesión en ese hueco dejaba el histórico entero vacío o partido
+    a la mitad, y es un fichero que se acumula durante años y que nadie tiene
+    copiado en ninguna parte. `os.replace` es atómico en Windows y en POSIX, así
+    que o está el histórico viejo o está el nuevo, nunca medio.
+
+    El temporal va en la misma carpeta a propósito: renombrar entre volúmenes
+    distintos no es atómico y acabaría copiando byte a byte, que es justo lo
+    que se quiere evitar.
+    """
     try:
         lineas = destino.read_text(encoding="utf-8").splitlines()
-        if len(lineas) > MAX_ENTRADAS:
-            destino.write_text("\n".join(lineas[-MAX_ENTRADAS:]) + "\n", encoding="utf-8")
+        if len(lineas) <= MAX_ENTRADAS:
+            return
+        temporal = destino.with_name(destino.name + ".tmp")
+        temporal.write_text("\n".join(lineas[-MAX_ENTRADAS:]) + "\n", encoding="utf-8")
+        os.replace(temporal, destino)
     except OSError:
-        pass
+        # Que no se pueda recortar no puede costar el histórico: si el renombrado
+        # no llegó a ocurrir, el fichero sigue entero con sus líneas de más, que
+        # es un problema mucho menor que quedarse sin él.
+        try:
+            destino.with_name(destino.name + ".tmp").unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def load(path: Path | None = None) -> list[dict]:

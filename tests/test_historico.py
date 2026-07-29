@@ -14,6 +14,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from quilate.benchmark import (REFERENCE, REFERENCE_DATE, REFERENCE_ORIGIN,
                                REFERENCE_STALE_MONTHS, reference_age_months,
@@ -161,6 +162,95 @@ class NadaQueNoSeaUnaCifra(unittest.TestCase):
             with self.subTest(campo=ruta_campo):
                 self.assertNotIn("\\", cadena)
                 self.assertNotIn("/", cadena)
+
+
+class RecortarSinPerderElHistorico(unittest.TestCase):
+    """El recorte no puede dejar el fichero a medias.
+
+    `write_text` trunca a cero antes de escribir. Un corte de luz o un cierre de
+    sesión en ese hueco dejaba el histórico vacío o partido, y es un fichero que
+    se acumula durante años y que nadie tiene copiado en ninguna parte. Con
+    `os.replace` o está el viejo o está el nuevo.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.ruta = Path(self.dir.name) / "historico.jsonl"
+
+    def _llenar(self, cuantas: int) -> None:
+        # La marca de tiempo tiene que crecer de verdad: `load()` ordena por
+        # ella, y con segundos se desbordaba a los 60 y las entradas salían
+        # desordenadas — un fallo del test, no del recorte.
+        self.ruta.write_text(
+            "".join(json.dumps({"at": f"2026-01-01T{n // 60:02d}:{n % 60:02d}:00",
+                                "overall": n}) + "\n" for n in range(cuantas)),
+            encoding="utf-8")
+
+    def test_recorta_a_las_ultimas(self):
+        self._llenar(MAX_ENTRADAS + 25)
+        history._recortar(self.ruta)
+        entradas = load(self.ruta)
+        self.assertEqual(len(entradas), MAX_ENTRADAS)
+        self.assertEqual(entradas[-1]["overall"], MAX_ENTRADAS + 24)
+
+    def test_por_debajo_del_tope_no_toca_nada(self):
+        self._llenar(10)
+        antes = self.ruta.read_text(encoding="utf-8")
+        history._recortar(self.ruta)
+        self.assertEqual(self.ruta.read_text(encoding="utf-8"), antes)
+
+    def test_si_falla_a_media_escritura_el_historico_sigue_entero(self):
+        # Lo que antes se perdía: el fichero ya estaba truncado a cero cuando
+        # llegaba el fallo. Ahora el que revienta es el temporal, y el bueno no
+        # se ha tocado todavía.
+        self._llenar(MAX_ENTRADAS + 25)
+        original = self.ruta.read_text(encoding="utf-8")
+        real = Path.write_text
+
+        def reventar(self_, *a, **k):
+            if self_.name.endswith(".tmp"):
+                raise OSError(28, "No queda espacio en el dispositivo")
+            return real(self_, *a, **k)
+
+        with mock.patch.object(Path, "write_text", reventar):
+            history._recortar(self.ruta)
+        self.assertEqual(self.ruta.read_text(encoding="utf-8"), original)
+        self.assertEqual(len(load(self.ruta)), MAX_ENTRADAS + 25)
+
+    def test_no_deja_el_temporal_tirado(self):
+        self._llenar(MAX_ENTRADAS + 25)
+        history._recortar(self.ruta)
+        self.assertEqual(list(Path(self.dir.name).glob("*.tmp")), [])
+
+    def test_tampoco_lo_deja_cuando_falla(self):
+        self._llenar(MAX_ENTRADAS + 25)
+        real = os.replace
+
+        def reventar(*a, **k):
+            raise OSError(13, "Acceso denegado")
+
+        with mock.patch.object(os, "replace", reventar):
+            history._recortar(self.ruta)
+        self.assertEqual(list(Path(self.dir.name).glob("*.tmp")), [])
+        self.assertEqual(os.replace, real)
+
+    def test_el_temporal_va_en_la_misma_carpeta(self):
+        # Renombrar entre volúmenes distintos no es atómico: acabaría copiando
+        # byte a byte, que es justo lo que esto viene a evitar.
+        vistos = []
+        real = Path.write_text
+
+        def anotar(self_, *a, **k):
+            vistos.append(self_)
+            return real(self_, *a, **k)
+
+        self._llenar(MAX_ENTRADAS + 25)
+        with mock.patch.object(Path, "write_text", anotar):
+            history._recortar(self.ruta)
+        temporales = [p for p in vistos if p.name.endswith(".tmp")]
+        self.assertTrue(temporales, "no se ha escrito ningún temporal")
+        self.assertEqual(temporales[0].parent, self.ruta.parent)
 
 
 class FicheroDelHistorico(unittest.TestCase):
