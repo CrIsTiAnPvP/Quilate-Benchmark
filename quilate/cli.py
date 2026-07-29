@@ -198,9 +198,18 @@ def _run_comparison(rutas: list[str]) -> int:
         # `AttributeError` es la red del esquema anidado: el módulo indexa dos y
         # tres niveles, y donde esperaba un objeto puede haber una cadena. Cribar
         # cada rincón del esquema no compensa; que ninguno saque una traza, sí.
-        campo = exc.args[0] if isinstance(exc, KeyError) else exc
-        return _no_se_puede_comparar(f"el fichero es de Quilate pero le faltan "
-                                     f"datos: {campo}")
+        if isinstance(exc, KeyError):
+            # De un KeyError sí sale algo que el usuario reconoce: el nombre del
+            # campo que falta, que además está en el JSON que tiene delante.
+            return _no_se_puede_comparar(f"el fichero es de Quilate pero le faltan "
+                                         f"datos: {exc.args[0]}")
+        # De los demás, no. `unsupported operand type(s) for -: 'str' and 'float'`
+        # es el mensaje de CPython, viene en inglés y no le dice a nadie qué
+        # hacer, en un programa cuyo informe entero está en castellano. Lo que
+        # sí es útil es la causa probable, que casi siempre es una de dos.
+        return _no_se_puede_comparar(
+            "el fichero es de Quilate pero hay un valor con un tipo que no encaja "
+            "(¿editado a mano, o generado por otra versión?)")
     print_comparison(comparacion, antes_path.name, despues_path.name)
     return 0
 

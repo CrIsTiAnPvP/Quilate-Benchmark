@@ -224,7 +224,7 @@ class ElMensajeQueVeElUsuario(unittest.TestCase):
         roto["scores"]["overall"] = "bastante"
         codigo, salida = self._comparar(roto, ejecucion())
         self.assertEqual(codigo, 2)
-        self.assertIn("le faltan datos", salida)
+        self.assertIn("No se puede comparar", salida)
 
     def test_un_margen_ilegible_no_impide_comparar(self):
         # El reparto: `dispersion` es auxiliar y tiene un supuesto para su
@@ -242,14 +242,14 @@ class ElMensajeQueVeElUsuario(unittest.TestCase):
         roto["scores"]["components"]["disk"] = "bien"
         codigo, salida = self._comparar(roto, ejecucion())
         self.assertEqual(codigo, 2)
-        self.assertIn("le faltan datos", salida)
+        self.assertIn("No se puede comparar", salida)
 
     def test_una_proyeccion_ilegible_se_dice(self):
         roto = ejecucion()
         roto["projection"] = {"projected_overall": "más", "current_overall": 100.0}
         codigo, salida = self._comparar(roto, ejecucion())
         self.assertEqual(codigo, 2)
-        self.assertIn("le faltan datos", salida)
+        self.assertIn("No se puede comparar", salida)
 
     def test_un_anidado_que_no_es_un_objeto_tampoco_saca_traza(self):
         # La red de última instancia, que es lo que faltaba: el módulo indexa
@@ -258,7 +258,42 @@ class ElMensajeQueVeElUsuario(unittest.TestCase):
         roto["coverage"]["unverified"] = ["algo"]
         codigo, salida = self._comparar(roto, ejecucion())
         self.assertEqual(codigo, 2)
+        self.assertIn("No se puede comparar", salida)
+
+    def test_el_mensaje_no_filtra_el_ingles_de_cpython(self):
+        # `unsupported operand type(s) for -: 'str' and 'float'` es el mensaje
+        # de CPython: viene en inglés, no dice qué hacer, y aparecía en un
+        # programa cuyo informe entero está en castellano.
+        roto = ejecucion()
+        roto["scores"]["overall"] = "bastante"
+        _, salida = self._comparar(roto, ejecucion())
+        for ingles in ("unsupported operand", "could not convert", "NoneType",
+                       "TypeError", "ValueError", "AttributeError"):
+            with self.subTest(fragmento=ingles):
+                self.assertNotIn(ingles, salida)
+
+    def test_el_mensaje_apunta_a_la_causa_probable(self):
+        # No basta con no filtrar inglés: hay que decir algo que sirva. Las dos
+        # causas reales son un fichero tocado a mano y otra versión.
+        roto = ejecucion()
+        roto["scores"]["components"]["disk"] = "bien"
+        _, salida = self._comparar(roto, ejecucion())
+        self.assertIn("no encaja", salida)
+        self.assertIn("mano", salida)
+        self.assertIn("versión", salida)
+
+    def test_de_un_campo_que_falta_si_se_dice_cual(self):
+        # El KeyError sí trae algo que el usuario reconoce y puede buscar en el
+        # JSON que tiene delante, así que ese no se sustituye por texto fijo.
+        original = cli.compare_runs
+        cli.compare_runs = lambda *a, **k: (_ for _ in ()).throw(KeyError("ambient_load"))
+        try:
+            codigo, salida = self._comparar(ejecucion(), ejecucion())
+        finally:
+            cli.compare_runs = original
+        self.assertEqual(codigo, 2)
         self.assertIn("le faltan datos", salida)
+        self.assertIn("ambient_load", salida)
 
     def test_un_fichero_que_no_es_de_quilate(self):
         # El mensaje de siempre no puede haberse perdido por el camino.
