@@ -144,7 +144,22 @@ GLOSARIO = {
 
 # Términos ya explicados en este documento. Se vacía al empezar cada informe:
 # repetir el mismo globo diez veces convierte una ayuda en ruido.
+#
+# Es el único estado compartido del módulo, y se toca desde fuera con
+# `reiniciar_glosario()` y no manipulando este nombre. La diferencia importa
+# cuando el módulo se reparte en varios ficheros: `.clear()` muta el objeto y
+# funcionaría aunque cada fichero importara el nombre por su cuenta, pero el día
+# que alguien lo cambiara por `= set()` estaría reasignando solo su copia local,
+# el glosario dejaría de vaciarse y no fallaría nada — el segundo informe de la
+# sesión saldría sin una sola explicación y el fichero se generaría igual. Con
+# una función no hay nombre que reasignar desde fuera, así que ese fallo deja de
+# ser posible en vez de ser improbable.
 _TERMINOS_VISTOS: set[str] = set()
+
+
+def reiniciar_glosario() -> None:
+    """Olvida los términos ya explicados. Se llama al empezar cada informe."""
+    _TERMINOS_VISTOS.clear()
 
 HTML_CSS = """
 /* ==========================================================================
@@ -2115,7 +2130,7 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
     # El glosario marca solo la primera aparición de cada término, así que su
     # memoria es por informe: sin esto, generar dos seguidos dejaría el segundo
     # sin ninguna explicación.
-    _TERMINOS_VISTOS.clear()
+    reiniciar_glosario()
 
     cards = build_component_cards(si, bench, auditor)
     findings = sorted(auditor.findings, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), -f.gain))
