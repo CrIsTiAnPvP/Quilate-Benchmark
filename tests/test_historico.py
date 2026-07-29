@@ -65,6 +65,104 @@ class Resumen(unittest.TestCase):
         self.assertIn("at", _resumen({}))
 
 
+class NadaQueNoSeaUnaCifra(unittest.TestCase):
+    """Lista negra sobre la forma, no sobre los valores.
+
+    `test_no_arrastra_datos_personales` comprueba que no se cuelan los cuatro
+    textos que planta. Eso cubre lo que ya se sabe que hay, pero no lo que
+    alguien añada mañana: un campo nuevo en `_resumen` que traiga la ruta del
+    disco o el nombre de la GPU pasaría sin que nadie se enterase, porque nadie
+    se acordaría de añadirlo a esa lista.
+
+    Aquí se afirma la propiedad en vez de los ejemplos: en el histórico —que se
+    acumula para siempre y sin caducidad— no puede haber nada que no sea una
+    cifra, una bandera o una fecha. Un campo nuevo que no lo sea falla aquí el
+    día que se escribe.
+    """
+
+    #: Los dos únicos campos de texto, y qué son: una marca de tiempo ISO y la
+    #: versión de Quilate. Ninguno de los dos sale del equipo del usuario.
+    TEXTO_PERMITIDO = {"at", "version"}
+
+    def sucio(self) -> dict:
+        """Un payload con de todo lo que no debe llegar al histórico."""
+        payload = ejecucion(overall=120.0, boot=31.0, temp=68.0)
+        payload["system"] = {"hostname": "PC-DE-ALGUIEN", "user": "alguien",
+                             "cpu_name": "AMD Ryzen 9 5900X",
+                             "system_drive": "C:\\"}
+        payload["top_processes"] = [{"name": "loquesea.exe", "rss": 1, "pid": 42}]
+        payload["startup_items"] = [{"name": "programa", "location": "C:\\Users\\x",
+                                     "command": "C:\\Program Files\\x.exe"}]
+        payload["storage_scan"] = {"items": [{"path": "/home/alguien/peli.mkv"}]}
+        payload["notes"] = ["El disco D:\\ de alguien está lleno"]
+        return payload
+
+    def cadenas(self, valor, ruta="raíz") -> list[tuple[str, str]]:
+        """Todas las cadenas del payload serializado, con dónde estaba cada una.
+
+        Recorre claves además de valores: una clave puede traer tanto texto del
+        sistema como un valor, y en JSON las dos cosas acaban en el fichero.
+        """
+        if isinstance(valor, dict):
+            encontradas = []
+            for clave, sub in valor.items():
+                encontradas += self.cadenas(clave, f"{ruta}(clave)")
+                encontradas += self.cadenas(sub, f"{ruta}.{clave}")
+            return encontradas
+        if isinstance(valor, (list, tuple)):
+            return [c for i, sub in enumerate(valor)
+                    for c in self.cadenas(sub, f"{ruta}[{i}]")]
+        return [(ruta, valor)] if isinstance(valor, str) else []
+
+    def test_solo_hay_cifras_banderas_y_dos_fechas(self):
+        for clave, valor in _resumen(self.sucio()).items():
+            with self.subTest(campo=clave):
+                if clave in self.TEXTO_PERMITIDO:
+                    self.assertIsInstance(valor, str)
+                else:
+                    self.assertIsInstance(
+                        valor, (int, float, bool),
+                        f"«{clave}» no es una cifra: si es un campo nuevo que "
+                        f"trae texto del equipo, no puede ir al histórico")
+
+    def test_ninguna_cadena_parece_una_ruta(self):
+        # Ni separador de Windows ni de POSIX. Es lo que delata una ruta sin
+        # tener que saber qué campo la traía.
+        for ruta, texto in self.cadenas(_resumen(self.sucio())):
+            with self.subTest(campo=ruta):
+                self.assertNotIn("\\", texto)
+                self.assertNotIn("/", texto)
+
+    def test_ninguna_clave_sale_de_las_secciones_prohibidas(self):
+        payload = self.sucio()
+        prohibidas = {clave
+                      for seccion in ("top_processes", "startup_items")
+                      for item in payload[seccion]
+                      for clave in item}
+        self.assertTrue(prohibidas, "el payload de prueba no planta nada")
+        self.assertEqual(set(_resumen(payload)) & prohibidas, set())
+
+    def test_ningun_valor_del_inventario_se_copia(self):
+        payload = self.sucio()
+        volcado = json.dumps(_resumen(payload), ensure_ascii=False).lower()
+        for campo, valor in payload["system"].items():
+            with self.subTest(campo=campo):
+                self.assertNotIn(str(valor).lower(), volcado)
+
+    def test_la_garantia_vale_sobre_el_fichero_escrito(self):
+        # No sobre el dict en memoria: lo que se acumula para siempre es lo que
+        # acaba en disco, y es ahí donde hay que mirarlo.
+        with tempfile.TemporaryDirectory() as d:
+            ruta = Path(d) / "historico.jsonl"
+            append(self.sucio(), ruta)
+            texto = ruta.read_text(encoding="utf-8")
+        self.assertTrue(texto.strip(), "no se ha escrito nada: el test no prueba nada")
+        for ruta_campo, cadena in self.cadenas(json.loads(texto)):
+            with self.subTest(campo=ruta_campo):
+                self.assertNotIn("\\", cadena)
+                self.assertNotIn("/", cadena)
+
+
 class FicheroDelHistorico(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
