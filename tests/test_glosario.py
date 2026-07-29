@@ -99,5 +99,48 @@ class CadaTerminoUnaSolaVez(unittest.TestCase):
         self.assertIn('class="term"', html_export._term("cobertura", "cobertura"))
 
 
+class LaMemoriaLaPoseeUnSoloModulo(unittest.TestCase):
+    """Lo que hace imposible el fallo, y no solo improbable.
+
+    Con el módulo repartido en cinco ficheros, la memoria del glosario podría
+    acabar importada por su nombre en varios de ellos. Mientras solo se llame a
+    `.clear()` eso funcionaría —muta el objeto compartido—, pero el día que
+    alguien lo cambiara por `= set()` cada fichero reasignaría su copia y el
+    glosario dejaría de vaciarse sin que nada fallara.
+
+    La garantía no es «acuérdate de importar el módulo»: es que el `set` no sale
+    de `piezas`. Esto lo comprueba.
+    """
+
+    def test_solo_piezas_tiene_el_set(self):
+        from quilate.export.html_export import bloques, estilos, guion, piezas
+
+        self.assertTrue(hasattr(piezas, "_TERMINOS_VISTOS"))
+        for modulo in (html_export, bloques, estilos, guion):
+            with self.subTest(modulo=modulo.__name__):
+                self.assertFalse(
+                    hasattr(modulo, "_TERMINOS_VISTOS"),
+                    f"{modulo.__name__} tiene su propio nombre para la memoria del "
+                    f"glosario: si alguien lo reasigna, el vaciado deja de alcanzarla")
+
+    def test_nadie_manipula_el_set_desde_fuera_de_piezas(self):
+        # Sobre el código, no sobre lo que los tests ejerciten: la línea que
+        # rompería esto se escribe una vez y no falla nunca.
+        import pathlib
+        paquete = pathlib.Path(html_export.__file__).parent
+        for fichero in sorted(paquete.glob("*.py")):
+            if fichero.name == "piezas.py":
+                continue
+            with self.subTest(fichero=fichero.name):
+                self.assertNotIn("_TERMINOS_VISTOS", fichero.read_text(encoding="utf-8"))
+
+    def test_el_reinicio_alcanza_la_instancia_de_piezas(self):
+        from quilate.export.html_export import piezas
+
+        piezas._TERMINOS_VISTOS.add("centinela")
+        html_export.reiniciar_glosario()
+        self.assertNotIn("centinela", piezas._TERMINOS_VISTOS)
+
+
 if __name__ == "__main__":
     unittest.main()
