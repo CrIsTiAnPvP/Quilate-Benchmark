@@ -30,8 +30,8 @@ from ...veredicto import build_verdict
 
 from .bloques import (_benchmark_table, _component_strip, _conditions_block,
                       _hero, _html_component_cards, _inventory, _metrics_block,
-                      _network_block, _projection_tables, _search_hints,
-                      _sidebar, _storage_scan_block, _system_state_block, _worst)
+                      _network_block, _projection_tables, _sidebar,
+                      _storage_scan_block, _system_state_block, _worst)
 from .estilos import HTML_CSS
 from .guion import HTML_JS
 from .piezas import (NAV_LABELS, Seccion, _e, _favicon, _human, _icon, _logo,
@@ -161,8 +161,24 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         # ficha del componente, dentro de «Cómo aplicar estas mejoras». Repetirlos
         # obligaría a mantener dos copias y alargaría esta sección sin aportar.
         labels = {c.key: c.label for c in cards}
+        # Los riesgos de seguridad ya se cuentan enteros —detalle y pasos— en su
+        # propia sección, unos centímetros más arriba. Aquí salían otra vez con
+        # el mismo párrafo palabra por palabra: el mismo hallazgo contado dos
+        # veces en la misma página. Se quedan con su sitio y su ancla, porque el
+        # recuento de hallazgos los incluye y porque quien llega desde un enlace
+        # `#h-…` tiene que aterrizar en algo, pero el texto largo vive en un solo
+        # sitio y desde aquí se remite a él.
+        ids_riesgo = {f.id for f in riesgos}
         detail = ""
         for f in findings:
+            cabecera = (f'<div class="card finding" id="h-{_e(f.id)}"><h3>{_e(f.title)}</h3>'
+                        f'<div class="tags">'
+                        f'<span class="badge b-{_e(f.severity)}">{_e(f.severity)}</span>')
+            if f.id in ids_riesgo:
+                detail += (cabecera + f" &nbsp; {_e(f.category)}</div>"
+                           f'<p class="xref"><a href="#s-{_e(f.id)}">{_icon("i-shield")}'
+                           f"Qué es y cómo se corrige, en Seguridad</a></p></div>")
+                continue
             gain = (f'<span class="gain">Mejora estimada +{f.gain * 100:.0f}%</span> '
                     f'<span style="color:var(--dim)">({_e(f.gain_note)})</span>') if f.gain else ""
             group = finding_group(f)
@@ -171,9 +187,8 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
                 enlace = (f'<p class="steps-link"><a href="#c-{_e(group)}">{_icon("i-wrench")}'
                           f"Los {len(f.steps)} pasos para solucionarlo están en la ficha de "
                           f"{_e(labels[group])}</a></p>")
-            detail += (f'<div class="card finding" id="h-{_e(f.id)}"><h3>{_e(f.title)}</h3>'
-                       f'<div class="tags"><span class="badge b-{_e(f.severity)}">{_e(f.severity)}</span>'
-                       f" &nbsp; {_e(f.category)} · esfuerzo {_e(f.effort)} · riesgo "
+            detail += (cabecera
+                       + f" &nbsp; {_e(f.category)} · esfuerzo {_e(f.effort)} · riesgo "
                        f"{_e(f.risk)} &nbsp; {gain}</div><p>{_e(f.detail)}</p>{enlace}</div>")
         secs.append(Seccion("hallazgos", "Hallazgos en detalle", "i-alert", detail,
                             f"{len(findings)} hallazgos",
@@ -182,12 +197,23 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
     verdict, extra = build_verdict(si, bench, auditor, projection)
     extras = "".join(f"<li>{_e(x)}</li>" for x in extra)
     secs.append(Seccion("veredicto", "Veredicto", "i-award",
-                        f'<div class="card verdict">{_logo("brandmark wm", uid="ver")}'
+                        f'<div class="card verdict">{_logo("brandmark wm")}'
                         f"<p>{_e(verdict)}</p>"
                         f'{"<ul>" + extras + "</ul>" if extras else ""}</div>'))
 
+    # La navegación va agrupada por el mismo criterio que reparte las secciones
+    # en `data-group`: primero lo que explica de dónde sale la nota, después lo
+    # que hay que hacer con ella. Doce enlaces seguidos y sin jerarquía son doce
+    # candidatos igual de probables, y la mitad de ellos no se leen nunca en la
+    # primera pasada. El separador es solo un filete: no hay rótulos porque la
+    # barra envuelve en varias filas y un rótulo que cae solo al final de una
+    # fila acaba encabezando el grupo de al lado.
     nav = f'<a href="#resumen" data-target="resumen">{_icon("i-zap")}Resumen</a>'
+    separado = False
     for s in secs:
+        if s.grupo.startswith("accion") and not separado:
+            nav += '<span class="navsep" aria-hidden="true"></span>'
+            separado = True
         # Punto de severidad en la propia navegación: dónde está lo urgente sin
         # tener que entrar a mirar sección por sección.
         punto = f'<span class="sev s-{_e(s.severity)}"></span>' if s.severity else ""
@@ -216,21 +242,6 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         f'<button class="btn" type="button" data-preset="none">Vaciar</button></div></aside>'
     )
 
-    # Ejemplos de filtro: como <datalist> para quien use el teclado, y como
-    # botones al enfocar el campo para quien no sepa que hay algo que escribir.
-    sugerencias = _search_hints(auditor, cards)
-    lista_sugerencias = ""
-    chips_sugerencias = ""
-    if sugerencias:
-        lista_sugerencias = ('<datalist id="sugerencias">'
-                             + "".join(f'<option value="{_e(s)}">' for s in sugerencias)
-                             + "</datalist>")
-        chips_sugerencias = (
-            '<div class="tips"><div class="th">Prueba a filtrar por</div><div class="tr">'
-            + "".join(f'<button type="button" data-tip="{_e(s)}">{_e(s)}</button>'
-                      for s in sugerencias)
-            + "</div></div>")
-
     date = f"{datetime.now():%d/%m/%Y %H:%M}"
     html = (
         '<!DOCTYPE html>\n<html lang="es"><head><meta charset="utf-8">'
@@ -247,20 +258,9 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         # existe: invisible hasta que recibe el foco.
         '<a class="vh skip" href="#contenido">Saltar al contenido</a>'
         '<header class="topbar"><div class="prog"></div><div class="tb">'
-        f'<a class="logo" href="#resumen" data-target="resumen">{_logo(uid="nav")}'
+        f'<a class="logo" href="#resumen" data-target="resumen">{_logo()}'
         "<span>Quilate <b>Suite</b></span></a>"
         f"<nav>{nav}</nav>"
-        f'<div class="find">{_icon("i-search", "ic sm")}'
-        '<label class="vh" for="buscar">Filtrar el informe por texto</label>'
-        '<input id="buscar" type="search" placeholder="Filtrar el informe…" '
-        'autocomplete="off" list="sugerencias">'
-        f"{lista_sugerencias}"
-        # El contador del filtro cambia sin que se recargue nada: sin
-        # `aria-live`, quien no ve la pantalla escribe en el buscador y no se
-        # entera de que ha pasado de 40 secciones a 2, ni de que no queda
-        # ninguna. «polite» y no «assertive» porque se actualiza en cada tecla.
-        '<span class="cnt" id="buscar-cnt" role="status" aria-live="polite"></span>'
-        f"{chips_sugerencias}</div>"
         '<button class="btn" type="button" id="export-sel" disabled '
         'title="Marca secciones con su casilla para exportarlas juntas en un solo fichero">'
         f'{_icon("i-download")}<span>Exportar (0)</span></button>'
@@ -275,14 +275,18 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
         f"{_sidebar(si, bench, auditor, projection, secs)}"
         '<main class="main" id="contenido">'
         '<header class="page">'
-        f'{_logo("brandmark hero", uid="cab")}'
+        f'{_logo("brandmark hero")}'
         '<div class="htxt"><div class="kicker">Quilate Suite</div>'
         "<h1>Informe de rendimiento y optimización</h1>"
-        f'<div class="meta">{_e(si.hostname)} · {_e(si.os_name)} · generado el {date}</div>'
+        # Solo la fecha. El equipo y el sistema salían aquí, en el panel lateral
+        # y otra vez en Inventario: tres veces los mismos dos datos en la primera
+        # pantalla. Quien recibe un extracto suelto sigue viendo de qué equipo es
+        # por el <title>, que lleva el nombre del host.
+        f'<div class="meta">Generado el {date}</div>'
         "</div></header>"
         f"{_hero(bench, auditor, projection)}{_component_strip(bench)}{body}"
         "</main></div>"
-        f'<footer><span class="fbrand">{_logo("brandmark foot", uid="pie")}'
+        f'<footer><span class="fbrand">{_logo("brandmark foot")}'
         f"{_e(APP_NAME)} v{APP_VERSION} · escala de referencia: "
         f"100 pts = gama media reciente</span>"
         f'<span>{_e(AUTHOR)} — <a href="{WEBSITE_URL}">{_e(WEBSITE)}</a></span></footer>'

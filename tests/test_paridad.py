@@ -370,18 +370,41 @@ class Marca(unittest.TestCase):
         # del borde exterior del anillo y lo achata arriba y a la izquierda.
         # Recortar una unidad de un círculo de radio 37 deja una cuerda plana de
         # diecisiete, así que el fallo no es sutil: el logo deja de ser redondo.
-        from quilate.export.html_export import _favicon, _logo
-        for marcado in (_logo(), _favicon()):
+        from quilate.export.html_export import _favicon
+        from quilate.export.html_export.piezas import _logo_defs
+        for marcado in (_logo_defs(), _favicon()):
             self.assertIn("maskUnits", marcado)
             self.assertIn("userSpaceOnUse", marcado)
 
-    def test_dos_copias_del_logo_no_comparten_identificadores(self):
-        # Dos <svg> con el mismo id de degradado en la misma página: el segundo
-        # se pinta con las paradas del primero, o no se pinta.
-        from quilate.export.html_export import _logo
-        uno, otro = _logo(uid="uno"), _logo(uid="otro")
-        self.assertNotEqual(uno, otro)
-        self.assertNotIn('id="ql-oro-uno"', otro)
+    def test_el_degradado_del_logo_se_declara_una_sola_vez(self):
+        # Las cinco apariciones del isotipo llevaban cada una su propio
+        # <linearGradient> y su propia <mask>, idénticos salvo el sufijo del id.
+        # Ahora los declara el sprite y todas apuntan ahí.
+        from quilate.export.html_export.piezas import _logo
+        marcado = _logo()
+        self.assertIn("url(#ql-oro)", marcado)
+        self.assertNotIn("<defs", marcado)
+        self.assertNotIn("linearGradient", marcado)
+
+    def test_el_sprite_no_se_esconde_con_display_none(self):
+        # Dentro de un elemento sin caja, Chromium no resuelve ni degradados ni
+        # máscaras: los iconos de trazo salían igual porque no referencian nada,
+        # pero el isotipo se quedaba invisible en las cinco apariciones. Con
+        # tamaño cero sí se resuelven, y es lo único que sostiene que los
+        # `<defs>` compartidos puedan vivir aquí.
+        from quilate.export.html_export.piezas import _sprite
+        marcado = _sprite()
+        self.assertNotIn("display:none", marcado)
+        self.assertIn("width:0", marcado)
+        self.assertIn('id="ql-oro"', marcado)
+
+    def test_el_extracto_exportado_se_lleva_el_degradado(self):
+        # `buildDocument` clona el sprite, el <style>, la cabecera y el pie, y
+        # nada más. Cabecera y pie llevan isotipo: si los `<defs>` vivieran
+        # fuera del sprite, cada extracto descargado saldría con el logo sin
+        # pintar y no habría forma de notarlo desde aquí.
+        from quilate.export.html_export import HTML_JS
+        self.assertIn("getElementById('sprite')", HTML_JS)
 
 
 class JavaScriptDelInforme(unittest.TestCase):

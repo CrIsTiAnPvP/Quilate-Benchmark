@@ -109,19 +109,9 @@ class NavegarSinRaton(unittest.TestCase):
         regla = HTML_CSS[HTML_CSS.index(".skip:focus"):][:400]
         self.assertIn("clip:auto", regla, "sin deshacer el recorte sigue invisible")
 
-    def test_el_contador_del_filtro_se_anuncia(self):
-        # Cambia sin recargar nada: sin esto, quien no ve la pantalla escribe en
-        # el buscador y no se entera de que no queda ninguna sección.
-        html = self.informe()
-        contador = html[html.index('id="buscar-cnt"') - 60:][:200]
-        self.assertIn('aria-live="polite"', contador)
-
-    def test_el_contador_no_interrumpe_en_cada_tecla(self):
-        # `assertive` interrumpiría al lector con cada pulsación mientras se
-        # escribe, que es justo cuando la persona está haciendo otra cosa.
-        html = self.informe()
-        contador = html[html.index('id="buscar-cnt"') - 60:][:200]
-        self.assertNotIn('aria-live="assertive"', contador)
+    # El informe tuvo un filtro por texto en la barra superior, con un contador
+    # de resultados anunciado por `aria-live`. Se quitó entero: aquí vivían las
+    # dos pruebas de ese anuncio.
 
 
 class Formula(unittest.TestCase):

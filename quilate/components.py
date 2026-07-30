@@ -95,16 +95,16 @@ def _component_specs(key: str, si: SystemInfo, bench: Benchmark | None,
             source = temperature_source()
             out.append(("Temperatura bajo carga",
                         f"{max(temps):.0f} °C" + (f"  ·  {source}" if source else "")))
-        else:
-            out.append(("Temperatura bajo carga",
-                        "sin sensor accesible (instala LibreHardwareMonitor)"))
+        # Sin sensor no se pone la fila. Decía «sin sensor accesible (instala
+        # LibreHardwareMonitor)», que es exactamente lo que ya explica el bloque
+        # de sensores del estado del sistema, con el detalle de qué se intentó:
+        # aquí era el mismo hueco de dato anunciado por segunda vez.
         if bench and bench.scaling_efficiency is not None:
             out.append(("Escalado multihilo", f"{bench.scaling_efficiency:.0f}%"))
-        if bench:
-            for key_metric in ("sustained", "freq_under_load"):
-                m = bench.metrics.get(key_metric)
-                if m:
-                    out.append((m["label"], f"{m['value']} {m['unit']}".strip()))
+        # «Rendimiento sostenido» y «Frecuencia con todos los núcleos» no se
+        # copian aquí: son métricas de diagnóstico del benchmark y salen en su
+        # tabla, con su nota al pie. Duplicadas, la misma cifra aparecía con el
+        # mismo rótulo en dos tablas separadas por media pantalla.
 
     elif key == "memory":
         total_gb = si.ram_total / 1024**3

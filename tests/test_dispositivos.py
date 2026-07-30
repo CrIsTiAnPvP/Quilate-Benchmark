@@ -252,6 +252,16 @@ class DriversSinTocar(unittest.TestCase):
         a, _ = auditar_drivers([driver(f"Cacharro {n}", años=6 + n) for n in range(7)])
         self.assertIn("y 3 más", a.findings[0].detail)
 
+    def test_una_lista_corta_no_esconde_ninguno(self):
+        # Recortar a cuatro de cinco dejaba el título contando cinco, la lista
+        # enseñando cuatro y un «y 1 más» que no decía cuál era el quinto: el
+        # dispositivo se ha medido y luego no hay forma de saber su nombre.
+        a, _ = auditar_drivers([driver(f"Cacharro {n}", años=6 + n) for n in range(5)])
+        detalle = a.findings[0].detail
+        self.assertNotIn("más", detalle.split(".")[0])
+        for n in range(5):
+            self.assertIn(f"Cacharro {n}", detalle)
+
     def test_no_promete_velocidad(self):
         a, _ = auditar_drivers([driver(años=9)])
         f = a.findings[0]

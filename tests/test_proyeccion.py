@@ -90,3 +90,35 @@ def test_los_hallazgos_sin_ganancia_no_cuentan():
 def test_sin_benchmark_no_proyecta_puntuacion():
     r = project_improvement(None, [hallazgo(gain=0.2)])
     assert "projected_overall" not in r
+
+
+# --- La tabla de la proyección solo enseña lo que cambia ----------------------
+
+def _tabla(actuales, ganancias):
+    from quilate.export.html_export.bloques import _projection_tables
+    return _projection_tables({
+        "current_components": actuales,
+        "component_gain": ganancias,
+        "projected_components": {k: v * (1 + ganancias.get(k, 0.0))
+                                 for k, v in actuales.items()},
+    })
+
+
+def test_la_proyeccion_no_repite_los_componentes_que_no_mejoran():
+    # Listarlos todos obligaba a leer cinco filas de antes y después para
+    # descubrir que cuatro eran idénticas a los dos lados. Las cifras de «ahora»
+    # ya están en Benchmark y en la tira del resumen.
+    html = _tabla({"memory": 115.0, "gpu": 109.0, "cpu_single": 118.0},
+                  {"memory": 0.12})
+    assert html.count("<tr>") == 2          # encabezado + la única que mejora
+    assert "Memoria" in html
+    assert "no tienen mejoras pendientes" in html
+    assert "GPU" in html                    # nombrados en la nota, no perdidos
+    assert "CPU monohilo" in html
+
+
+def test_si_nada_mejora_no_se_pinta_la_tabla():
+    html = _tabla({"memory": 115.0, "gpu": 109.0}, {})
+    assert "<table>" not in html
+    assert "Ningún componente tiene mejoras" in html
+    assert "Memoria" in html and "GPU" in html

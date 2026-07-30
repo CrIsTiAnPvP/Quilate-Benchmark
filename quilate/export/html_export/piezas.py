@@ -185,33 +185,50 @@ def _term(texto: str, clave: str) -> str:
             f'<span class="tip">{_e(GLOSARIO[clave])}</span></span>')
 
 
-def _logo(cls: str = "brandmark", uid: str = "a") -> str:
-    """Isotipo de Quilate, mismo trazado que quilate.svg.
+def _logo_defs() -> str:
+    """El degradado y la máscara del isotipo, declarados una sola vez.
 
-    Va inline y completo en cada sitio donde aparece, no como <use> del sprite:
-    el sprite lleva display:none y ahí Chromium no resuelve el degradado ni la
-    máscara —los iconos de trazo sí salen porque no referencian nada—, así que
-    el logotipo quedaba invisible. El sufijo evita que dos copias compartan id.
+    Viven dentro del sprite, y no sueltos por el documento, porque el extracto
+    que genera «Descargar» se lleva el sprite entero y nada más: si estuvieran
+    fuera, cada extracto saldría con los isotipos de la cabecera y del pie sin
+    degradado.
 
     El `maskUnits` explícito no es decorativo: sin él la región de la máscara es
     la caja del círculo ampliada un 10%, medida SIN el grosor del trazo, y el
     anillo salía achatado arriba y a la izquierda en vez de redondo.
     """
-    oro, muesca = f"ql-oro-{uid}", f"ql-muesca-{uid}"
     return (
-        f'<svg class="{cls}" viewBox="0 0 100 100" aria-hidden="true">'
-        f'<defs><linearGradient id="{oro}" x1="20" y1="10" x2="84" y2="94" '
+        '<defs><linearGradient id="ql-oro" x1="20" y1="10" x2="84" y2="94" '
         'gradientUnits="userSpaceOnUse">'
         '<stop offset="0" stop-color="#ffeeb0"/><stop offset=".34" stop-color="#f8d156"/>'
         '<stop offset=".70" stop-color="#e9ab1e"/><stop offset="1" stop-color="#b87c0b"/>'
         "</linearGradient>"
-        f'<mask id="{muesca}" maskUnits="userSpaceOnUse" x="0" y="0" width="100" '
+        '<mask id="ql-muesca" maskUnits="userSpaceOnUse" x="0" y="0" width="100" '
         'height="100"><rect width="100" height="100" fill="#fff"/>'
         '<rect x="56.5" y="46" width="21" height="52" fill="#000" '
         'transform="rotate(-45 67 72)"/></mask></defs>'
-        f'<circle cx="48" cy="46" r="30" fill="none" stroke="url(#{oro})" stroke-width="14" '
-        f'mask="url(#{muesca})"/>'
-        f'<rect x="60.5" y="50.8" width="13" height="42.4" rx="1" fill="url(#{oro})" '
+    )
+
+
+def _logo(cls: str = "brandmark") -> str:
+    """Isotipo de Quilate, mismo trazado que quilate.svg.
+
+    El trazado va inline en cada sitio donde aparece, pero el degradado y la
+    máscara son los del sprite: son idénticos en las cinco apariciones y
+    repetirlos era medio kilobyte de marcado por copia.
+
+    Referenciarlos exige que el sprite NO lleve `display:none`: con él Chromium
+    no resuelve ni degradados ni máscaras —los iconos de trazo sí salían porque
+    no referencian nada— y el logotipo quedaba invisible. Por eso `_sprite` lo
+    esconde con tamaño cero, que sí lo deja resolver. Ese fue el motivo por el
+    que cada copia llevó sus propios `<defs>` durante un tiempo; el tamaño cero
+    lo resuelve sin duplicar nada.
+    """
+    return (
+        f'<svg class="{cls}" viewBox="0 0 100 100" aria-hidden="true">'
+        '<circle cx="48" cy="46" r="30" fill="none" stroke="url(#ql-oro)" stroke-width="14" '
+        'mask="url(#ql-muesca)"/>'
+        '<rect x="60.5" y="50.8" width="13" height="42.4" rx="1" fill="url(#ql-oro)" '
         'transform="rotate(-45 67 72)"/></svg>'
     )
 
@@ -298,9 +315,16 @@ def _gauge(score: float, letter: str, size: int = 168) -> str:
 
 
 def _sprite() -> str:
+    """Los iconos y los `<defs>` del isotipo, en un solo bloque al principio.
+
+    Se esconde con tamaño cero y no con `display:none`: los `<symbol>` de trazo
+    dan igual, pero el degradado y la máscara del isotipo que viven aquí dejan
+    de resolverse en Chromium dentro de un elemento sin caja. Ver `_logo`.
+    """
     symbols = "".join(f'<symbol id="{k}" viewBox="0 0 24 24">{v}</symbol>'
                       for k, v in ICONS.items())
-    return f'<svg id="sprite" style="display:none" aria-hidden="true">{symbols}</svg>'
+    return (f'<svg id="sprite" style="position:absolute;width:0;height:0;overflow:hidden" '
+            f'aria-hidden="true">{_logo_defs()}{symbols}</svg>')
 
 
 def _slug(text: str) -> str:

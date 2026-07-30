@@ -131,7 +131,15 @@ align-items:center;gap:8px;font-size:11.5px;color:var(--faint)}
 white-space:nowrap}
 .crumb .pct{margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap}
 
-.tb nav{display:flex;gap:2px;flex:1 1 380px;flex-wrap:wrap}
+.tb nav{display:flex;gap:2px;flex:1 1 380px;flex-wrap:wrap;align-items:center}
+/* Los enlaces se agrupan por para qué sirve cada sección —lo que explica la
+   nota, y lo que hay que hacer con ella—, que es el mismo criterio que ya
+   reparte las secciones en `data-group`. Un filete y nada más: con rótulos
+   encima, al envolver la barra en dos filas los rótulos se separaban de su
+   grupo y señalaban al de al lado. El degradado se apaga en los extremos para
+   que un separador que caiga al final de una fila no se note. */
+.tb nav .navsep{width:1px;align-self:stretch;margin:2px 7px;flex:none;
+background:linear-gradient(180deg,transparent,var(--gold-dk),transparent);opacity:.7}
 .tb nav a{display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:var(--r-xs);
 color:var(--dim);text-decoration:none;font-size:12.5px;white-space:nowrap;
 transition:color .15s,background .15s;position:relative}
@@ -144,30 +152,6 @@ box-shadow:inset 0 -2px 0 var(--acc)}
 .sev.s-critical,.sev.s-high{background:var(--bad)}
 .sev.s-medium{background:var(--warn)}
 .sev.s-low,.sev.s-info{background:var(--acc)}
-
-.find{display:flex;align-items:center;gap:7px;background:var(--surface);
-border:1px solid var(--line);border-radius:var(--pill);padding:5px 12px;min-width:186px;
-position:relative}
-.find svg{color:var(--faint)}
-.find input{background:none;border:0;color:var(--txt);font:inherit;font-size:12.5px;
-width:100%;min-width:0;outline:none}
-.find input::placeholder{color:var(--faint)}
-.find.hit{border-color:var(--acc)}
-.find .cnt{color:var(--faint);font-size:11px;white-space:nowrap}
-/* Un campo de filtro vacío no dice qué se puede filtrar. Al enfocarlo aparecen
-   ejemplos sacados de este informe —sus categorías, sus componentes—, no una
-   lista genérica que podría no encontrar nada. */
-.tips{position:absolute;top:calc(100% + 9px);left:0;z-index:70;background:var(--ink2);
-border:1px solid var(--line2);border-radius:var(--r-s);box-shadow:var(--sh-lg);
-padding:11px 12px;display:none;width:max-content;max-width:min(360px,82vw)}
-.find:focus-within .tips{display:block}
-.find.hit .tips{display:none}
-.tips .th{font-size:10px;text-transform:uppercase;letter-spacing:.13em;color:var(--faint);
-margin-bottom:9px;font-weight:700}
-.tips .tr{display:flex;flex-wrap:wrap;gap:6px}
-.tips button{background:var(--surface);border:1px solid var(--line);color:var(--dim);
-border-radius:var(--pill);padding:3px 11px;font:inherit;font-size:11.5px;cursor:pointer}
-.tips button:hover{color:var(--acc);border-color:var(--acc)}
 
 .btn{background:var(--surface);color:var(--dim);border:1px solid var(--line);
 border-radius:var(--r-xs);padding:6px 11px;font:inherit;font-size:12px;cursor:pointer;
@@ -243,8 +227,12 @@ header.page{margin-bottom:22px;display:flex;align-items:center;gap:18px}
 header.page .htxt{min-width:0}
 header.page .kicker{color:var(--gold);font-size:10.5px;font-weight:700;
 letter-spacing:.19em;text-transform:uppercase;margin-bottom:5px}
-header.page h1{margin:0 0 6px;font-size:30px;letter-spacing:-.028em;line-height:1.12;
-font-weight:800}
+/* El tamaño es el mismo de siempre a partir de unos 500px de ancho; por debajo
+   baja hasta 22px. A 30px fijos, «Informe de rendimiento y optimización» ocupa
+   tres líneas en una pantalla de 320px y empuja el resumen fuera de la vista
+   antes de haber dicho nada. */
+header.page h1{margin:0 0 6px;font-size:clamp(22px,6vw,30px);letter-spacing:-.028em;
+line-height:1.12;font-weight:800}
 header.page .meta{color:var(--dim);font-size:12.5px;overflow-wrap:anywhere}
 @media (max-width:560px){header.page .brandmark.hero{display:none}}
 
@@ -270,7 +258,11 @@ border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;margin-bot
 box-shadow:var(--sh);position:relative;overflow:hidden}
 .strip::before{content:"";position:absolute;inset:0 0 auto;height:2px;
 background:linear-gradient(90deg,var(--gold-dk),transparent 55%);opacity:.65}
-.cs-row{display:grid;grid-template-columns:minmax(170px,248px) minmax(0,1fr) 82px;
+/* Sin barra: la misma escala con la misma marca de referencia se pinta entera
+   en la tabla de Benchmark, a media pantalla de aquí. Esta tira responde a «¿por
+   dónde falla?» de un vistazo, y para eso basta el orden de las filas —van de
+   peor a mejor— más la cifra. La barra la repetía sin añadir nada. */
+.cs-row{display:grid;grid-template-columns:minmax(0,1fr) 82px;
 align-items:center;gap:14px;padding:7px 0}
 /* La etiqueta envuelve en vez de recortarse: «Almacenamiento» con el distintivo
    al lado no cabe en una línea, y cortarlo a «Almacenam...» deja al componente
@@ -278,14 +270,9 @@ align-items:center;gap:14px;padding:7px 0}
 .cs-name{display:flex;align-items:center;gap:8px;font-size:14px;min-width:0;flex-wrap:wrap}
 .cs-name svg{color:var(--faint)}
 .cs-name .badge{font-size:9px;padding:1px 7px}
-.cs-bar .track{min-width:0}
 .cs-num{text-align:right;font-weight:800;font-size:18px;letter-spacing:-.03em}
 .cs-let{color:var(--faint);font-size:11px;font-weight:700;margin-left:6px;letter-spacing:.08em}
 .strip .hint{border-top:1px solid var(--line);margin-top:10px}
-@media (max-width:620px){
-.cs-row{grid-template-columns:minmax(0,1fr) 66px;row-gap:2px}
-.cs-bar{grid-column:1/-1}
-}
 
 /* -------------------------------------------------------- secciones ------ */
 /* El tono dice para qué sirve cada sección, que es lo que decide en qué orden
@@ -321,7 +308,6 @@ details.sec>summary .chev{color:var(--faint);transition:transform .18s}
 details.sec[open]>summary{border-bottom:1px solid var(--line)}
 details.sec[open]>summary .chev{transform:rotate(90deg)}
 .body{padding:18px}
-.sec.nomatch{display:none}
 
 /* Índice interno de las secciones largas, generado por el JS a partir de los
    subtítulos: «Estado del sistema» son cinco tablas seguidas y llegar a la
@@ -340,6 +326,9 @@ text-decoration:none;margin-top:14px}
 .card{background:var(--surface2);border:1px solid var(--line);border-radius:var(--r-s);
 padding:16px;margin-bottom:12px}
 .card:last-child{margin-bottom:0}
+/* Las tarjetas con id son destino del índice interno de su sección: sin margen
+   de desplazamiento, el salto las deja con la cabecera debajo de la barra. */
+.card[id]{scroll-margin-top:calc(var(--nav) + 16px)}
 .tw{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:14px}
 th{text-align:left;color:var(--faint);font-weight:700;font-size:10.5px;text-transform:uppercase;
@@ -349,12 +338,22 @@ td{padding:10px;border-bottom:1px solid var(--line)}
 table tr:nth-of-type(2n){background:rgba(255,255,255,.02)}
 table tr:hover td{background:var(--acc-soft)}
 tr:last-child td{border-bottom:none}
-tr.nomatch{display:none}
 .track{height:7px;background:#1e2532;border-radius:4px;min-width:104px;position:relative}
 .fill{height:100%;border-radius:4px;
 animation:grow .8s cubic-bezier(.16,.84,.34,1) both}
 @keyframes grow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
 .fill{transform-origin:left center}
+/* Escalonado dentro de cada tabla. Un informe con benchmark trae del orden de
+   noventa barras contando la tabla de pruebas, las fichas y la proyección, y
+   arrancarlas en el mismo fotograma obliga al compositor a levantarlas todas a
+   la vez: la entrada se ve a tirones justo donde están las cifras. Cuatro
+   tramos de 40 ms reparten el trabajo sin que se perciba espera. El ciclo se
+   repite cada cinco filas para que una tabla de treinta no acabe con la última
+   barra un segundo y medio tarde. */
+table tr:nth-of-type(5n+2) .fill{animation-delay:.04s}
+table tr:nth-of-type(5n+3) .fill{animation-delay:.08s}
+table tr:nth-of-type(5n+4) .fill{animation-delay:.12s}
+table tr:nth-of-type(5n+5) .fill{animation-delay:.16s}
 /* Marca de la referencia dentro de la barra: sin ella, 100 y 190 puntos se
    pintaban igual de llenos y la barra dejaba de decir nada por encima de la
    media. Ahora el 100 es una línea fija y se ve quién la pasa. */
@@ -374,6 +373,14 @@ font-weight:700;text-transform:uppercase;letter-spacing:.07em;white-space:nowrap
 .kvs{display:grid;grid-template-columns:200px minmax(0,1fr);gap:7px 16px;font-size:14px}
 .kvs .k{color:var(--dim)}
 .kvs div{overflow-wrap:anywhere}
+/* Dos columnas de 200px + resto no caben en un móvil: la clave se partía en
+   tres líneas para dejarle sitio a un valor que tampoco cabía. Apiladas, la
+   clave pasa a ser un rótulo pequeño encima de su dato. */
+@media (max-width:560px){
+.kvs{grid-template-columns:minmax(0,1fr);gap:0}
+.kvs .k{font-size:11.5px;color:var(--faint);margin-top:9px}
+.kvs .k:first-child{margin-top:0}
+}
 .sub-h{color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.11em;
 margin:20px 0 9px;font-weight:700;scroll-margin-top:calc(var(--nav) + 16px)}
 .sub-h:first-child{margin-top:0}
@@ -393,10 +400,14 @@ border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:14px}
 .finding ul{margin:0;padding-left:20px;color:#cbd4e0;font-size:14px}
 .finding li{margin-bottom:5px}
 .finding:target{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
-.steps-link{margin:0}
-.steps-link a{display:inline-flex;align-items:center;gap:7px;font-size:13px;
+/* `.xref` es lo mismo con otro nombre: una remisión a donde está el dato
+   completo, en vez de repetirlo aquí. El informe tiene el detalle de cada
+   medida en un solo sitio y el resto apunta a él. */
+.steps-link,.xref{margin:0}
+.steps-link a,.xref a{display:inline-flex;align-items:center;gap:7px;font-size:13px;
 text-decoration:none;color:var(--acc)}
-.steps-link a:hover{text-decoration:underline}
+.steps-link a:hover,.xref a:hover{text-decoration:underline}
+.xref{margin-top:4px}
 details.howto{margin-top:14px;border:1px solid var(--line);border-radius:var(--r-s);
 background:var(--acc-soft)}
 details.howto>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:9px;
@@ -522,21 +533,31 @@ transition:opacity .2s;border-radius:var(--pill);width:42px;height:42px;
 justify-content:center;padding:0}
 #top.on{opacity:1;pointer-events:auto}
 .tray.on ~ #top{right:calc(min(320px,100vw - 40px) + 32px)}
+/* Ese desplazamiento sirve mientras la bandeja no ocupe la pantalla entera. Por
+   debajo de 360px de ancho `100vw - 40px` es menor que 320px, el cálculo daba
+   `right:calc(100vw - 8px)` y el botón se iba fuera de la ventana: seguía
+   pulsable para el teclado pero no había forma de verlo. Con la bandeja abierta
+   y sin sitio al lado, se retira. */
+@media (max-width:420px){
+.tray.on ~ #top{display:none}
+}
 
 @media (max-width:980px){
 .layout{grid-template-columns:minmax(0,1fr);padding-top:18px}
 .side{position:static;flex-direction:row;flex-wrap:wrap}
 .side .panel{flex:1;min-width:236px}
 .tb .logo span{display:none}
-.here{display:none!important}
 }
 @media (prefers-reduced-motion:reduce){
 html{scroll-behavior:auto}
-*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;
-transition-duration:.001ms!important}
+/* El retardo va con la duración: acortar la animación sin quitar el retardo
+   deja la barra invisible —`both` mantiene el fotograma inicial— durante los
+   160 ms del escalonado, que es justo el parpadeo que se quería evitar. */
+*,*::before,*::after{animation-duration:.001ms!important;animation-delay:0s!important;
+animation-iteration-count:1!important;transition-duration:.001ms!important}
 }
 @media print{
-.topbar,.side,#top,.exp,.pick,.tray,.subnav,.backtop,.find,.term>svg{display:none}
+.topbar,.side,#top,.exp,.pick,.tray,.subnav,.backtop,.term>svg{display:none}
 body::before{display:none}
 html{background:#fff;background-image:none}
 body{background:#fff;color:#000}

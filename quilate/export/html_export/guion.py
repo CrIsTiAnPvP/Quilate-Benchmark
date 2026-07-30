@@ -1,8 +1,8 @@
 """El JavaScript del informe, entero y embebido.
 
-Filtrado por texto, navegacion, progreso de lectura y exportacion por
-secciones. Todo opcional: sin JS el informe se lee igual, que es la razon de
-que las secciones sean `<details>` y no divs con clases.
+Navegacion, indice interno, progreso de lectura y exportacion por secciones.
+Todo opcional: sin JS el informe se lee igual, que es la razon de que las
+secciones sean `<details>` y no divs con clases.
 """
 
 from __future__ import annotations
@@ -36,12 +36,22 @@ HTML_JS = """
   if (window.ResizeObserver && topbar) new ResizeObserver(syncNav).observe(topbar);
 
   // ---- Plegar y desplegar ---------------------------------------------------
+  // El rotulo sale del estado real de las secciones y no de lo ultimo que se
+  // pulso. Quien abre o cierra media docena a mano dejaba el boton diciendo
+  // «Colapsar todo» con todo ya cerrado, y entonces la primera pulsacion no
+  // hacia nada visible: gastaba el turno en poner el rotulo al dia.
+  function sincronizarToggle(){
+    var abiertas = secs.some(function(s){ return s.open; });
+    toggle.dataset.open = abiertas ? '1' : '0';
+    toggle.querySelector('span').textContent = abiertas ? 'Colapsar todo' : 'Expandir todo';
+  }
   function setAll(open){
     secs.forEach(function(s){ s.open = open; });
-    toggle.dataset.open = open ? '1' : '0';
-    toggle.querySelector('span').textContent = open ? 'Colapsar todo' : 'Expandir todo';
+    sincronizarToggle();
   }
   toggle.addEventListener('click', function(){ setAll(toggle.dataset.open !== '1'); });
+  secs.forEach(function(s){ s.addEventListener('toggle', sincronizarToggle); });
+  sincronizarToggle();
 
   // Saltar a una seccion plegada no serviria de nada: se abre antes de ir.
   function abrir(id){
@@ -80,14 +90,27 @@ HTML_JS = """
   secs.forEach(function(s){
     var body = s.querySelector('.body');
     if (!body) return;
-    var subs = Array.prototype.slice.call(body.querySelectorAll('.sub-h'));
+    // La ficha por componente se indexa por tarjeta y no por subtitulo: sus
+    // `.sub-h` son los mismos tres o cuatro rotulos repetidos dentro de cada una
+    // de las seis tarjetas, y un indice con quince entradas que dicen lo mismo
+    // seis veces no lleva a ninguna parte. Donde no hay tarjetas con cabecera,
+    // los subtitulos siguen siendo los puntos de referencia de la seccion.
+    var subs = Array.prototype.slice.call(body.querySelectorAll('.chead h3'));
+    if (!subs.length) subs = Array.prototype.slice.call(body.querySelectorAll('.sub-h'));
     if (subs.length < 3) return;
     var nav = document.createElement('div');
     nav.className = 'subnav';
     subs.forEach(function(h, i){
-      if (!h.id) h.id = s.id + '-s' + i;
+      // Se enlaza la tarjeta entera y no su titulo: el ancla en el <h3> deja la
+      // cabecera pegada al borde de la barra y la nota del componente, que va
+      // en esa misma linea, se queda medio tapada.
+      var destino = h;
+      if (h.parentNode && h.parentNode.classList.contains('chead')) {
+        destino = h.closest('.card') || h;
+      }
+      if (!destino.id) destino.id = s.id + '-s' + i;
       var a = document.createElement('a');
-      a.href = '#' + h.id;
+      a.href = '#' + destino.id;
       a.textContent = h.textContent.trim();
       nav.appendChild(a);
     });
@@ -127,75 +150,21 @@ HTML_JS = """
     if (prog) prog.style.width = avance + '%';
     topBtn.classList.toggle('on', window.scrollY > 500);
   }
-  window.addEventListener('scroll', spy, {passive:true});
-  window.addEventListener('resize', spy);
+  // El scroll dispara muchos mas eventos que fotogramas pinta el navegador, y
+  // `spy` recorre las doce secciones midiendo cada una. Agrupando por fotograma
+  // se hace el calculo una vez por repintado en vez de una por evento; el
+  // resultado en pantalla es el mismo porque nada se ve entre dos fotogramas.
+  // Las llamadas directas a `spy()` se quedan como estan: quien pulsa un enlace
+  // necesita el resaltado ya, no en el siguiente fotograma.
+  var pendiente = false;
+  function programarSpy(){
+    if (pendiente) return;
+    pendiente = true;
+    requestAnimationFrame(function(){ pendiente = false; spy(); });
+  }
+  window.addEventListener('scroll', programarSpy, {passive:true});
+  window.addEventListener('resize', programarSpy);
   spy();
-
-  // ---- Buscador -------------------------------------------------------------
-  // Filtra filas de tabla, hallazgos y elementos de lista sin tocar el DOM mas
-  // alla de una clase: hay informes con doscientas filas de ficheros y encontrar
-  // uno a ojo no es razonable. Se recuerda que secciones estaban abiertas para
-  // devolverlas a su sitio al vaciar la busqueda.
-  var buscador = document.getElementById('buscar');
-  var contador = document.getElementById('buscar-cnt');
-  var caja = document.querySelector('.find');
-  var abiertasAntes = null;
-
-  function filtrables(){
-    return Array.prototype.slice.call(
-      document.querySelectorAll('.body table tr, .body .card.finding, .body .imp li, ' +
-                                '.body details.cat'));
-  }
-
-  function filtrar(texto){
-    var q = texto.trim().toLowerCase();
-    if (q && abiertasAntes === null) {
-      abiertasAntes = secs.map(function(s){ return s.open; });
-    }
-    var total = 0;
-    if (!q) {
-      filtrables().forEach(function(el){ el.classList.remove('nomatch'); });
-      secs.forEach(function(s, i){
-        s.classList.remove('nomatch');
-        if (abiertasAntes) s.open = abiertasAntes[i];
-      });
-      abiertasAntes = null;
-    } else {
-      filtrables().forEach(function(el){
-        // La fila de encabezados no se filtra nunca: sin ella la tabla que
-        // queda es una lista de numeros sin nombre.
-        if (el.tagName === 'TR' && el.querySelector('th')) return;
-        var hit = el.textContent.toLowerCase().indexOf(q) >= 0;
-        el.classList.toggle('nomatch', !hit);
-        if (hit) total++;
-      });
-      secs.forEach(function(s){
-        var body = s.querySelector('.body');
-        var hit = !!body && body.textContent.toLowerCase().indexOf(q) >= 0;
-        s.classList.toggle('nomatch', !hit);
-        if (hit) s.open = true;
-      });
-    }
-    if (contador) contador.textContent = q ? (total + (total === 1 ? ' fila' : ' filas')) : '';
-    if (caja) caja.classList.toggle('hit', !!q);
-  }
-
-  if (buscador) {
-    buscador.addEventListener('input', function(){ filtrar(buscador.value); });
-    buscador.addEventListener('keydown', function(ev){
-      if (ev.key === 'Escape') { buscador.value = ''; filtrar(''); buscador.blur(); }
-    });
-    // Los ejemplos se aplican con mousedown y no con click: al soltar el raton
-    // el campo ya habria perdido el foco, el panel se habria cerrado por CSS y
-    // el clic caeria en el vacio.
-    Array.prototype.forEach.call(document.querySelectorAll('[data-tip]'), function(b){
-      b.addEventListener('mousedown', function(ev){
-        ev.preventDefault();
-        buscador.value = b.dataset.tip;
-        filtrar(buscador.value);
-      });
-    });
-  }
 
   // ---- Exportacion de secciones ---------------------------------------------
   // El fichero resultante se construye con el mismo <style> y el mismo sprite de

@@ -673,7 +673,12 @@ class ChecksRendimiento:
         def años(dias: int) -> int:
             return round(dias / 365.25)
 
-        visibles = viejos[:4]
+        # Recortar a cuatro para ocultar uno o dos no ahorra nada y deja el
+        # título prometiendo «5 dispositivos» sobre una lista de cuatro y un «y 1
+        # más» que no dice cuál: el dato se ha medido, cuenta para el recuento y
+        # luego no se enseña. Hasta seis se listan todos; a partir de ahí el
+        # recorte sí evita un párrafo que nadie lee entero.
+        visibles = viejos if len(viejos) <= 6 else viejos[:4]
         lista = ", ".join(f"{n} ({años(d)} años)" for n, d in visibles)
         if len(viejos) > len(visibles):
             lista += f" y {len(viejos) - len(visibles)} más"

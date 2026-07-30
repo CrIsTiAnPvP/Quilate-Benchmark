@@ -20,7 +20,7 @@ from ...components import COMPONENT_TO_GROUP, ComponentCard, _no_score_text
 from ...console import COMPONENT_LABELS, grade
 from ...sensors import temperature_report, temperature_source
 from ...storage_scan import RECLAIMABLE, REVIEWABLE, ScanResult, candidate_bytes
-from ...sysinfo import KIND_LABELS, SystemInfo, gpu_label, primary_gpu
+from ...sysinfo import KIND_LABELS, SystemInfo, gpu_label
 from .piezas import (COMPONENT_ICONS, SEVERITY_LABELS, Seccion, _e, _gauge,
                      _html_bar, _human, _icon, _logo, _score_color, _term)
 
@@ -61,11 +61,12 @@ def _hero(bench: Benchmark | None, auditor: Auditor, projection: dict[str, Any])
 
 
 def _component_strip(bench: Benchmark | None) -> str:
-    """Las notas por componente, una al lado de otra y sobre la misma escala.
+    """Las notas por componente, una debajo de otra y ordenadas de peor a mejor.
 
-    Es la respuesta a «¿por dónde falla?», que hasta ahora había que deducir
-    comparando filas sueltas de la tabla del benchmark. Con la referencia marcada
-    en todas las barras, el componente que se queda corto salta a la vista.
+    Es la respuesta a «¿por dónde falla?», y para eso basta el orden y la cifra.
+    La barra con la referencia marcada vive en la tabla de Benchmark, que además
+    trae la medida bruta y el margen: aquí la repetía a media pantalla de
+    distancia sin añadir nada que no estuviera ya en el número.
     """
     comp = bench.component_scores() if bench else {}
     if not comp:
@@ -79,13 +80,12 @@ def _component_strip(bench: Benchmark | None) -> str:
         filas += (f'<div class="cs-row"><div class="cs-name">'
                   f'{_icon(COMPONENT_ICONS.get(COMPONENT_TO_GROUP.get(clave, clave), "i-sys"))}'
                   f"<span>{_e(COMPONENT_LABELS.get(clave, clave))}</span>{marca}</div>"
-                  f'<div class="cs-bar">{_html_bar(nota)}</div>'
                   f'<div class="cs-num" style="color:{_score_color(nota)}">{nota:.0f}'
                   f'<span class="cs-let">{_e(letra)}</span></div></div>')
     return (f'<div class="strip"><div class="lbl">Nota por componente</div>{filas}'
-            f'<div class="hint">La marca de cada barra son los 100 puntos de la '
-            f"referencia. Lo que sobresale por la derecha va por encima de un equipo "
-            f"de gama media reciente.</div></div>")
+            f'<div class="hint">100 puntos son los de la referencia: un equipo de gama '
+            f"media reciente. La medida de cada prueba, su margen y la comparación con "
+            f'esa referencia están en <a href="#benchmark">Benchmark</a>.</div></div>')
 
 
 def _findings_panel(auditor: Auditor, bench: Benchmark | None) -> str:
@@ -132,7 +132,7 @@ def _sidebar(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
                      f' · fluidez percibida +{projection.get("experiential_pct", 0):.0f}%</div>')
         # El isotipo de filigrana al fondo: es la única cifra que resume todo el
         # informe, y el sitio donde la marca no compite con ningún dato.
-        panels.append(f'<div class="panel mark">{_logo("brandmark wm", uid="wm")}'
+        panels.append(f'<div class="panel mark">{_logo("brandmark wm")}'
                       f'<div class="lbl">Puntuación global</div>'
                       f"{_gauge(overall, letter)}"
                       f'<div class="sub" style="text-align:center">La marca de arriba son '
@@ -148,18 +148,22 @@ def _sidebar(si: SystemInfo, bench: Benchmark | None, auditor: Auditor,
     ram = f"{si.ram_total / 1024**3:.1f} GB"
     if si.ram_speed_mhz:
         ram += f" @ {si.ram_speed_mhz} MT/s"
+    # Cuatro datos para saber de qué equipo se está hablando mientras se lee el
+    # resto, y nada más. La lista completa —disco, GPU con su driver, módulos de
+    # memoria, volúmenes, BIOS— está en Inventario con bastante más detalle;
+    # repetir aquí siete de esas filas con el texto recortado no era un resumen,
+    # era la misma tabla peor contada.
     equipo = [
         ("i-sys", f"{si.hostname}  ·  {'portátil' if si.is_laptop else 'sobremesa'}"),
         ("i-shield", si.os_name),
         ("i-cpu", f"{si.cpu_name} ({si.cpu_cores}C/{si.cpu_threads}T)"),
         ("i-ram", ram),
-        ("i-disk", f"{si.system_drive} · {si.system_drive_media}"),
-        ("i-gpu", (primary_gpu(si.gpus) or {}).get("name") or "sin datos de GPU"),
-        ("i-clock", f"{si.uptime_hours:.1f} h encendido"),
     ]
     items = "".join(f"<li>{_icon(k)}<span>{_e(v)}</span></li>" for k, v in equipo)
     panels.append(f'<div class="panel"><div class="lbl">Equipo</div>'
-                  f'<ul class="mini">{items}</ul></div>')
+                  f'<ul class="mini">{items}</ul>'
+                  f'<p class="xref"><a href="#inventario">{_icon("i-box")}'
+                  f"Inventario completo</a></p></div>")
 
     return f'<aside class="side">{"".join(panels)}</aside>'
 
@@ -378,7 +382,12 @@ def _html_component_cards(cards: list[ComponentCard]) -> str:
             note = (f'<span class="note" style="color:{_score_color(card.score)}">'
                     f"{card.score:.0f} pts · nota {card.letter}</span>")
         else:
-            note = f'<span class="note" style="color:var(--dim)">{_no_score_text(card)}</span>'
+            # Distintivo y no texto en el sitio de la cifra: con cuatro tarjetas
+            # diciendo «146 pts · nota S» y dos diciendo una frase en gris, las
+            # dos sin nota parecían las que no habían podido medirse. No es que
+            # falte el dato, es que esa categoría no entra en la puntuación.
+            note = (f'<span class="badge b-info" title="{_e(_no_score_text(card))}">'
+                    f"no puntúa</span>")
 
         icon = _icon(COMPONENT_ICONS.get(card.key, "i-sys"), "ic lg")
         block = [f'<div class="card" id="c-{_e(card.key)}"><div class="chead">'
@@ -390,15 +399,16 @@ def _html_component_cards(cards: list[ComponentCard]) -> str:
             block.append(f'<div class="kvs">{specs}</div>')
 
         if card.tests:
-            trs = ""
-            for r in card.tests:
-                measure = f"{r.raw:,.0f}" if r.unit == "IOPS" else f"{r.raw:,.2f}"
-                letter, _ = grade(r.score)
-                trs += (f"<tr><td>{_e(r.name)}</td><td>{measure} {_e(r.unit)}</td>"
-                        f"<td><b>{r.score:.0f}</b></td><td>{letter}</td>"
-                        f"<td>{_html_bar(r.score)}</td></tr>")
-            block.append('<div class="sub-h">Pruebas medidas</div><div class="tw"><table>'
-                         + trs + "</table></div>")
+            # No se repite la tabla: era la de Benchmark con una columna menos y
+            # las mismas cifras, que ya salían además en la tira del resumen. Lo
+            # que la ficha aporta es lo de al lado —las specs, qué se puede
+            # mejorar y con qué riesgo—, así que de la medida solo queda el
+            # nombre de las pruebas que la componen y el camino a su detalle.
+            nombres = " · ".join(_e(r.name) for r in card.tests)
+            block.append(f'<div class="sub-h">Pruebas que dan esta nota</div>'
+                         f'<p class="scan-note">{nombres}</p>'
+                         f'<p class="xref"><a href="#benchmark">{_icon("i-chart")}'
+                         f"Medida, margen y comparación con la referencia en Benchmark</a></p>")
 
         if card.findings:
             head = "Mejoras aplicables"
@@ -617,14 +627,27 @@ def _system_state_block(auditor: Auditor, bench: Benchmark | None) -> str:
     intentos = temperature_report()
     if intentos:
         fuente = temperature_source()
-        filas = "".join(f"<tr><td>{_e(s)}</td><td>{_e(r)}</td></tr>" for s, r in intentos)
+        if fuente:
+            # Con alguna fuente viva la tabla sí distingue: dice cuál respondió y
+            # qué le pasó a cada una de las otras, que es lo que hace falta para
+            # saber si el dato es de fiar o es el último recurso.
+            filas = "".join(f"<tr><td>{_e(s)}</td><td>{_e(r)}</td></tr>" for s, r in intentos)
+            cuerpo = ('<div class="tw"><table><tr><th>Fuente</th><th>Resultado</th></tr>'
+                      + filas + "</table></div>")
+            aviso = f'<p class="scan-note">Fuente en uso: <b>{_e(fuente)}</b>.</p>'
+        else:
+            # Sin ninguna, la tabla eran seis filas idénticas diciendo «sin
+            # datos» debajo de un párrafo que ya lo había dicho: media pantalla
+            # dedicada a un dato que no existe. Los nombres siguen estando, en
+            # una línea, porque saber qué se intentó es lo único que aportaban.
+            cuerpo = ""
+            aviso = ('<p class="scan-note">Ninguna de las '
+                     f"{len(intentos)} fuentes respondió "
+                     f'({_e(", ".join(s for s, _ in intentos))}). Leer la temperatura de CPU '
+                     "en Windows exige un driver en modo kernel; instalar "
+                     "LibreHardwareMonitor y dejarlo abierto la hace accesible.</p>")
         out.append('<div class="card"><div class="sub-h">Sensores de temperatura</div>'
-                   + (f'<p class="scan-note">Fuente en uso: <b>{_e(fuente)}</b>.</p>' if fuente
-                      else '<p class="scan-note">Ninguna fuente respondió. Leer la temperatura '
-                           "de CPU en Windows exige un driver en modo kernel; instalar "
-                           "LibreHardwareMonitor y dejarlo abierto la hace accesible.</p>")
-                   + '<div class="tw"><table><tr><th>Fuente</th><th>Resultado</th></tr>'
-                   + filas + "</table></div></div>")
+                   + aviso + cuerpo + "</div>")
 
     if bench:
         filas = ""
@@ -765,14 +788,23 @@ def _storage_scan_block(scan: ScanResult) -> str:
     out += "</div>"
 
     if scan.files:
+        # Los cinco primeros y no la lista entera: las categorías de arriba ya
+        # traen estos mismos ficheros, y con el nombre de la categoría delante.
+        # Lo único que la lista plana añadía era el orden global por tamaño, y
+        # para eso bastan cinco filas; las otras quince eran las de arriba otra
+        # vez, sin agrupar.
+        top = sorted(scan.files, key=lambda f: -f["size"])[:5]
         trs = ""
-        for f in scan.files:
+        for f in top:
             trs += (f"<tr><td>{_human(f['size'])}</td><td>{_e(f['category'])}</td>"
                     f"<td>{f['age_days']} días</td>"
                     f'<td class="pathcell">{_e(f["path"])}</td></tr>')
-        out += ('<div class="card"><div class="sub-h">Los ficheros más grandes</div>'
+        resto = len(scan.files) - len(top)
+        pie = (f'<p class="scan-note">Los otros {resto} que pasan del umbral están arriba, '
+               "dentro de su categoría.</p>" if resto > 0 else "")
+        out += ('<div class="card"><div class="sub-h">Los cinco más grandes</div>'
                 '<div class="tw"><table><tr><th>Tamaño</th><th>Tipo</th><th>Sin tocar</th>'
-                "<th>Ruta</th></tr>" + trs + "</table></div></div>")
+                "<th>Ruta</th></tr>" + trs + "</table></div>" + pie + "</div>")
 
     if scan.special:
         trs = ""
@@ -788,22 +820,48 @@ def _storage_scan_block(scan: ScanResult) -> str:
 
 
 def _projection_tables(projection: dict[str, Any]) -> str:
-    trs = ""
-    for k, cur in projection["current_components"].items():
+    # Solo lo que cambia. La tabla listaba los cinco componentes con su nota de
+    # hoy —las mismas cifras que la tira del resumen y que Benchmark, por tercera
+    # vez— para acabar diciendo «—» de ganancia en casi todos. Una tabla de
+    # antes y después en la que cuatro de cinco filas son iguales a los dos lados
+    # obliga a leerla entera para descubrir que solo importaba una.
+    actuales = projection["current_components"]
+    trs, sin_margen = "", []
+    for k, cur in actuales.items():
         gain = projection["component_gain"].get(k, 0.0)
+        etiqueta = COMPONENT_LABELS.get(k, k)
+        if not gain:
+            sin_margen.append(etiqueta)
+            continue
         proj = projection["projected_components"][k]
-        trs += (f"<tr><td>{_e(COMPONENT_LABELS.get(k, k))}</td><td>{cur:.0f} pts</td>"
+        trs += (f"<tr><td>{_e(etiqueta)}</td><td>{cur:.0f} pts</td>"
                 f"<td>{proj:.0f} pts</td>"
-                f"<td class=\"gain\">{'+' + format(gain * 100, '.0f') + '%' if gain else '—'}</td>"
+                f'<td class="gain">+{gain * 100:.0f}%</td>'
                 f"<td>{_html_bar(proj)}</td></tr>")
+    out = ""
+    if trs:
+        out += ('<div class="card"><div class="tw"><table>'
+                "<tr><th>Componente</th><th>Ahora</th><th>Optimizado</th><th>Ganancia</th>"
+                "<th></th></tr>" + trs + "</table></div>"
+                + (f'<p class="scan-note">Los otros {len(sin_margen)} componentes no tienen '
+                   f'mejoras pendientes: {_e(", ".join(sin_margen))}.</p>'
+                   if sin_margen else "")
+                + "</div>")
+    elif sin_margen:
+        out += ('<div class="card"><p class="ok-note">Ningún componente tiene mejoras de '
+                "rendimiento pendientes: "
+                f'{_e(", ".join(sin_margen))} ya rinden lo que pueden dar.</p></div>')
+
+    # Fuera de la tabla: era la única fila sin cifras a ambos lados, con un
+    # `colspan` que rompía la lectura por columnas de una tabla cuyo sentido es
+    # justo comparar columna con columna.
     sysgain = projection.get("system_gain", 0.0)
     if sysgain:
-        trs += (f"<tr><td>Arranque / fluidez</td><td colspan=2>sin métrica sintética</td>"
-                f'<td class="gain">+{sysgain * 100:.0f}%</td>'
-                f"<td>{_html_bar(sysgain * 100, ref=False)}</td></tr>")
-    out = ('<div class="card"><div class="tw"><table>'
-           "<tr><th>Componente</th><th>Ahora</th><th>Optimizado</th><th>Ganancia</th><th></th>"
-           "</tr>" + trs + "</table></div></div>")
+        out += ('<div class="card"><div class="sub-h">Arranque y fluidez</div>'
+                '<p class="scan-note">No tiene prueba sintética que lo puntúe: se nota al '
+                "encender y al abrir programas, no en la nota global.</p>"
+                f'<p><span class="gain">+{sysgain * 100:.0f}%</span> estimado</p>'
+                f"{_html_bar(sysgain * 100, ref=False)}</div>")
 
     cats = ""
     for cat, gain in sorted(projection.get("category_gain", {}).items(), key=lambda x: -x[1]):
@@ -823,30 +881,3 @@ def _worst(findings: list) -> str:
     return min((f.severity for f in findings), key=lambda s: SEVERITY_ORDER.get(s, 9))
 
 
-def _search_hints(auditor: Auditor, cards: list[ComponentCard]) -> list[str]:
-    """Ejemplos de filtro sacados de ESTE informe.
-
-    Un campo de búsqueda vacío no dice qué se puede buscar, y una lista de
-    ejemplos escrita a mano acabaría proponiendo cosas que en este equipo no
-    aparecen: buscar «wifi» en un sobremesa por cable no devuelve nada y hace
-    parecer que el buscador no funciona. Salen de lo que el informe contiene.
-    """
-    vistos: list[str] = []
-
-    def añadir(*terminos: str) -> None:
-        for t in terminos:
-            t = (t or "").strip().lower()
-            if t and t not in vistos:
-                vistos.append(t)
-
-    # Las categorías de los hallazgos son lo que la gente busca: «arranque»,
-    # «térmico», «almacenamiento».
-    añadir(*[f.category for f in auditor.findings])
-    scan = getattr(auditor, "scan", None)
-    if scan is not None and getattr(scan, "by_category", None):
-        añadir(*list(scan.by_category)[:3])
-    if (getattr(auditor, "network", {}) or {}).get("wifi"):
-        añadir("wifi")
-    # Componentes con nota: sirven para saltar a sus filas en cualquier tabla.
-    añadir(*[c.label for c in cards if c.score is not None])
-    return vistos[:7]

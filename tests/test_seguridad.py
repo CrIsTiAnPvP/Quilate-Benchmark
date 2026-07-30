@@ -77,6 +77,41 @@ class NoContaminaLaProyeccion(unittest.TestCase):
         self.assertEqual(solo_riesgos["system_gain"], 0.0)
 
 
+class ElDetalleSeCuentaUnaSolaVez(unittest.TestCase):
+    """El mismo riesgo salía entero en «Seguridad» y otra vez en «Hallazgos».
+
+    No era un resumen y una ampliación: era el mismo párrafo, palabra por
+    palabra, dos veces en la misma página. Ahora el texto largo y los pasos
+    viven en Seguridad, y Hallazgos conserva su sitio, su ancla y su severidad
+    —el recuento total los incluye y hay enlaces `#h-…` que aterrizan ahí— pero
+    remite en vez de repetir.
+    """
+
+    def informe(self, *findings: Finding) -> str:
+        with tempfile.TemporaryDirectory() as d:
+            destino = Path(d) / "informe.html"
+            auditor = auditor_con(*findings)
+            export_html(destino, SystemInfo(), None, auditor,
+                        project_improvement(None, auditor.findings))
+            return destino.read_text(encoding="utf-8")
+
+    def test_el_detalle_no_se_repite(self):
+        html = self.informe(riesgo("sin_cifrado"), mejora())
+        self.assertEqual(html.count("Detalle del riesgo plantado por el test."), 1)
+
+    def test_hallazgos_conserva_el_ancla_y_remite_a_seguridad(self):
+        html = self.informe(riesgo("sin_cifrado"))
+        self.assertIn('id="h-sin_cifrado"', html)
+        self.assertIn('href="#s-sin_cifrado"', html)
+        self.assertIn('id="s-sin_cifrado"', html)
+
+    def test_una_mejora_normal_sigue_contando_su_detalle(self):
+        # El reenvío es solo para los de seguridad: un hallazgo de rendimiento
+        # no tiene otra sección donde estar contado.
+        html = self.informe(mejora())
+        self.assertIn("<p>d</p>", html)
+
+
 class ElOrden(unittest.TestCase):
     def test_de_mas_grave_a_menos(self):
         desordenados = [riesgo("c", "low"), riesgo("a", "critical"), riesgo("b", "high")]
