@@ -170,8 +170,66 @@ def spinner_step(msg: str) -> None:
     print(f"  {C.CYAN}▸{C.RESET} {msg} ", end="", flush=True)
 
 
+# Fotogramas del giro. Son los mismos que usa medio mundo para esto y encajan con
+# el resto de caracteres de dibujo que ya imprime el informe.
+_GIRO = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_giro_n = 0
+_giro_pintado = ""      # lo último que dejó `spinner_tick`, para poder borrarlo
+
+
+def spinner_tick(detalle: str = "") -> None:
+    """Anima el paso en curso, sin pasar de línea.
+
+    Existe por el lote con permisos. Ese paso se va a un proceso aparte y puede
+    tardar entre cinco y treinta segundos, durante los cuales el programa no
+    escribía absolutamente nada: quedaba una línea a medias, sin cursor y sin
+    avanzar, que es indistinguible de un cuelgue. Y justo después de un aviso de
+    UAC, que es el momento en el que menos conviene que alguien dude de lo que
+    acaba de autorizar.
+
+    Se borra lo pintado en la vuelta anterior con retrocesos, así que esto solo
+    tiene sentido en un terminal: si la salida está redirigida no hace nada, y
+    así el fichero no se llena de caracteres de control.
+    """
+    global _giro_n, _giro_pintado
+    if not sys.stdout.isatty():
+        return
+    texto = _GIRO[_giro_n % len(_GIRO)] + (f" {detalle}" if detalle else "")
+    _giro_n += 1
+    if _borrar(_giro_pintado, texto):
+        _giro_pintado = texto
+
+
+def _borrar(anterior: str, nuevo: str = "") -> bool:
+    """Quita `anterior` de la línea y escribe `nuevo`. False si no se pudo.
+
+    Los espacios del medio no sobran: sin ellos, pasar de «⠙ 12 s» a «⠹ 9 s»
+    dejaría la `s` huérfana de la vuelta anterior colgando al final.
+    """
+    hueco = "\b" * len(anterior) + " " * len(anterior) + "\b" * len(anterior)
+    try:
+        print(hueco + nuevo, end="", flush=True)
+        return True
+    except (OSError, ValueError):
+        # Escribir puede fallar si la salida ya se cerró. Un adorno no puede
+        # tumbar un análisis que ya está hecho.
+        return False
+
+
+def spinner_stop() -> None:
+    """Deja la línea como estaba antes de animarla."""
+    global _giro_n, _giro_pintado
+    if _giro_pintado:
+        _borrar(_giro_pintado)
+    _giro_pintado = ""
+    _giro_n = 0
+
+
 def spinner_done(detail: str = "ok", ok: bool = True, neutral: bool = False) -> None:
     """`neutral` es para lo que no procede comprobar: ni aprobado ni pendiente."""
+    # Antes de cerrar el paso hay que retirar el giro, si lo hubo: si no, el
+    # último fotograma se quedaría fosilizado delante del ✓.
+    spinner_stop()
     if neutral:
         mark = f"{C.GREY}·{C.RESET}"
     else:

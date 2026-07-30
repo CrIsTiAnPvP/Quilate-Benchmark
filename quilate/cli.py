@@ -13,10 +13,11 @@ from .benchmark import Benchmark
 from .compare import RunLoadError, compare_runs, load_run
 from .compare_report import print_comparison
 from .console import (C, _motivo, banner, clear_screen, configure_output,
-                      enable_ansi, read_key, section, spinner_done, spinner_step)
+                      enable_ansi, read_key, section, spinner_done, spinner_step,
+                      spinner_tick)
 from .const import APP_NAME, AUTHOR, IS_WINDOWS, WEBSITE_URL
 from .export import build_payload, export_html, export_json, export_plan
-from . import elevacion
+from . import elevacion, icono
 from .platform_utils import is_admin
 from .projection import project_improvement
 from .report import print_report
@@ -39,6 +40,13 @@ def parse_args() -> argparse.Namespace:
                "  python quilate.py --disk-size 1024 --html informe.html --export-plan\n"
                "  python quilate.py --compare antes.json despues.json\n",
     )
+    # Modo interno, no para quien usa el programa: es como el Quilate elevado se
+    # reconoce a sí mismo. Va con `SUPPRESS` para que no aparezca en la ayuda,
+    # pero se declara aquí y no se lee de `sys.argv` a mano para que argparse lo
+    # valide como cualquier otro argumento, y para que un `--lote-elevado` sin
+    # valor dé el error de siempre en vez de un IndexError.
+    p.add_argument(elevacion.MARCA_AYUDANTE, metavar="TUBERÍA",
+                   help=argparse.SUPPRESS)
     p.add_argument("--compare", nargs=2, metavar=("ANTES", "DESPUÉS"),
                    help="comparar dos JSON de ejecuciones anteriores y salir "
                         "(no mide nada: contrasta lo ya medido)")
@@ -141,13 +149,25 @@ def _pedir_permisos(args: argparse.Namespace) -> None:
           f"como «sin comprobar».{C.RESET}")
 
     elevacion.permitir_uac(True)
-    lote = elevacion.recoger()
+
+    # El giro con los segundos no es adorno. Entre que se acepta el UAC y que el
+    # proceso con permisos contesta pasan de cinco a treinta segundos, y antes de
+    # esto no se imprimía nada en todo ese rato: quedaba una línea a medias que no
+    # avanzaba, justo después de haber concedido permisos de administrador, que es
+    # el peor momento para que alguien se pregunte si se ha colgado.
+    spinner_step("Consultando lo que necesita permisos".ljust(38))
+    arranque = time.perf_counter()
+    lote = elevacion.recoger(
+        latido=lambda: spinner_tick(f"{time.perf_counter() - arranque:.0f} s"))
+    tardanza = time.perf_counter() - arranque
+
     contestadas = sum(1 for res in lote.values() if res.ok)
     if not contestadas:
-        print(f"  {C.DIM}Sin permisos; se continúa sin ellos.{C.RESET}")
+        # `spinner_done` retira el giro él solo. Sale en amarillo y no en verde
+        # porque no haber podido preguntar no es un paso cumplido.
+        spinner_done("sin permisos; se continúa sin ellos", ok=False)
     else:
-        print(f"  {C.GREEN}✓{C.RESET} Permisos concedidos "
-              f"{C.DIM}(el proceso con permisos ya ha terminado).{C.RESET}")
+        spinner_done(f"{contestadas} de {len(lote)} en {tardanza:.0f} s")
 
 
 def _run_comparison(rutas: list[str]) -> int:
@@ -189,9 +209,25 @@ def _no_se_puede_comparar(motivo: str) -> int:
     return 2
 
 
-def main() -> int:
-    args = parse_args()
+def main(args: argparse.Namespace | None = None) -> int:
+    # Los argumentos los suele traer ya parseados `run`, que necesita mirarlos
+    # antes para desviar al ayudante elevado. Se admite no recibirlos para poder
+    # llamar a `main()` suelta.
+    if args is None:
+        args = parse_args()
+
     configure_output()
+    # El nombre y el logo de la ventana. Van aqui y no mas tarde porque lo
+    # primero que se ve del programa es la ventana, y no devuelven nada que haya
+    # que comprobar: si no se puede, no se puede. El motivo se puede consultar
+    # llamando a `icono.poner_titulo()` o `icono.aplicar()` a mano, que es lo que
+    # hacen los tests.
+    #
+    # El titulo se pone siempre, tambien en Windows Terminal: sin el, la pestana
+    # de un .exe abierto con doble clic se llama con la ruta del fichero. El icono
+    # solo se puede en la consola clasica, por lo que explica `icono`.
+    icono.poner_titulo()
+    icono.aplicar()
     clear_screen()
     enable_ansi()
     if args.no_color:
@@ -483,8 +519,25 @@ def _wait_before_closing() -> None:
 
 def run() -> int:
     """Punto de entrada: envuelve main() para salir limpio con Ctrl+C."""
+    args = parse_args()
+
+    # El ayudante elevado se resuelve AQUI, fuera del try/finally, y esa
+    # colocacion es el arreglo de un fallo concreto: el `finally` llama a
+    # `_wait_before_closing`, que en el .exe empaquetado se para en un `input()`
+    # esperando un Enter. El ayudante corre en una consola oculta, donde no hay
+    # nadie que lo pulse, asi que el proceso elevado no terminaba nunca: se
+    # quedaba vivo e invisible despues de haber contestado, y Quilate parecia
+    # colgado justo despues de conceder los permisos.
+    #
+    # Se podria haber arreglado poniendo una condicion mas dentro de
+    # `_wait_before_closing`, pero entonces el arreglo dependeria de que nadie
+    # anada mañana otra cosa a ese `finally`. Saliendo antes de entrar en el, el
+    # ayudante no puede alcanzar ninguna ruta interactiva por construccion.
+    if args.lote_elevado:
+        return elevacion.servir_lote(args.lote_elevado)
+
     try:
-        return main()
+        return main(args)
     except KeyboardInterrupt:
         print(f"\n{C.YELLOW}Cancelado por el usuario.{C.RESET}\n")
         return 130

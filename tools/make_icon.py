@@ -80,9 +80,30 @@ def main() -> int:
         canvas.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
         image = canvas
 
-    image.save(target, format="ICO", sizes=SIZES)
+    # `bitmap_format="bmp"` NO QUITAR. Sin esto, Pillow guarda todas las
+    # resoluciones comprimidas en PNG, y eso rompe el icono en el sitio donde mas
+    # importa: el dialogo de UAC.
+    #
+    # Meter un PNG dentro de un .ico es legal desde Vista y sirve para que el
+    # icono de 256x256 no ocupe 256 KB. Lo que no es legal es dar por hecho que
+    # todo Windows sabe leerlo: los componentes modernos si —el Explorador, y
+    # `LoadImage`/`ExtractIconEx`, que es lo que usa el icono de la consola—, pero
+    # `consent.exe`, que es quien pinta el aviso de UAC, carga los iconos por la
+    # via antigua y solo entiende el formato DIB de siempre. Con las entradas en
+    # PNG no falla ni avisa: no dibuja nada, y el aviso donde el usuario tiene que
+    # reconocer que esta autorizando a Quilate sale sin logo.
+    #
+    # Comprobado: las siete entradas salian en PNG, y de ahi venia el icono que
+    # faltaba. En BMP el fichero pasa de 82 KB a unos 350 KB, que sobre un
+    # ejecutable de 6,8 MB no se nota.
+    image.save(target, format="ICO", sizes=SIZES, bitmap_format="bmp")
+    # Sin acentos ni flechas: este guion lo llama build.ps1, que comprueba el
+    # codigo de salida. Una consola en cp1252 —la que hereda el .exe en un Windows
+    # en espanol— no sabe escribir "→", asi que la ultima linea reventaba con un
+    # UnicodeEncodeError, el guion salia con codigo 1 y la compilacion abortaba
+    # con "No se pudo generar el icono" despues de haberlo generado bien.
     print(f"{target.name}  <-  {source.name}  "
-          f"({image.width}x{image.height} → {len(SIZES)} resoluciones, "
+          f"({image.width}x{image.height} -> {len(SIZES)} resoluciones, "
           f"{target.stat().st_size / 1024:.0f} KB)")
     return 0
 

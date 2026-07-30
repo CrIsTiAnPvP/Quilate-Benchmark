@@ -137,11 +137,27 @@ Para usarlo en un equipo sin Python, o para pasárselo a alguien:
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-Genera `dist\quilate.exe`: un único archivo de ~6 MB, autocontenido, que se
+Genera `dist\Quilate.exe`: un único archivo de ~7 MB, autocontenido, que se
 puede copiar a un pendrive y ejecutar en cualquier Windows de 64 bits. Lleva el
 icono del proyecto, que se regenera desde `quilate.png` con
 `python tools/make_icon.py` cuando cambia el logo. Acepta
 las mismas opciones que el script.
+
+El ejecutable **no se comprime con UPX**, y eso no es un descuido: la compresión
+dejaba sin firma los diecinueve binarios de la Python Software Foundation y de
+Microsoft que van dentro del paquete, y el resultado se clasificaba como
+`Trojan:Win32/Bearfoos.A!ml`. Cuesta un mega largo de tamaño. `build.ps1` pasa
+`--noupx` por eso, y `python tools\comprobar_binario.py` comprueba antes de cada
+publicación que no ha vuelto, que los metadatos están puestos y que el manifest
+sigue pidiendo `asInvoker`.
+
+El `.exe` **no va firmado**, y por eso Windows avisa de «editor desconocido» al
+abrirlo y en el diálogo de UAC. Eso solo se quita con un certificado de firma de
+código: [`sign.ps1`](sign.ps1) hace la firma y la verificación, y su cabecera
+explica qué certificado comprar (OV frente a EV) y qué implica cada uno.
+
+Si un antivirus se lo lleva, [`tools/diagnostico_defender.ps1`](tools/diagnostico_defender.ps1)
+dice con qué nombre lo ha detectado y de dónde salió el veredicto.
 
 Al abrir el `.exe` con doble clic no hay forma de pasarle flags, así que cuando
 termina el análisis —y solo si no se pidió ningún fichero por línea de comandos—
