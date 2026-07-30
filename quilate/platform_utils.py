@@ -217,8 +217,13 @@ def _ps_raw(command: str, timeout: int = 30) -> tuple[Any, str | None]:
                "try { $ErrorActionPreference='Stop'; "
                f"{command}"
                f" }} catch {{ Write-Output ('{_PS_ERROR}' + $_.Exception.Message) }}")
+    # Sin `-ExecutionPolicy Bypass`: la politica de ejecucion se aplica a los
+    # ficheros de guion, no a `-Command`, asi que la opcion no habilitaba nada.
+    # Lo que si hacia era dejar la palabra "Bypass" en la linea de ordenes de
+    # cada uno de los PowerShell que Quilate lanza, que son unos cuantos. La
+    # explicacion larga esta en `elevacion._lanzar_elevado`.
     out = run_cmd(
-        [_sys_exe("powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        [_sys_exe("powershell.exe"), "-NoProfile", "-NonInteractive",
          "-Command", wrapped],
         timeout=timeout, encoding="utf-8",
     )
@@ -420,7 +425,8 @@ def pending_driver_updates(timeout: int = 90) -> list[str]:
     if not IS_WINDOWS:
         return []
     out = run_cmd(
-        [_sys_exe("powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        # Sin `-ExecutionPolicy Bypass`, por lo mismo que en `_ps_raw`.
+        [_sys_exe("powershell.exe"), "-NoProfile", "-NonInteractive",
          "-Command",
          "$ErrorActionPreference='Stop';"
          "try {"

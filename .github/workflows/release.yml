@@ -1,0 +1,165 @@
+name: Release
+
+# Compila el .exe, lo revisa, lo firma si hay certificado y publica el resultado.
+#
+# El disparador es una etiqueta `v*`, porque una release es una etiqueta y no un
+# empujon a main: si esto se ejecutara en cada commit, cada commit consumiria una
+# firma con sello de tiempo y no habria forma de decir cual de los treinta .exe
+# del dia es el que se publico.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      firmar:
+        description: "Intentar firmar (necesita los secretos configurados)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write        # para adjuntar los ficheros a la release
+
+jobs:
+  compilar:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Una sola version, y no la matriz de tests.yml: aqui no se comprueba
+          # compatibilidad, se produce EL binario. La version con la que se
+          # compila es parte de lo que se distribuye.
+          python-version: "3.13"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      # Los tests van antes de compilar. Firmar algo que no pasa sus propios
+      # tests es ponerle un sello a un fallo.
+      - name: Tests
+        run: |
+          pip install -r requirements-dev.txt
+          pytest -q
+
+      - name: Comprobar que UPX no esta en el PATH del runner
+        shell: pwsh
+        run: |
+          # No es imprescindible —build.ps1 pasa --noupx— pero si aparece aqui
+          # conviene saberlo: significa que la imagen del runner ha cambiado y que
+          # lo unico que separa la release de volver al problema es ese flag.
+          $upx = Get-Command upx -ErrorAction SilentlyContinue
+          if ($upx) {
+            Write-Host "::warning::UPX esta en el PATH ($($upx.Source)). build.ps1 pasa --noupx, asi que no se usara, pero la reja de comprobar_binario.py es ahora lo unico que lo garantiza."
+          } else {
+            Write-Host "UPX no esta en el PATH."
+          }
+
+      - name: Compilar
+        shell: pwsh
+        run: .\build.ps1
+
+      # La reja. Falla la release si vuelve UPX, si los metadatos salen vacios,
+      # si el manifest pide administrador o si falta el icono.
+      - name: Revisar el binario
+        shell: pwsh
+        run: python tools\comprobar_binario.py dist\Quilate.exe
+
+      # ------------------------------------------------------------- firma --
+      #
+      # Se firma solo si hay certificado. Un `pull_request` desde una bifurcacion
+      # no ve los secretos, y una release sin firmar es mejor que un fallo de CI
+      # que nadie puede arreglar desde fuera. Lo que NO se hace es dar por buena
+      # una release sin firmar en silencio: el paso de resumen del final lo dice.
+      #
+      # Los dos secretos que hay que configurar en el repositorio:
+      #   SIGNING_PFX_BASE64   el .pfx entero, en base64
+      #   SIGNING_PFX_PASSWORD su contrasena
+      #
+      # Con un certificado EV en token USB esto no vale: la clave privada no sale
+      # del token y no hay .pfx que subir. Para eso hace falta o un ejecutor
+      # propio con el token puesto, o un servicio de firma en la nube (Azure
+      # Trusted Signing, DigiCert KeyLocker) que se llama distinto. La cabecera
+      # de sign.ps1 lo explica.
+      - name: Firmar
+        id: firma
+        if: ${{ github.event_name == 'push' || inputs.firmar }}
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.SIGNING_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          if (-not $env:PFX_B64) {
+            Write-Host "::warning::No hay certificado configurado (secreto SIGNING_PFX_BASE64). El .exe sale SIN FIRMAR y SmartScreen avisara de editor desconocido."
+            "firmado=no" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          # El .pfx va a un temporal fuera del arbol del repositorio, para que no
+          # pueda acabar en un artefacto por descuido.
+          $pfx = Join-Path $env:RUNNER_TEMP "quilate.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          try {
+            .\sign.ps1 -Path dist\Quilate.exe -Pfx $pfx -PfxPassword $env:PFX_PASSWORD
+            if ($LASTEXITCODE -ne 0) { throw "la firma ha fallado" }
+            "firmado=si" >> $env:GITHUB_OUTPUT
+          }
+          finally {
+            # Se borra siempre, incluso si la firma revienta.
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Verificar la firma
+        if: ${{ steps.firma.outputs.firmado == 'si' }}
+        shell: pwsh
+        run: .\sign.ps1 -Path dist\Quilate.exe -SoloVerificar
+
+      # ------------------------------------------------------------ publicar --
+      - name: Calcular el SHA-256
+        shell: pwsh
+        run: |
+          # Sirve para dos cosas: que quien lo descargue pueda comprobar que le
+          # ha llegado entero, y que si hay que informar de un falso positivo se
+          # pueda decir exactamente de que fichero se habla.
+          $h = Get-FileHash dist\Quilate.exe -Algorithm SHA256
+          "$($h.Hash)  Quilate.exe" | Set-Content dist\Quilate.exe.sha256 -Encoding ASCII
+          Get-Content dist\Quilate.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quilate-exe
+          path: |
+            dist/Quilate.exe
+            dist/Quilate.exe.sha256
+          if-no-files-found: error
+
+      - name: Adjuntar a la release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Quilate.exe
+            dist/Quilate.exe.sha256
+
+      - name: Resumen
+        shell: pwsh
+        run: |
+          $firmado = "${{ steps.firma.outputs.firmado }}"
+          $lineas = @(
+            "## Quilate - release",
+            "",
+            "| | |",
+            "|---|---|",
+            "| Firmado | $(if ($firmado -eq 'si') { 'si' } else { '**NO**' }) |",
+            "| SHA-256 | ``$((Get-Content dist\Quilate.exe.sha256).Split(' ')[0])`` |",
+            "| Tamano | $([math]::Round((Get-Item dist\Quilate.exe).Length/1MB,1)) MB |"
+          )
+          if ($firmado -ne 'si') {
+            $lineas += @("", "> Sin firmar: SmartScreen dira **editor desconocido**. Configura los secretos SIGNING_PFX_BASE64 y SIGNING_PFX_PASSWORD, o firma a mano con ``sign.ps1``.")
+          } else {
+            $lineas += @("", "Si SmartScreen sigue avisando, la reputacion se acumula con las descargas (OV) o es inmediata (EV). Envio de falso positivo: <https://www.microsoft.com/en-us/wdsi/filesubmission>")
+          }
+          $lineas -join "`n" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

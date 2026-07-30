@@ -28,8 +28,11 @@ import base64
 import ctypes
 import json
 import os
+import re
 import secrets
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from .const import IS_WINDOWS
@@ -141,7 +144,7 @@ def olvidar() -> None:
     _recogido = None
 
 
-def recoger() -> dict[str, PSResult]:
+def recoger(latido=None) -> dict[str, PSResult]:
     """El lote entero, preguntado una sola vez por ejecución.
 
     Una sola vez porque cada llamada sería otro aviso de UAC, y encadenar tres
@@ -162,7 +165,10 @@ def recoger() -> dict[str, PSResult]:
         _recogido = trocear(datos, _CONSULTAS_ELEVADAS,
                             error or "el lote con permisos no ha devuelto nada legible")
     elif _pedir:
-        _recogido = consulta_elevada(_CONSULTAS_ELEVADAS)
+        # `lote_propio` y no `consulta_elevada`: el que sale en el aviso de UAC es
+        # el programa que se eleva, y aqui el que se eleva es Quilate. Ver la
+        # explicacion en esa funcion.
+        _recogido = lote_propio(latido=latido)
     else:
         _recogido = trocear(None, _CONSULTAS_ELEVADAS, NO_PEDIDOS)
     return _recogido
@@ -187,6 +193,16 @@ if IS_WINDOWS:
     for _funcion, _args, _res in (
             ("CreateNamedPipeW", [wintypes.LPCWSTR] + [wintypes.DWORD] * 6
              + [ctypes.c_void_p], wintypes.HANDLE),
+            # Las dos siguientes las usa el lado que CONTESTA: el proceso elevado
+            # que abre la tuberia como cliente y escribe el JSON. No se usa el
+            # `open()` de Python porque en modo "wb" pide O_CREAT, y crear un
+            # fichero no es lo que se quiere hacer sobre una tuberia que ya
+            # existe: hay que abrirla con OPEN_EXISTING y nada mas.
+            ("CreateFileW", [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                             ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                             wintypes.HANDLE], wintypes.HANDLE),
+            ("WriteFile", [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                           _PTR, ctypes.c_void_p], wintypes.BOOL),
             ("CreateEventW", [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL,
                               wintypes.LPCWSTR], wintypes.HANDLE),
             ("ConnectNamedPipe", [wintypes.HANDLE, ctypes.c_void_p], wintypes.BOOL),
@@ -214,10 +230,21 @@ _ERROR_PIPE_CONNECTED = 535
 _ERROR_BROKEN_PIPE = 109
 _ERROR_HANDLE_EOF = 38
 _WAIT_OBJECT_0 = 0
+_WAIT_TIMEOUT = 0x102
+
+# Cada cuánto se sale de la espera para dar señales de vida. Cinco veces por
+# segundo: suficiente para que un giro se vea fluido y lo bastante poco como para
+# que el coste sea invisible al lado de lo que tarda el proceso con permisos.
+_LATIDO = 0.2
 
 _SEE_MASK_NOASYNC = 0x00000100
 _SW_HIDE = 0
 _BUFFER = 1 << 16
+
+# Para abrir la tuberia desde el lado que contesta. `OPEN_EXISTING` y no
+# `CREATE_ALWAYS`: la tuberia la crea el padre y aqui solo se abre.
+_GENERIC_WRITE = 0x40000000
+_OPEN_EXISTING = 3
 
 
 def _nombre_de_tuberia() -> str:
@@ -267,30 +294,63 @@ def _lanzar_elevado(exe: str, parametros: str) -> bool:
         return False
 
 
-def _escuchar(handle, evento, plazo: float) -> bytes | None:
+def _escuchar(handle, evento, plazo: float, latido=None) -> bytes | None:
     """Espera al hijo y devuelve lo que escriba, o None si no llega a tiempo.
 
     Todo va con E/S solapada porque si no la espera no tiene fin: con una
     tubería bloqueante, un UAC rechazado o un PowerShell que muere antes de
     conectarse dejarían a Quilate esperando para siempre a alguien que ya no
     va a venir.
+
+    `latido`, si se pasa, se llama cada pocas décimas mientras se espera. Sirve
+    para que quien llama pueda mover un indicador: esta espera dura lo que tarde
+    el proceso con permisos, y sin señales de vida no se distingue de un cuelgue.
     """
     ov = _Overlapped()
     ov.hEvent = evento
     buf = ctypes.create_string_buffer(_BUFFER)
     leidos = wintypes.DWORD()
 
+    # Si hay o no una operación de verdad en marcha. Lo consulta el `finally`, y
+    # llevar la cuenta no es una precaución de más: ver el comentario de allí.
+    pendiente = False
+
     def esperar() -> bool:
-        restante = int(max(0.0, plazo - time.monotonic()) * 1000)
-        return _k32.WaitForSingleObject(evento, restante) == _WAIT_OBJECT_0
+        """Espera a que el hijo dé señales, troceando para poder latir.
+
+        La espera se parte en trozos de `_LATIDO` en vez de pedir el plazo entero
+        de una vez. No cambia cuánto se espera —el corte sigue siendo `plazo`—
+        pero deja un hueco cada pocas décimas para avisar de que esto sigue vivo.
+        """
+        while True:
+            restante = plazo - time.monotonic()
+            if restante <= 0:
+                return False
+            trozo = int(min(restante, _LATIDO) * 1000)
+            resultado = _k32.WaitForSingleObject(evento, trozo)
+            if resultado == _WAIT_OBJECT_0:
+                return True
+            if resultado != _WAIT_TIMEOUT:
+                # Ni señalado ni agotado: el handle no vale. Insistir hasta
+                # agotar el plazo sería quemar un minuto girando en vano.
+                return False
+            if latido is not None:
+                try:
+                    latido()
+                except Exception:
+                    # Un indicador es un adorno. Si el sitio donde se pinta ya no
+                    # existe, se sigue esperando igual: lo que importa es el lote.
+                    pass
 
     try:
         _k32.ResetEvent(evento)
         if not _k32.ConnectNamedPipe(handle, ctypes.byref(ov)):
             error = ctypes.get_last_error()
             if error == _ERROR_IO_PENDING:
+                pendiente = True
                 if not esperar():
                     return None
+                pendiente = False
             elif error != _ERROR_PIPE_CONNECTED:
                 return None
 
@@ -301,8 +361,10 @@ def _escuchar(handle, evento, plazo: float) -> bytes | None:
                                  ctypes.byref(ov)):
                 error = ctypes.get_last_error()
                 if error == _ERROR_IO_PENDING:
+                    pendiente = True
                     if not esperar():
                         return None
+                    pendiente = False
                     if not _k32.GetOverlappedResult(handle, ctypes.byref(ov),
                                                     ctypes.byref(leidos), False):
                         break      # el hijo ha cerrado: se acabó de leer
@@ -320,13 +382,31 @@ def _escuchar(handle, evento, plazo: float) -> bytes | None:
         # de existir. No se nota al momento: revienta más tarde, cuando otra
         # cosa cualquiera ocupa esa memoria. Hay que cancelar y esperar a que el
         # kernel confirme que ha soltado las dos.
-        _k32.CancelIo(handle)
-        _k32.GetOverlappedResult(handle, ctypes.byref(ov), ctypes.byref(leidos), True)
+        #
+        # Pero SOLO si queda algo en marcha, y el `if` es el arreglo de un cuelgue
+        # de verdad. `GetOverlappedResult` con `bWait=True` sobre un OVERLAPPED
+        # que ya no tiene nada pendiente se queda esperando en `hEvent`, y ese
+        # evento está sin señalar porque el bucle hace `ResetEvent` al principio
+        # de cada vuelta. Es decir: en el camino normal —el hijo escribe, cierra,
+        # y la siguiente lectura sale por ERROR_BROKEN_PIPE sin llegar a quedar
+        # pendiente— se entraba aquí a esperar para siempre a algo que ya había
+        # pasado. Con el cliente de PowerShell no se notaba porque salía por la
+        # otra rama; con el ayudante sí, y Quilate se quedaba colgado justo
+        # después de que el usuario concediera los permisos.
+        if pendiente:
+            _k32.CancelIo(handle)
+            _k32.GetOverlappedResult(handle, ctypes.byref(ov),
+                                     ctypes.byref(leidos), True)
 
 
-def consulta_elevada(consultas: dict[str, str], timeout: int = 60,
-                     ) -> dict[str, PSResult]:
-    """Ejecuta el lote en un PowerShell elevado y trocea la respuesta.
+def _con_tuberia(arrancar, consultas: dict[str, str], timeout: int,
+                 latido=None) -> dict[str, PSResult]:
+    """Monta el canal, llama a `arrancar(nombre)` y trocea lo que llegue.
+
+    Todo lo de aquí es igual para los dos caminos —el que eleva un PowerShell y el
+    que eleva a Quilate— y lo único que cambia entre ellos es qué proceso se
+    lanza. Por eso `arrancar` es un parámetro: la tubería, la espera, el JSON y el
+    troceado se escriben una vez.
 
     Devuelve un `PSResult` por consulta, igual que el inventario. Que el usuario
     diga que no al aviso de UAC es un camino normal y no un fallo: las claves
@@ -334,11 +414,6 @@ def consulta_elevada(consultas: dict[str, str], timeout: int = 60,
     informe diga «no se comprobó porque no se dieron permisos» en vez de dar por
     bueno lo que nadie ha llegado a mirar.
     """
-    if not IS_WINDOWS:
-        return trocear(None, consultas, "solo Windows")
-    if not consultas:
-        return {}
-
     nombre = _nombre_de_tuberia()
     handle = _k32.CreateNamedPipeW(
         f"\\\\.\\pipe\\{nombre}",
@@ -349,15 +424,9 @@ def consulta_elevada(consultas: dict[str, str], timeout: int = 60,
         return trocear(None, consultas, "no se ha podido abrir el canal de respuesta")
     evento = _k32.CreateEventW(None, True, False, None)
     try:
-        guion = _guion(consultas, nombre)
-        codificado = base64.b64encode(guion.encode("utf-16-le")).decode("ascii")
-        arrancado = _lanzar_elevado(
-            _sys_exe("powershell.exe"),
-            "-NoProfile -NonInteractive -ExecutionPolicy Bypass "
-            f"-WindowStyle Hidden -EncodedCommand {codificado}")
-        if not arrancado:
+        if not arrancar(nombre):
             return trocear(None, consultas, SIN_PERMISOS)
-        crudo = _escuchar(handle, evento, time.monotonic() + timeout)
+        crudo = _escuchar(handle, evento, time.monotonic() + timeout, latido)
     finally:
         _k32.CloseHandle(handle)
         if evento:
@@ -368,6 +437,194 @@ def consulta_elevada(consultas: dict[str, str], timeout: int = 60,
                        "el proceso con permisos no ha contestado a tiempo")
     return trocear(_json(crudo), consultas,
                    "el proceso con permisos no ha devuelto nada legible")
+
+
+def consulta_elevada(consultas: dict[str, str], timeout: int = 60,
+                     latido=None) -> dict[str, PSResult]:
+    """Ejecuta un lote CUALQUIERA en un PowerShell elevado.
+
+    Es la vía general, y ya no es la que usa `recoger`: el aviso de UAC de este
+    camino lo firma «Windows PowerShell», porque el programa que se eleva es
+    PowerShell. Para lo que ve el usuario está `lote_propio`.
+
+    Se conserva porque sigue siendo la única forma de ejecutar un lote arbitrario
+    con permisos, y es lo que permite probar la tubería, el JSON y el troceado con
+    consultas de mentira, sin depender del lote real ni de que haya un .exe
+    compilado.
+    """
+    if not IS_WINDOWS:
+        return trocear(None, consultas, "solo Windows")
+    if not consultas:
+        return {}
+
+    def arrancar(nombre: str) -> bool:
+        guion = _guion(consultas, nombre)
+        codificado = base64.b64encode(guion.encode("utf-16-le")).decode("ascii")
+        # Aqui no van `-ExecutionPolicy Bypass` ni `-WindowStyle Hidden`, y las
+        # dos ausencias son deliberadas.
+        #
+        # `-ExecutionPolicy Bypass` sobraba. La politica de ejecucion gobierna
+        # los *ficheros* de guion: un .ps1 que se carga del disco. Lo que se pasa
+        # aqui es `-EncodedCommand`, que no es un fichero y al que la politica no
+        # se aplica en ningun caso. Es decir, la opcion no estaba habilitando
+        # nada —el lote se ejecuta igual sin ella, con la politica que sea— y a
+        # cambio anadia a la linea de ordenes del proceso elevado una de las tres
+        # palabras que buscan todas las reglas de deteccion de PowerShell
+        # abusivo. Pagar ese precio por nada no tiene sentido.
+        #
+        # `-WindowStyle Hidden` era redundante: la ventana ya se crea oculta con
+        # `nShow = SW_HIDE` en ShellExecuteEx, que es el mecanismo que de verdad
+        # decide, y se aplica al crear el proceso. La opcion de PowerShell actua
+        # despues de arrancar, asi que ni siquiera evitaba el parpadeo que
+        # pretendia evitar. Quedaba solo el aspecto: "powershell oculto" escrito
+        # en la linea de ordenes.
+        #
+        # `-EncodedCommand` si se queda. No es ofuscacion: es UTF-16LE en base64,
+        # que es el mecanismo documentado para pasar un guion sin que el
+        # entrecomillado lo destroce por el camino. La alternativa —meter el lote
+        # entero, con sus comillas simples y dobles, en `-Command` a traves de
+        # `lpParameters`— se romperia en silencio a la primera consulta que
+        # alguien edite, y romperse en silencio aqui significa un informe que
+        # dice "no se comprobo" cuando en realidad se rompio el entrecomillado.
+        # La otra alternativa, escribir el guion a un fichero para pasarlo con
+        # `-File`, es la elevacion de privilegios por ruta que el docstring de
+        # este modulo explica que no se va a hacer.
+        return _lanzar_elevado(
+            _sys_exe("powershell.exe"),
+            f"-NoProfile -NonInteractive -EncodedCommand {codificado}")
+
+    return _con_tuberia(arrancar, consultas, timeout, latido)
+
+
+def lote_propio(timeout: int = 60, latido=None) -> dict[str, PSResult]:
+    """El lote fijo, ejecutado por Quilate elevándose a sí mismo.
+
+    --- Por qué existe ---
+
+    El aviso de UAC no dice quién *pide* la elevación: dice quién la *recibe*.
+    Windows le pone al diálogo el icono, la descripción y el editor del ejecutable
+    que va a arrancar con permisos, leídos de su VERSIONINFO y de su firma. Al
+    elevar `powershell.exe`, lo que el usuario leía era «Windows PowerShell,
+    editor comprobado: Microsoft Windows», sin una sola mención a Quilate. En una
+    herramienta que pide administrador eso es justo lo contrario de lo que hace
+    falta: quien concede los permisos tiene que reconocer a quién se los da.
+
+    Aquí el que se eleva es `Quilate.exe`, así que el aviso lleva su nombre, su
+    logo y —en cuanto haya certificado— su editor.
+
+    --- Lo que se gana además ---
+
+    Desaparece el `-EncodedCommand` de la línea de órdenes del proceso elevado.
+    Antes, lo que pasaba por UAC era un PowerShell con un base64 de miles de
+    caracteres detrás, que es exactamente la forma de un ataque por PowerShell;
+    ahora es `Quilate.exe --lote-elevado quilate-1234-<32 hex>`, que se lee.
+
+    Y se estrecha lo que el hijo puede hacer. Antes el guion viajaba desde el
+    padre, así que el proceso elevado ejecutaba lo que le mandaran; ahora las
+    consultas son las once constantes de este módulo, compiladas dentro del
+    binario, y por la línea de órdenes solo entra el nombre de la tubería, que se
+    valida antes de tocarlo. Lo que Quilate hace con permisos ya no depende de
+    nada que venga de fuera.
+
+    --- Lo que cuesta ---
+
+    Un proceso más: el Quilate elevado lanza a su vez el PowerShell que hace las
+    consultas. Ese ya no pasa por UAC ni lo ve nadie, y es hijo de un proceso que
+    ya está elevado, así que no hereda ningún aviso.
+    """
+    if not IS_WINDOWS:
+        return trocear(None, _CONSULTAS_ELEVADAS, "solo Windows")
+
+    def arrancar(nombre: str) -> bool:
+        exe, parametros = _ayudante(nombre)
+        return _lanzar_elevado(exe, parametros)
+
+    return _con_tuberia(arrancar, _CONSULTAS_ELEVADAS, timeout, latido)
+
+
+# La marca que distingue «ejecútate normal» de «eres el ayudante elevado». Está
+# aquí y no en `cli` porque quien la escribe y quien la lee son las dos funciones
+# de este módulo; `cli` solo la reenvía.
+MARCA_AYUDANTE = "--lote-elevado"
+
+# El nombre de la tubería es lo ÚNICO que entra al proceso elevado desde fuera, y
+# por tanto lo único que hay que validar. El formato lo pone `_nombre_de_tuberia`:
+# la palabra, el pid y 32 dígitos hexadecimales.
+_TUBERIA_VALIDA = re.compile(r"quilate-\d{1,10}-[0-9a-f]{32}\Z")
+
+
+def _ayudante(tuberia: str) -> tuple[str, str]:
+    """Qué ejecutar para que el ayudante elevado sea Quilate.
+
+    Empaquetado es directo: el propio `.exe`. Sin empaquetar hay que pasar por el
+    intérprete y darle el lanzador, y entonces el aviso dice «Python», que es la
+    verdad —el programa que se eleva es Python—. No se arregla y no hace falta: el
+    `.exe` es lo que usa la gente, y que el camino sea el mismo en los dos casos es
+    lo que permite probarlo sin compilar.
+
+    El lanzador va entre comillas porque su ruta puede llevar espacios y esto acaba
+    en una sola cadena de parámetros para `ShellExecuteEx`.
+    """
+    if getattr(sys, "frozen", False):
+        return sys.executable, f"{MARCA_AYUDANTE} {tuberia}"
+    lanzador = Path(__file__).resolve().parent.parent / "quilate.py"
+    return sys.executable, f'"{lanzador}" {MARCA_AYUDANTE} {tuberia}'
+
+
+def _enviar(tuberia: str, carga: bytes, plazo: float = 20.0) -> bool:
+    """Abre la tubería como cliente y escribe: el lado elevado de la conversación.
+
+    Se reintenta porque el padre puede no haber llegado aún a `ConnectNamedPipe`:
+    entre aceptar el UAC y arrancar el hijo hay un servicio de Windows por medio y
+    el orden no está garantizado. Veinte segundos es el mismo plazo que usaba el
+    cliente de PowerShell al que esto sustituye.
+    """
+    ruta = f"\\\\.\\pipe\\{tuberia}"
+    limite = time.monotonic() + plazo
+    while True:
+        handle = _k32.CreateFileW(ruta, _GENERIC_WRITE, 0, None,
+                                  _OPEN_EXISTING, 0, None)
+        if handle and handle != _INVALID_HANDLE:
+            try:
+                escritos = wintypes.DWORD()
+                buf = ctypes.create_string_buffer(carga, len(carga))
+                return bool(_k32.WriteFile(handle, buf, len(carga),
+                                           ctypes.byref(escritos), None))
+            finally:
+                _k32.CloseHandle(handle)
+        if time.monotonic() >= limite:
+            return False
+        time.sleep(0.1)
+
+
+def servir_lote(tuberia: str) -> int:
+    """El ayudante elevado: ejecuta el lote fijo y lo manda por la tubería.
+
+    Es lo que corre `Quilate.exe --lote-elevado <tuberia>` después de que alguien
+    acepte el UAC. No imprime nada, no escribe en el disco y no mira ningún otro
+    argumento: hace las once consultas de lectura, contesta y muere.
+
+    El código de salida sirve para depurar esto a mano; nadie lo lee, porque quien
+    manda es la tubería.
+    """
+    if not IS_WINDOWS:
+        return 1
+    if not _TUBERIA_VALIDA.match(tuberia or ""):
+        # Un nombre que no tiene la forma que genera `_nombre_de_tuberia` no puede
+        # venir de Quilate, así que no se toca.
+        return 2
+
+    # Este proceso ya está elevado, así que las consultas se hacen aquí mismo: es
+    # el mismo camino que sigue `recoger` cuando a Quilate lo arrancan ya elevado.
+    datos, _error = _ps_raw(
+        guion_de_bloques(_CONSULTAS_ELEVADAS)
+        + "$r | ConvertTo-Json -Depth 8 -Compress", timeout=50)
+
+    # Si no ha vuelto nada legible se manda `null` en vez de no mandar nada. Las
+    # dos cosas acaban en un lote sin datos, pero contestar deja al padre seguir en
+    # el momento en vez de esperar a que se le acabe el plazo.
+    carga = json.dumps(datos, ensure_ascii=False) if datos is not None else "null"
+    return 0 if _enviar(tuberia, carga.encode("utf-8")) else 3
 
 
 def _json(crudo: bytes) -> Any:
