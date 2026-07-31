@@ -175,23 +175,16 @@ class Paridad(unittest.TestCase):
         if plan:
             self.assertIn(testigo, self.plan, f"«{testigo}» no llega al plan")
 
-    # --- la marca que separa los grupos de la navegación --------------------
-    def test_la_marca_de_grupo_cuelga_de_un_enlace(self):
-        # Como elemento suelto entre dos enlaces se quedaba colgando al final de
-        # una fila en cuanto la barra envolvía: una marca de corte detrás del
-        # último enlace, sin nada que separar. Atada al primer enlace del grupo
-        # no puede quedarse huérfana, porque siempre lleva su enlace detrás.
-        self.assertNotIn('<span class="navsep"', self.html)
-        self.assertIn('class="ini-grupo"', self.html)
-
-    def test_solo_hay_un_corte_y_abre_el_grupo_de_accion(self):
-        import re
-        self.assertEqual(self.html.count('class="ini-grupo"'), 1)
-        marcado = re.search(r'<a href="#([a-z]+)" class="ini-grupo"', self.html)
-        self.assertIsNotNone(marcado, "la marca no está en un enlace de la navegación")
-        from quilate.export.html_export.piezas import GRUPOS
-        self.assertTrue(GRUPOS.get(marcado.group(1), "tecnico").startswith("accion"),
-                        "el corte tiene que abrir el grupo de acción, no partirlo")
+    # --- la navegación no lleva separadores ---------------------------------
+    def test_la_navegacion_son_solo_enlaces(self):
+        # Se probaron tres formas de marcar dónde acaba el grupo que explica la
+        # nota y empieza el que dice qué hacer con ella, y las tres se leían como
+        # una marca suelta en mitad de la barra en cuanto envolvía. El orden de
+        # las secciones ya agrupa; pintarlo sobraba.
+        nav = self.html[self.html.index("<nav>"):self.html.index("</nav>")]
+        self.assertNotIn("navsep", nav)
+        self.assertNotIn("ini-grupo", nav)
+        self.assertNotIn("<span", nav.replace('<span class="sev', ""))
 
     # --- lo que tiene que estar en las tres salidas -------------------------
     def test_inventario(self):

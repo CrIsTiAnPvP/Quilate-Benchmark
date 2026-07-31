@@ -201,26 +201,16 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
                         f"<p>{_e(verdict)}</p>"
                         f'{"<ul>" + extras + "</ul>" if extras else ""}</div>'))
 
-    # La navegación va agrupada por el mismo criterio que reparte las secciones
-    # en `data-group`: primero lo que explica de dónde sale la nota, después lo
-    # que hay que hacer con ella. Doce enlaces seguidos y sin jerarquía son doce
-    # candidatos igual de probables, y la mitad de ellos no se leen nunca en la
-    # primera pasada.
-    #
-    # La marca del corte es una clase en el primer enlace del grupo, no un
-    # elemento suelto entre dos: un separador con entidad propia se queda colgado
-    # al final de la fila en cuanto la barra envuelve. El detalle está en la hoja
-    # de estilo, en `.ini-grupo`.
+    # Los enlaces salen en el orden de las secciones, que ya es el orden por el
+    # que se leen: primero lo que explica de dónde sale la nota, después lo que
+    # hay que hacer con ella. Ese orden agrupa por sí solo y no se marca con
+    # ningún separador; el porqué está en la hoja de estilo, junto a `.tb nav`.
     nav = f'<a href="#resumen" data-target="resumen">{_icon("i-zap")}Resumen</a>'
-    separado = False
     for s in secs:
-        corte = ""
-        if s.grupo.startswith("accion") and not separado:
-            corte, separado = ' class="ini-grupo"', True
         # Punto de severidad en la propia navegación: dónde está lo urgente sin
         # tener que entrar a mirar sección por sección.
         punto = f'<span class="sev s-{_e(s.severity)}"></span>' if s.severity else ""
-        nav += (f'<a href="#{s.sid}"{corte} data-target="{s.sid}" title="{_e(s.label)}">'
+        nav += (f'<a href="#{s.sid}" data-target="{s.sid}" title="{_e(s.label)}">'
                 f"{_icon(s.icon)}{_e(NAV_LABELS.get(s.sid, s.label))}{punto}</a>")
     body = "".join(_section(s) for s in secs)
 

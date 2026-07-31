@@ -131,26 +131,15 @@ align-items:center;gap:8px;font-size:11.5px;color:var(--faint)}
 white-space:nowrap}
 .crumb .pct{margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap}
 
-.tb nav{display:flex;gap:2px;flex:1 1 380px;flex-wrap:wrap;align-items:center}
-/* Los enlaces se agrupan por para qué sirve cada sección —lo que explica la
-   nota, y lo que hay que hacer con ella—, que es el mismo criterio que ya
-   reparte las secciones en `data-group`.
-
-   El filete cuelga del primer enlace del grupo, no es un elemento suelto entre
-   dos. Suelto dependía de dónde cayera el ajuste de línea: en cuanto la barra
-   envolvía se quedaba al final de una fila, detrás del último enlace y sin nada
-   que separar, mientras el grupo siguiente empezaba abajo igualmente. Forzar el
-   salto de fila lo arreglaba pero gastaba una fila entera de barra fija, que es
-   altura robada en todas las pantallas. Atado al enlace no puede quedarse
-   huérfano: si va a mitad de fila separa, y si abre fila queda como marca de
-   entrada del grupo.
-
-   No lleva rótulos: con la barra envolviendo, un rótulo se despega de su grupo y
-   acaba encabezando el de al lado. El oro es color de estructura, nunca de dato. */
-.tb nav a.ini-grupo{margin-left:12px}
-.tb nav a.ini-grupo::before{content:"";position:absolute;left:-7px;top:50%;
-transform:translateY(-50%);width:1px;height:15px;border-radius:1px;
-background:linear-gradient(180deg,transparent,var(--gold-dk),transparent)}
+/* Sin separador de grupos. Se probó a marcar dónde acaban las secciones que
+   explican la nota y empiezan las que dicen qué hacer con ella: como elemento
+   suelto entre dos enlaces se quedaba colgando al final de una fila en cuanto
+   la barra envolvía —y con doce enlaces envuelve casi siempre—; forzando el
+   salto de fila gastaba una fila entera de barra fija; y colgado del primer
+   enlace del grupo seguía leyéndose como una marca suelta en mitad de la
+   navegación. El orden de las secciones ya agrupa por sí solo, que era lo que
+   se quería, y no hace falta pintarlo. */
+.tb nav{display:flex;gap:2px;flex:1 1 380px;flex-wrap:wrap}
 .tb nav a{display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:var(--r-xs);
 color:var(--dim);text-decoration:none;font-size:12.5px;white-space:nowrap;
 transition:color .15s,background .15s;position:relative}
