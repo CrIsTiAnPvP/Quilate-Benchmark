@@ -205,19 +205,22 @@ def export_html(path: Path, si: SystemInfo, bench: Benchmark | None, auditor: Au
     # en `data-group`: primero lo que explica de dónde sale la nota, después lo
     # que hay que hacer con ella. Doce enlaces seguidos y sin jerarquía son doce
     # candidatos igual de probables, y la mitad de ellos no se leen nunca en la
-    # primera pasada. El separador es solo un filete: no hay rótulos porque la
-    # barra envuelve en varias filas y un rótulo que cae solo al final de una
-    # fila acaba encabezando el grupo de al lado.
+    # primera pasada.
+    #
+    # La marca del corte es una clase en el primer enlace del grupo, no un
+    # elemento suelto entre dos: un separador con entidad propia se queda colgado
+    # al final de la fila en cuanto la barra envuelve. El detalle está en la hoja
+    # de estilo, en `.ini-grupo`.
     nav = f'<a href="#resumen" data-target="resumen">{_icon("i-zap")}Resumen</a>'
     separado = False
     for s in secs:
+        corte = ""
         if s.grupo.startswith("accion") and not separado:
-            nav += '<span class="navsep" aria-hidden="true"></span>'
-            separado = True
+            corte, separado = ' class="ini-grupo"', True
         # Punto de severidad en la propia navegación: dónde está lo urgente sin
         # tener que entrar a mirar sección por sección.
         punto = f'<span class="sev s-{_e(s.severity)}"></span>' if s.severity else ""
-        nav += (f'<a href="#{s.sid}" data-target="{s.sid}" title="{_e(s.label)}">'
+        nav += (f'<a href="#{s.sid}"{corte} data-target="{s.sid}" title="{_e(s.label)}">'
                 f"{_icon(s.icon)}{_e(NAV_LABELS.get(s.sid, s.label))}{punto}</a>")
     body = "".join(_section(s) for s in secs)
 
