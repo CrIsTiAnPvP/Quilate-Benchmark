@@ -33,6 +33,69 @@ jobs:
           # compila es parte de lo que se distribuye.
           python-version: "3.13"
 
+      # La version se lee y se comprueba ANTES de instalar nada. Es la
+      # comprobacion mas barata del flujo y la que invalida todo lo demas: si la
+      # etiqueta y el codigo no dicen lo mismo, no tiene sentido gastar cinco
+      # minutos en tests y en PyInstaller para tirar el resultado al final.
+      #
+      # `quilate/const.py` es la fuente unica de la version, y ya hay media
+      # cadena montada sobre ella: make_win_resources.py la incrusta en el
+      # VERSIONINFO del .exe y comprobar_binario.py verifica despues que el
+      # binario compilado dice lo mismo. Lo que faltaba era el eslabon de
+      # arriba. Sin el, `git tag v2.8.0` con APP_VERSION todavia en 2.7.0
+      # publica una release titulada 2.8.0 cuyo binario se identifica como 2.7.0
+      # en sus propiedades, en `--version` y en la cabecera de cada informe que
+      # genere. Nada falla, nadie se entera, y la version deja de significar algo.
+      - name: Leer la version y comprobarla contra la etiqueta
+        id: version
+        shell: pwsh
+        run: |
+          # Se importa en vez de leer el fichero con una expresion regular:
+          # quilate/__init__.py solo reexporta de const.py y no arrastra ninguna
+          # dependencia, asi que esto funciona con el interprete recien puesto y
+          # sin pip. Y si algun dia const.py deja de ser importable, es un fallo
+          # que hay que ver aqui y no cuando compile.
+          $version = (python -c "from quilate.const import APP_VERSION; print(APP_VERSION)")
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
+            throw "No se ha podido leer APP_VERSION de quilate/const.py."
+          }
+          $version = $version.Trim()
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "quilate/const.py declara la version $version"
+
+          # En `workflow_dispatch` no hay etiqueta que contrastar y se compila
+          # igual: sirve para probar el flujo entero sin publicar nada.
+          if ($env:GITHUB_REF_TYPE -ne "tag") {
+            Write-Host "Sin etiqueta (ref_type=$env:GITHUB_REF_TYPE): no hay nada que contrastar."
+            exit 0
+          }
+
+          $etiqueta = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($etiqueta -ne $version) {
+            # Write-Host y `exit 1`, y no `throw`: PowerShell aplasta los saltos
+            # de linea al renderizar una excepcion, y este mensaje sin lineas es
+            # un parrafo corrido en medio de un registro rojo. Asi el detalle se
+            # lee entero en el registro, y la anotacion —que si tiene que caber
+            # en una linea— es la que sale resaltada arriba del todo.
+            Write-Host ""
+            Write-Host "La etiqueta y el codigo no dicen la misma version:"
+            Write-Host ""
+            Write-Host "    etiqueta            $env:GITHUB_REF_NAME  (-> $etiqueta)"
+            Write-Host "    quilate/const.py    $version"
+            Write-Host ""
+            Write-Host "Publicar asi dejaria una release titulada $etiqueta con un binario"
+            Write-Host "que se identifica como $version en sus propiedades, en --version y"
+            Write-Host "en la cabecera de cada informe que genere."
+            Write-Host ""
+            Write-Host "Arreglalo por uno de los dos lados:"
+            Write-Host "  - sube APP_VERSION a $etiqueta en quilate/const.py, o"
+            Write-Host "  - borra la etiqueta y vuelve a crearla como v$version."
+            Write-Host ""
+            Write-Host "::error::La etiqueta $env:GITHUB_REF_NAME no coincide con APP_VERSION $version (quilate/const.py)"
+            exit 1
+          }
+          Write-Host "La etiqueta coincide con APP_VERSION: $version"
+
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
@@ -119,27 +182,131 @@ jobs:
 
       # ------------------------------------------------------------ publicar --
       - name: Calcular el SHA-256
+        id: sha
         shell: pwsh
         run: |
           # Sirve para dos cosas: que quien lo descargue pueda comprobar que le
           # ha llegado entero, y que si hay que informar de un falso positivo se
           # pueda decir exactamente de que fichero se habla.
           $h = Get-FileHash dist\Quilate.exe -Algorithm SHA256
+          # Formato de sha256sum al pie de la letra: huella, DOS espacios, y el
+          # nombre a secas sin la carpeta. Asi `sha256sum -c Quilate.exe.sha256`
+          # funciona desde la carpeta de descargas sin tener que editar nada.
           "$($h.Hash)  Quilate.exe" | Set-Content dist\Quilate.exe.sha256 -Encoding ASCII
           Get-Content dist\Quilate.exe.sha256
 
+          # El tamano se formatea con la cultura invariante a proposito: en un
+          # ejecutor con cultura europea la interpolacion escribiria "8,0" y ese
+          # numero acaba en las notas de la release y, de ahi, copiado a la web.
+          $mb = [math]::Round((Get-Item dist\Quilate.exe).Length / 1MB, 1)
+          "sha=$($h.Hash)" >> $env:GITHUB_OUTPUT
+          "tamano=$($mb.ToString([cultureinfo]::InvariantCulture))" >> $env:GITHUB_OUTPUT
+
+      # Las notas van con la release y no solo en el resumen del flujo: el
+      # resumen lo ve quien entra a Actions, y quien descarga el .exe no entra a
+      # Actions. La huella tiene que estar donde esta el boton de descarga, o
+      # verificar exige bajarse un segundo fichero para compararlo a ojo.
+      - name: Redactar las notas de la release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          # Here-string de comillas simples y sustitucion despues: en PowerShell
+          # el acento grave es el caracter de escape, y el markdown de abajo esta
+          # lleno de bloques de codigo. Con @"..."@ habria que escaparlos todos.
+          $plantilla = @'
+          Ejecutable para Windows de 64 bits. Un fichero suelto, sin instalador: se copia
+          donde haga falta, se ejecuta y se borra al terminar.
+
+          | | |
+          |---|---|
+          | Version | __VERSION__ |
+          | Fichero | `Quilate.exe`, __TAMANO__ MB |
+          | SHA-256 | `__SHA__` |
+          | Firmado | __FIRMADO__ |
+
+          ## Comprobar que el fichero es este
+
+          El ejecutable no cambia de nombre entre versiones, asi que conviene comprobar
+          que lo descargado es lo que se publico aqui:
+
+          ```powershell
+          Get-FileHash .\Quilate.exe -Algorithm SHA256
+          ```
+
+          Tiene que devolver exactamente:
+
+          ```
+          __SHA__
+          ```
+
+          Con las utilidades GNU, `sha256sum -c Quilate.exe.sha256` hace lo mismo y lo
+          dice con una palabra.
+
+          Si no coincide, no lo ejecutes: o la descarga se ha cortado, o el fichero no
+          viene de aqui.
+          '@
+
+          $firmado = if ("${{ steps.firma.outputs.firmado }}" -eq "si") {
+            "si, con certificado de firma de codigo"
+          } else {
+            "**no**, Windows dira ``editor desconocido``"
+          }
+
+          $notas = $plantilla.
+            Replace('__VERSION__', "${{ steps.version.outputs.version }}").
+            Replace('__TAMANO__',  "${{ steps.sha.outputs.tamano }}").
+            Replace('__SHA__',     "${{ steps.sha.outputs.sha }}").
+            Replace('__FIRMADO__', $firmado)
+
+          if ("${{ steps.firma.outputs.firmado }}" -ne "si") {
+            # Dos lineas en blanco delante: la plantilla no acaba en salto, y
+            # con una sola el titulo se pega al parrafo anterior y markdown no
+            # lo trata como titulo.
+            $notas += @'
+
+
+          ## Sobre el aviso de Windows
+
+          SmartScreen avisa porque el binario no esta firmado, no porque haya detectado
+          nada: Windows no puede comprobar quien lo publico. Para eso esta la huella de
+          arriba. El codigo se puede ejecutar tambien como script de Python, que es el
+          mismo programa sin empaquetar.
+          '@
+          }
+
+          # Sin quitar sangria: el analizador de YAML ya descuenta la del bloque
+          # `run:`, asi que la here-string llega con el markdown pegado a la
+          # columna cero. Recortar aqui otra vez no haria nada, pero conviene
+          # tenerlo escrito: si algun dia se sangran estas lineas un poco mas
+          # que el resto del bloque para que se lean mejor, esos espacios SI
+          # sobreviven y cuatro de ellos convierten la tabla en bloque de codigo.
+          Set-Content notas-release.md -Value $notas -Encoding utf8
+          Get-Content notas-release.md
+
       - uses: actions/upload-artifact@v4
         with:
-          name: quilate-exe
+          # Con la version en el nombre, dos ejecuciones manuales seguidas no
+          # dejan dos artefactos llamados igual que hay que abrir para saber cual
+          # es cual.
+          name: quilate-${{ steps.version.outputs.version }}-exe
           path: |
             dist/Quilate.exe
             dist/Quilate.exe.sha256
           if-no-files-found: error
 
+      # OJO: los dos ficheros se llaman asi y no `Quilate-2.7.0.exe` porque la
+      # web enlaza a `/releases/latest/download/Quilate.exe` y a `...sha256`, que
+      # exigen el nombre exacto y no admiten comodines. Renombrarlos aqui deja el
+      # boton de descarga de quilate.cristianac.es devolviendo un 404 sin que
+      # nada falle en este repositorio. La version va en el titulo y en el cuerpo
+      # de la release, y dentro del propio binario en su VERSIONINFO.
       - name: Adjuntar a la release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: Quilate ${{ steps.version.outputs.version }}
+          body_path: notas-release.md
+          fail_on_unmatched_files: true
           files: |
             dist/Quilate.exe
             dist/Quilate.exe.sha256
@@ -149,13 +316,15 @@ jobs:
         run: |
           $firmado = "${{ steps.firma.outputs.firmado }}"
           $lineas = @(
-            "## Quilate - release",
+            "## Quilate ${{ steps.version.outputs.version }} - release",
             "",
             "| | |",
             "|---|---|",
+            "| Version | ${{ steps.version.outputs.version }} |",
+            "| Etiqueta | ${{ github.ref_name }} |",
             "| Firmado | $(if ($firmado -eq 'si') { 'si' } else { '**NO**' }) |",
-            "| SHA-256 | ``$((Get-Content dist\Quilate.exe.sha256).Split(' ')[0])`` |",
-            "| Tamano | $([math]::Round((Get-Item dist\Quilate.exe).Length/1MB,1)) MB |"
+            "| SHA-256 | ``${{ steps.sha.outputs.sha }}`` |",
+            "| Tamano | ${{ steps.sha.outputs.tamano }} MB |"
           )
           if ($firmado -ne 'si') {
             $lineas += @("", "> Sin firmar: SmartScreen dira **editor desconocido**. Configura los secretos SIGNING_PFX_BASE64 y SIGNING_PFX_PASSWORD, o firma a mano con ``sign.ps1``.")

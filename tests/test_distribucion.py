@@ -128,6 +128,55 @@ def test_el_recurso_de_version_lo_entiende_pyinstaller():
     assert type(evaluado).__name__ == "VSVersionInfo"
 
 
+# --------------------------------------------------------- flujo de release --
+#
+# La versión viaja por una cadena de cuatro eslabones y cada uno tiene que decir
+# lo mismo que el anterior:
+#
+#     etiqueta git ─ quilate/const.py ─ VERSIONINFO ─ el .exe compilado
+#
+# Los tres últimos ya están cubiertos: `version_info()` sale de `APP_VERSION`
+# (arriba), y `comprobar_binario.py` verifica sobre el binario ya compilado que
+# el recurso llegó. El primero es el que no puede comprobarse desde dentro del
+# programa, porque la etiqueta solo existe en el repositorio: lo comprueba el
+# flujo de release, y esto comprueba que el flujo lo sigue comprobando.
+
+FLUJO_RELEASE = RAIZ / ".github" / "workflows" / "release.yml"
+
+
+def test_el_flujo_de_release_contrasta_la_etiqueta_con_la_version():
+    # Sin esta comprobación, `git tag v2.8.0` con APP_VERSION todavía en 2.7.0
+    # publica una release titulada 2.8.0 cuyo binario se identifica como 2.7.0
+    # en sus propiedades, en `--version` y en cada informe que genera. No falla
+    # nada y no lo nota nadie: la versión deja de significar algo.
+    texto = FLUJO_RELEASE.read_text(encoding="utf-8")
+    assert "GITHUB_REF_NAME" in texto, "el flujo no mira la etiqueta"
+    assert "APP_VERSION" in texto, "el flujo no lee la versión del código"
+    assert "exit 1" in texto, "el flujo detecta el desajuste pero no falla"
+
+
+def test_el_flujo_de_release_publica_la_huella():
+    # El `.exe` no se firma, así que la huella es lo único que permite comprobar
+    # que lo descargado es lo que se publicó. Tiene que ir en dos sitios: el
+    # fichero suelto, para `sha256sum -c`, y el cuerpo de la release, porque
+    # quien descarga no se baja un segundo fichero para comparar a ojo.
+    texto = FLUJO_RELEASE.read_text(encoding="utf-8")
+    assert "Quilate.exe.sha256" in texto
+    assert "body_path" in texto, "la release no lleva notas propias"
+
+
+def test_el_flujo_de_release_no_renombra_los_ficheros_publicados():
+    # quilate.cristianac.es enlaza a /releases/latest/download/Quilate.exe y a
+    # su .sha256. Esa ruta exige el nombre exacto y no admite comodines, así que
+    # meter la versión en el nombre del fichero deja el botón de descarga de la
+    # web devolviendo un 404 sin que falle nada en este repositorio. La versión
+    # va en el título de la release, en su cuerpo y dentro del propio binario.
+    texto = FLUJO_RELEASE.read_text(encoding="utf-8")
+    publicados = texto.split("Adjuntar a la release", 1)[1]
+    assert "dist/Quilate.exe\n" in publicados
+    assert "dist/Quilate.exe.sha256" in publicados
+
+
 def test_el_manifest_es_xml_valido():
     # Un manifest que no analiza no lo rechaza PyInstaller: lo incrusta, y es
     # Windows quien se niega a arrancar el programa.
