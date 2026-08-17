@@ -12,8 +12,17 @@ tendencia de una nube de puntos, y el margen ya se calcula por prueba. Aquí sol
 se guarda una línea por ejecución y se compara el bloque más antiguo con el más
 reciente usando ese mismo criterio.
 
-Todo se queda en el equipo, en un fichero de texto que el usuario puede leer,
-copiar o borrar. No se envía nada a ninguna parte.
+**Este fichero se queda en el equipo**, en texto plano que el usuario puede
+leer, copiar o borrar. El histórico no se envía: ni este fichero, ni la serie,
+ni las tendencias que se calculan con él.
+
+Lo que sí sale del equipo desde la 2.8.0 —y conviene decirlo aquí, porque hasta
+la 2.7.0 este módulo prometía justo lo contrario— es el resumen de *una*
+ejecución, con los campos de la lista cerrada de `PRIVACY.md`. Casualmente se
+parece mucho a lo que `_resumen()` construye para el histórico, y esa
+coincidencia no es casual: es el mismo criterio de qué merece la pena guardar
+de una ejecución. Pero son dos cosas distintas y no hay que confundirlas: el
+histórico es tuyo y local, y el resumen enviado es una foto suelta sin serie.
 """
 
 from __future__ import annotations

@@ -6,6 +6,32 @@ Benchmark + auditoría de optimización para Windows (con soporte parcial en Lin
 
 ---
 
+> ## ⚠️ Cambio de política de datos en la versión 2.8.0
+>
+> Hasta la versión **2.7.0 incluida, Quilate no enviaba ningún dato** de tu
+> sistema a ninguna parte, y así estaba escrito aquí.
+>
+> **Desde la 2.8.0 sí.** Al terminar cada análisis se envía un resumen técnico
+> reducido: modelo de CPU, GPU y RAM, tipo de disco, versión del sistema
+> operativo, las puntuaciones del benchmark y los identificadores (no los
+> textos) de los hallazgos, junto a un identificador aleatorio de instalación
+> que se regenera cada 90 días. Sirve para poder comparar tu equipo con otros
+> del mismo modelo de procesador.
+>
+> **No se envía** tu informe, ni el histórico, ni rutas o nombres de fichero, ni
+> el nombre de tu equipo o de tu usuario, ni SSID/BSSID/MAC, ni números de serie,
+> ni tu dirección IP.
+>
+> **No se puede desactivar desde el programa, y `--no-net` tampoco lo
+> desactiva.** La primera vez que ejecutes la 2.8.0 verás un aviso, y esa
+> ejecución todavía no envía nada. Si prefieres el comportamiento anterior, la
+> 2.7.0 sigue publicada y seguirá funcionando.
+>
+> Lista cerrada de datos, tus derechos y las tres formas de evitarlo:
+> **[PRIVACY.md](PRIVACY.md)**.
+
+---
+
 ## Instalación
 
 Python 3.9 o superior. La única dependencia es `psutil`, y se instala dentro de
@@ -65,7 +91,7 @@ En los ejemplos siguientes, `python` asume el entorno ya activado.
 | `--no-gpu` | Omite las pruebas de GPU (cómputo, VRAM y PCIe) |
 | `--disk-size 2048` | Tamaño del fichero de test en MB (por defecto 512) |
 | `--disk-path D:\` | Carpeta donde medir el disco |
-| `--no-net` | No mide latencia ni DNS: no abre ninguna conexión a internet |
+| `--no-net` | No mide latencia ni DNS, ni comprueba si hay versión nueva. **No desactiva el envío del resumen** ([PRIVACY.md](PRIVACY.md)) |
 | `--no-files` | Omite el rastreo de archivos grandes |
 | `--scan-time 60` | Segundos de presupuesto para el rastreo (por defecto 30) |
 | `--scan-path D:\Juegos` | Carpeta extra a rastrear (repetible) |
@@ -77,7 +103,8 @@ En los ejemplos siguientes, `python` asume el entorno ya activado.
 | `--export-plan` | Genera `plan_optimizacion.ps1` (solo Windows) |
 | `--compare antes.json despues.json` | Contrasta dos ejecuciones y sale (no mide nada) |
 | `--history` | Muestra el histórico local y su deriva, y sale |
-| `--no-history` | No guarda esta ejecución en el histórico local |
+| `--no-history` | No guarda esta ejecución en el histórico local (no afecta al envío del resumen) |
+| `--mi-id` | Muestra tu identificador de instalación y sale ([PRIVACY.md](PRIVACY.md)) |
 | `--elevate` | Pide permisos aunque no haya nadie delante para aceptarlos |
 | `--no-elevate` | No pide permisos en ningún caso |
 | `--no-color` | Desactiva colores ANSI |
@@ -264,12 +291,19 @@ la RAM funcionando a velocidad JEDEC con módulos que dan más.
 
 La latencia y la resolución DNS **se miden por defecto**: se cronometra el
 saludo TCP contra tres resolutores públicos y conocidos (1.1.1.1, 8.8.8.8 y
-9.9.9.9). No se envía ningún dato a ninguna parte, solo se mide el tiempo de ida
+9.9.9.9). En esas sondas no se envía ningún dato: solo se mide el tiempo de ida
 y vuelta. `--no-net` impide la llamada, no oculta el resultado.
+
+Ojo con lo anterior, porque desde la 2.8.0 son dos cosas distintas: que las
+sondas no manden nada sigue siendo cierto, pero **`--no-net` ya no significa
+«no sale nada del equipo»**. Corta estas sondas y la comprobación de versión, no
+el envío del resumen de la ejecución. Ver [PRIVACY.md](PRIVACY.md).
 
 **No se recogen el SSID, el BSSID ni la dirección MAC.** Identifican tu red y tu
 equipo, no dicen nada sobre el rendimiento, y estos informes se comparten. Hay
-tests que lo comprueban.
+tests que lo comprueban. Desde la 2.8.0 esto importa más, no menos: parte del
+informe se envía, y estos tres campos están en la lista de lo que nunca sale
+porque no se recogen siquiera.
 
 ## Comparar dos ejecuciones
 

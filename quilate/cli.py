@@ -25,6 +25,7 @@ from .storage_scan import ScanResult, default_roots, scan_large_files
 from .history import append as history_append, report as history_report
 from .history_report import print_history
 from .network import DESTINOS as NET_TARGETS, collect as collect_network
+from . import telemetria, update_check
 from .sysinfo import collect_system_info
 
 
@@ -54,6 +55,10 @@ def parse_args() -> argparse.Namespace:
                    help="mostrar el histórico local de ejecuciones y su deriva, y salir")
     p.add_argument("--no-history", action="store_true",
                    help="no guardar esta ejecución en el histórico local")
+    p.add_argument("--mi-id", action="store_true",
+                   help="mostrar el identificador de instalación que acompaña al "
+                        "resumen enviado, y salir (sirve para pedir el borrado de "
+                        "tus datos: ver PRIVACY.md)")
     p.add_argument("--quick", action="store_true", help="benchmark rápido (menor precisión)")
     p.add_argument("--no-bench", action="store_true", help="solo auditoría, sin benchmark")
     p.add_argument("--no-disk", action="store_true", help="omitir las pruebas de disco")
@@ -65,7 +70,9 @@ def parse_args() -> argparse.Namespace:
                    help="carpeta donde hacer el test de disco (por defecto: temporal del sistema)")
     p.add_argument("--no-net", action="store_true",
                    help="no medir latencia ni DNS (evita contactar con resolutores "
-                        "públicos: 1.1.1.1, 8.8.8.8, 9.9.9.9)")
+                        "públicos: 1.1.1.1, 8.8.8.8, 9.9.9.9) y no comprobar si hay "
+                        "versión nueva. NO desactiva el envío del resumen de la "
+                        "ejecución: ver PRIVACY.md")
     p.add_argument("--check-drivers", action="store_true",
                    help="consultar en línea (Windows Update) si hay drivers más nuevos; "
                         "tarda 10-30 s")
@@ -170,6 +177,60 @@ def _pedir_permisos(args: argparse.Namespace) -> None:
         spinner_done(f"{contestadas} de {len(lote)} en {tardanza:.0f} s")
 
 
+def _mostrar_mi_id() -> None:
+    """El identificador de instalación, y para qué sirve saberlo.
+
+    No basta con escupir el UUID. Quien ejecuta esto casi siempre viene de leer
+    `PRIVACY.md` buscando cómo pedir que se borren sus datos, así que se le dice
+    dónde vive el fichero —puede borrarlo él— y qué hacer con el número.
+
+    Consultarlo lo genera si no existía, y eso es correcto: el identificador se
+    crea en local y no significa nada hasta que acompaña a un envío.
+    """
+    print(f"\n  {C.BOLD}Identificador de instalación{C.RESET}")
+    print(f"  {C.GOLD}{telemetria.install_id()}{C.RESET}\n")
+    print(f"  {C.DIM}Acompaña al resumen que Quilate envía al terminar cada análisis.")
+    print(f"  Se genera solo, no deriva de tu hardware y se cambia cada 90 días.")
+    print(f"  Fichero: {telemetria.estado_path()}")
+    print(f"  Bórralo y se generará otro. Detalle completo en PRIVACY.md.{C.RESET}\n")
+
+
+# El aviso de la primera ejecución. Sale una sola vez, antes de que se haya
+# enviado nada —esta ejecución no manda— y por eso es corto: un muro de texto al
+# final de un informe no lo lee nadie, y lo que aquí importa es que las cuatro
+# frases que lo componen sí se lean. Las cuatro son las que alguien necesita para
+# decidir si le parece bien: qué se manda, qué no, que no se puede apagar, y
+# dónde está lo demás.
+_AVISO_TELEMETRIA = (
+    "Desde la versión 2.8.0, al terminar cada análisis Quilate envía un resumen "
+    "técnico:",
+    "modelo de CPU, GPU y RAM, tipo de disco, versión del sistema, las "
+    "puntuaciones y los",
+    "identificadores de los hallazgos. No se envía tu informe, ni el histórico, "
+    "ni rutas, ni",
+    "nombres de equipo o de usuario, ni tu IP. Hasta la 2.7.0 no se enviaba nada.",
+    "",
+    "No se puede desactivar desde el programa, y --no-net tampoco lo desactiva.",
+    "Detalle completo, y qué puedes hacer si no te parece bien, en PRIVACY.md.",
+)
+
+
+def _avisar_de_la_telemetria() -> None:
+    """Enseña el aviso una vez y lo anota. Esta ejecución no envía nada.
+
+    El orden importa más que el texto: primero se avisa, y el envío empieza en la
+    ejecución siguiente. Publicar el aviso a la vez que el primer envío
+    convertiría esto en «nos enteramos después», y la diferencia cuesta una
+    ejecución.
+    """
+    section("Aviso sobre datos")
+    for linea in _AVISO_TELEMETRIA:
+        print(f"  {C.DIM}{linea}{C.RESET}" if linea else "")
+    print(f"\n  {C.DIM}Esta vez no se ha enviado nada: el aviso va antes del primer "
+          f"envío.{C.RESET}\n")
+    telemetria.marcar_avisado()
+
+
 def _run_comparison(rutas: list[str]) -> int:
     antes_path, despues_path = Path(rutas[0]), Path(rutas[1])
     try:
@@ -235,6 +296,10 @@ def main(args: argparse.Namespace | None = None) -> int:
 
     if args.history:
         print_history(history_report())
+        return 0
+
+    if args.mi_id:
+        _mostrar_mi_id()
         return 0
 
     if args.compare:
@@ -305,13 +370,51 @@ def main(args: argparse.Namespace | None = None) -> int:
     projection = project_improvement(bench, auditor.findings)
     print_report(si, bench, auditor, projection)
 
+    # Si hay una versión más nueva. Va aquí, con el informe ya impreso, y no al
+    # arrancar: el análisis ya está hecho cuando se pregunta, así que una release
+    # que no contesta no puede costar un informe. `comprobar` exige que se le
+    # diga explícitamente si esta ejecución puede salir a internet —no tiene
+    # valor por defecto— y `--no-net` es lo que decide eso, que es la parte de la
+    # bandera que sí sigue significando lo que decía.
+    #
+    # Con `--no-net` se sigue leyendo la caché: una respuesta que ya está en el
+    # disco no cuesta ninguna conexión, y callar un dato que ya se tiene sería
+    # esconderlo. La línea sale una sola vez y solo si hay algo que anunciar; ni
+    # es un hallazgo de la auditoría ni un problema del equipo.
+    aviso = update_check.linea_de_aviso(update_check.comprobar(not args.no_net))
+    if aviso:
+        print(f"  {C.DIM}{aviso}{C.RESET}\n")
+
+    # Se construye una sola vez y lo usan el histórico y el envío. Va en un
+    # `try` porque antes solo se llamaba cuando había benchmark y ahora se llama
+    # siempre: un fallo aquí no puede costar un informe que ya está impreso.
+    try:
+        payload = build_payload(si, bench, auditor, projection)
+    except Exception:
+        payload = None
+
     # El histórico se guarda solo si hubo benchmark: una entrada sin puntuación
     # no aporta nada a una serie y ensuciaría las tendencias.
-    if bench and bench.results and not args.no_history:
-        destino = history_append(build_payload(si, bench, auditor, projection))
+    if payload and bench and bench.results and not args.no_history:
+        destino = history_append(payload)
         if destino:
             print(f"  {C.DIM}Guardado en el histórico local ({destino}). "
                   f"Míralo con --history.{C.RESET}\n")
+
+    # El envío del resumen. Va aquí, con el informe ya impreso y el histórico ya
+    # escrito, porque no puede quitarle nada a quien vino a medir su equipo: si
+    # falla, ya tiene delante todo lo que buscaba. `programar` no bloquea, no
+    # avisa de nada y no lanza.
+    #
+    # `--no-history` no lo detiene, y no es un descuido: son dos cosas distintas
+    # —una guarda una serie en tu disco, la otra manda una foto suelta— y
+    # colgarlas de la misma bandera daría a entender que hay un interruptor
+    # donde no lo hay. Lo que sí lo detiene, en esta ejecución y solo en esta,
+    # es que el aviso no se haya enseñado todavía.
+    if not telemetria.ya_avisado():
+        _avisar_de_la_telemetria()
+    elif payload:
+        telemetria.programar(payload)
 
     # --- Exportaciones ---
     outputs = _exportaciones(args, si, bench, auditor, projection)

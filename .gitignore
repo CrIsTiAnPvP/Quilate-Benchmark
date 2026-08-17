@@ -24,5 +24,14 @@ auditory.md
 build/
 dist/
 *.spec
+# Lo genera setuptools desde que `pyproject.toml` declara `[project]`: aparece
+# solo con hacer `pip install -e .` o construir el paquete.
+*.egg-info/
+
+graphify-out/
+
+docs/
+
+.pytest_cache/
 
 .claude

@@ -1,7 +1,54 @@
-# Este fichero existe solo para configurar las herramientas de desarrollo.
-# Quilate no se instala como paquete —se ejecuta desde `quilate.py` y se
-# empaqueta con `build.ps1`—, así que a propósito no lleva `[project]` ni
-# `[build-system]`.
+# Hasta la 2.7.0 este fichero existía solo para configurar las herramientas de
+# desarrollo, y declaraba a propósito que Quilate no se instala como paquete: se
+# ejecuta desde `quilate.py` y se empaqueta con `build.ps1`.
+#
+# Eso sigue siendo la forma normal de usarlo. Lo que ha cambiado es que ahora
+# **además** es instalable, porque Quilate Studio vive en un repositorio aparte
+# y necesita declarar `quilate` como dependencia. Sin metadatos de empaquetado
+# la única alternativa era duplicar el código, que es peor.
+#
+# Esto NO implica publicar en PyPI, y se sigue sin publicar por el motivo que
+# explica `update_check.py`: la etiqueta de git ya está atada a `APP_VERSION`
+# por el workflow de release, y eso hace de `releases/latest` la respuesta
+# exacta a «¿hay algo más nuevo?». Se instala desde la etiqueta:
+#
+#     pip install "quilate @ git+https://github.com/CrIsTiAnPvP/Quilate-Benchmark@v2.8.0"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quilate"
+description = "Benchmark y auditoría de optimización para Windows, con soporte parcial en Linux"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Cristian Alonso" }]
+dependencies = ["psutil>=5.9"]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://cristianac.es"
+Repository = "https://github.com/CrIsTiAnPvP/Quilate-Benchmark"
+
+# La versión sale de `const.py` y no se repite aquí. Repetirla sería crear una
+# segunda fuente de verdad para el número que el workflow de release ya valida
+# contra la etiqueta: dos sitios que decir la versión es un sitio de más donde
+# se puede quedar vieja.
+#
+# Apunta a `const.py` y no a `quilate.APP_VERSION`, que sería lo natural: en
+# `__init__.py` la versión es un `from .const import ...`, y eso setuptools no
+# lo sabe leer sin importar el paquete. Importarlo durante la construcción
+# arrastra `psutil`, que en el entorno aislado de compilación no está. En
+# `const.py` es una asignación literal y se lee del código sin ejecutarlo.
+[tool.setuptools.dynamic]
+version = { attr = "quilate.const.APP_VERSION" }
+
+# Se listan a mano en vez de usar autodetección. Son tres y no cambian a menudo,
+# y así un paquete nuevo sin declarar falla al empaquetar en lugar de colarse.
+[tool.setuptools]
+packages = ["quilate", "quilate.audit", "quilate.export"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

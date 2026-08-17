@@ -7,12 +7,23 @@ haciendo**, no lo que la tarjeta podría hacer. Una tarjeta Wi-Fi 6 conectada en
 802.11ac, o un adaptador gigabit negociando a 100 Mbps por un cable malo, son
 exactamente ese caso.
 
-Sobre privacidad: la inspección del enlace es local y no habla con nadie, así
-que va siempre. Las sondas de latencia sí abren conexiones a servidores de
-terceros, así que son opcionales y hay que pedirlas expresamente. Y de la wifi
-NO se recoge el SSID, ni el BSSID, ni la dirección MAC: identifican la red y el
-punto de acceso, no dicen nada sobre el rendimiento, y estos informes se
-comparten.
+Sobre privacidad, y con tres afirmaciones que hay que separar bien porque desde
+la 2.8.0 ya no dicen lo mismo:
+
+1. **La inspección del enlace es local y no habla con nadie**, así que va
+   siempre. Esto no ha cambiado.
+2. **Las sondas de latencia abren conexiones a terceros**, así que se cortan con
+   `--no-net`. Esto tampoco ha cambiado.
+3. **De la wifi NO se recoge el SSID, ni el BSSID, ni la dirección MAC.**
+   Identifican la red y el punto de acceso, no dicen nada sobre el rendimiento,
+   y estos informes se comparten. Esto es ahora **más** importante que antes,
+   no menos: desde la 2.8.0 parte del informe se envía, y estos tres campos
+   están en la lista de lo que nunca sale. Si alguna vez se recogen «solo para
+   el informe local», acabarán saliendo por ahí. No se recogen.
+
+Lo que sí ha cambiado: `--no-net` ya no significa «no sale nada del equipo».
+Corta las sondas de arriba y la comprobación de versión, pero **no corta la
+telemetría**. Ver `PRIVACY.md`.
 """
 
 from __future__ import annotations
