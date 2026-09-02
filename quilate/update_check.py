@@ -16,10 +16,23 @@ respuesta exacta a la pregunta «¿hay algo más nuevo que lo que tengo?». Un
 
 Tres reglas que gobiernan todo lo de aquí, en orden de importancia:
 
-1. **Esto nunca puede estropear una ejecución.** El análisis ya está hecho
-   cuando se pregunta, y una release que no contesta no puede costar un
-   informe. Todo error se traga y se devuelve `None`; el timeout es de tres
-   segundos y no se reintenta.
+1. **Esto nunca puede estropear una ejecución.** Todo error se traga y se
+   devuelve `None`; el timeout es de tres segundos y no se reintenta. Una
+   release que no contesta no puede costar un informe.
+
+   Hasta la 2.8.1 aquí ponía además que «el análisis ya está hecho cuando se
+   pregunta», porque la consulta iba después del informe. **Ya no**: desde la
+   2.8.2 se pregunta al principio, nada más pintar el banner. El motivo es que
+   un aviso debajo del informe llegaba cuando quien ejecutó Quilate ya llevaba
+   minutos esperando y estaba leyendo sus puntuaciones, y encima lo tapaba el
+   menú final. Un aviso que nadie lee no avisa.
+
+   Lo que eso cambia es quién paga el timeout y cuándo: ahora se paga antes del
+   análisis y no después. Lo hace tolerable la regla 2 —en la ejecución normal
+   la respuesta ya está en la caché y no cuesta nada, y el equipo sin conexión
+   paga los tres segundos una vez al día— y que el análisis dura minutos. Lo
+   que **no** ha cambiado es que de aquí no sale nunca una excepción.
+
 2. **No se pregunta en cada ejecución.** La respuesta se guarda con su fecha al
    lado del histórico y vale un día. El fallo también se guarda: sin eso, un
    equipo sin conexión pagaría los tres segundos del timeout en cada arranque,

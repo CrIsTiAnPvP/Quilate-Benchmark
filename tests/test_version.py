@@ -2,8 +2,9 @@
 
 Tres cosas que este módulo promete y que aquí se fijan, en orden de importancia:
 
-- **No puede estropear una ejecución.** El análisis ya está hecho cuando se
-  pregunta. Todo error se traga y se devuelve un estado utilizable.
+- **No puede estropear una ejecución.** Todo error se traga y se devuelve un
+  estado utilizable. Desde la 2.8.2 la consulta va al principio, antes del
+  análisis, así que esto pesa más que cuando iba debajo del informe.
 - **No pregunta en cada ejecución.** La respuesta vale un día, y el fallo
   también se guarda: sin eso un equipo sin conexión pagaría el timeout entero en
   cada arranque, para siempre.
@@ -286,6 +287,73 @@ class LineaDeAviso(unittest.TestCase):
                                 "current": "2.8.0", "url": "u",
                                 "source": "caché caducada"})
         self.assertIn("no se ha consultado ahora", linea)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class AvisoEnLaLineaDeComandos(unittest.TestCase):
+    """Dónde sale el aviso, que es lo que la 2.8.2 cambia.
+
+    Sale al principio y no debajo del informe. La colocación no es cosmética:
+    debajo del informe llegaba cuando quien ejecutó Quilate ya llevaba minutos
+    esperando, y el menú final lo tapaba.
+    """
+
+    def avisar(self, no_net=False, **estado):
+        from quilate import cli
+        args = mock.Mock(no_net=no_net)
+        base = {"outdated": False, "latest": None, "current": "2.8.1",
+                "url": "https://ejemplo/r", "source": "red", "error": None}
+        base.update(estado)
+        with mock.patch.object(cli.update_check, "comprobar",
+                               return_value=base) as comprobar:
+            with mock.patch("builtins.print") as escribir:
+                cli._avisar_de_version(args)
+        salida = "\n".join(str(c.args[0]) for c in escribir.call_args_list if c.args)
+        return comprobar, salida
+
+    def test_avisa_cuando_hay_version_nueva(self):
+        _, salida = self.avisar(outdated=True, latest="2.8.2")
+        self.assertIn("2.8.2", salida)
+        self.assertIn("https://ejemplo/r", salida)
+
+    def test_calla_cuando_esta_al_dia(self):
+        _, salida = self.avisar(outdated=False, latest="2.8.1")
+        self.assertEqual(salida.strip(), "")
+
+    def test_no_net_no_autoriza_la_red(self):
+        # La parte de la bandera que sí sigue significando lo que decía.
+        comprobar, _ = self.avisar(no_net=True)
+        self.assertIs(comprobar.call_args.args[0], False)
+
+    def test_sin_no_net_si_autoriza(self):
+        comprobar, _ = self.avisar(no_net=False)
+        self.assertIs(comprobar.call_args.args[0], True)
+
+    def test_sale_antes_del_banco_de_pruebas(self):
+        # La razón de ser del cambio: si esto vuelve a caer detrás del informe,
+        # el aviso deja de leerse y este test lo dice.
+        import inspect
+        from quilate import cli
+        cuerpo = inspect.getsource(cli.main)
+        puesto = cuerpo.index("_avisar_de_version(args)")
+        self.assertLess(puesto, cuerpo.index("Benchmark("),
+                        "el aviso tiene que salir antes del benchmark")
+        self.assertLess(puesto, cuerpo.index("print_report("),
+                        "el aviso tiene que salir antes del informe")
+
+    def test_un_fallo_inesperado_no_tumba_la_ejecucion(self):
+        # Desde que esto va al principio, una excepcion aqui costaria el analisis
+        # entero. `comprobar` no lanza, pero eso no puede ser lo unico que lo
+        # impida.
+        from quilate import cli
+        with mock.patch.object(cli.update_check, "comprobar",
+                               side_effect=OSError("sin red")):
+            with mock.patch("builtins.print") as escribir:
+                cli._avisar_de_version(mock.Mock(no_net=False))
+        escribir.assert_not_called()
 
 
 if __name__ == "__main__":

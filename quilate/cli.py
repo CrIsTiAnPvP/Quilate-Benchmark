@@ -122,6 +122,42 @@ _LO_QUE_NECESITA_PERMISOS = (
 )
 
 
+def _avisar_de_version(args: argparse.Namespace) -> None:
+    """Si hay una versión más nueva. Se dice al principio, no al final.
+
+    Hasta la 2.8.1 esto salía debajo del informe, como nota al pie, con el
+    argumento de que así una release que no contesta no puede costar un informe
+    que ya está impreso. El argumento era bueno y la colocación era mala: para
+    cuando aparecía, quien ejecutó Quilate llevaba minutos esperando y ya estaba
+    leyendo sus puntuaciones, y encima el menú final la tapaba. Un aviso que
+    nadie lee no avisa.
+
+    Aquí cuesta lo que tarde la consulta, y por eso el timeout de `update_check`
+    son tres segundos y la respuesta vale un día: en la ejecución normal ya está
+    en la caché y no cuesta nada, y el equipo sin conexión paga esos tres
+    segundos una vez cada veinticuatro horas, no en cada arranque. Frente a un
+    análisis que dura minutos es un precio que se puede pagar por que el aviso
+    se lea.
+
+    `comprobar` exige que se le diga explícitamente si esta ejecución puede
+    salir a internet —no tiene valor por defecto—, y `--no-net` es lo que lo
+    decide: esa parte de la bandera sí sigue significando lo que decía. Con ella
+    puesta se sigue leyendo la caché, porque una respuesta que ya está en el
+    disco no cuesta ninguna conexión y callarla sería esconder un dato que ya se
+    tiene.
+    """
+    # `comprobar` no lanza nunca y está probado para no hacerlo, pero desde que
+    # esto va al principio un descuido suyo costaría el análisis entero en vez de
+    # la última línea del informe. La red sobra hasta el día que no sobre.
+    try:
+        aviso = update_check.linea_de_aviso(update_check.comprobar(not args.no_net))
+    except Exception:
+        return
+    if aviso:
+        print()
+        print(f"  {C.CYAN}▸{C.RESET} {aviso}")
+
+
 def _pedir_permisos(args: argparse.Namespace) -> None:
     """Pide una vez los permisos con los que se lee el lote, o dice por qué no.
 
@@ -308,6 +344,7 @@ def main(args: argparse.Namespace | None = None) -> int:
         return _run_comparison(args.compare)
 
     banner()
+    _avisar_de_version(args)
     _pedir_permisos(args)
 
     section("Recopilando información del sistema")
@@ -369,21 +406,6 @@ def main(args: argparse.Namespace | None = None) -> int:
 
     projection = project_improvement(bench, auditor.findings)
     print_report(si, bench, auditor, projection)
-
-    # Si hay una versión más nueva. Va aquí, con el informe ya impreso, y no al
-    # arrancar: el análisis ya está hecho cuando se pregunta, así que una release
-    # que no contesta no puede costar un informe. `comprobar` exige que se le
-    # diga explícitamente si esta ejecución puede salir a internet —no tiene
-    # valor por defecto— y `--no-net` es lo que decide eso, que es la parte de la
-    # bandera que sí sigue significando lo que decía.
-    #
-    # Con `--no-net` se sigue leyendo la caché: una respuesta que ya está en el
-    # disco no cuesta ninguna conexión, y callar un dato que ya se tiene sería
-    # esconderlo. La línea sale una sola vez y solo si hay algo que anunciar; ni
-    # es un hallazgo de la auditoría ni un problema del equipo.
-    aviso = update_check.linea_de_aviso(update_check.comprobar(not args.no_net))
-    if aviso:
-        print(f"  {C.DIM}{aviso}{C.RESET}\n")
 
     # Se construye una sola vez y lo usan el histórico y el envío. Va en un
     # `try` porque antes solo se llamaba cuando había benchmark y ahora se llama

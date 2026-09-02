@@ -5,6 +5,33 @@ Este proyecto usa [versionado semántico](https://semver.org/lang/es/).
 
 ---
 
+## [2.8.2] — 2026-09-02
+
+### Cambiado
+- **El aviso de versión nueva sale ahora al principio, no debajo del informe.**
+  Antes se imprimía como nota al pie, después de las puntuaciones: para cuando
+  aparecía, quien había ejecutado Quilate llevaba minutos esperando y estaba
+  leyendo sus resultados, y encima el menú final lo tapaba. Un aviso que nadie
+  lee no avisa. Ahora sale justo debajo del banner, antes de pedir permisos y
+  antes de medir nada.
+
+  El precio es que la consulta se paga antes del análisis y no después. Lo hace
+  asumible que la respuesta valga un día: en la ejecución normal ya está en la
+  caché y no cuesta nada, y un equipo sin conexión paga los tres segundos del
+  timeout una vez cada veinticuatro horas, no en cada arranque. Frente a un
+  análisis que dura minutos, es un precio que se paga por que el aviso se lea.
+
+- `--no-net` sigue cortando la consulta igual que antes, y con la bandera puesta
+  se sigue leyendo la caché sin abrir ninguna conexión.
+
+### Sin cambios
+- **Lo que se envía no ha cambiado.** [PRIVACY.md](PRIVACY.md) sigue vigente sin
+  tocar una línea.
+- La comprobación sigue sin mandar la versión instalada: es una `GET` sin cuerpo
+  y sin parámetros, y la comparación se hace en local.
+
+---
+
 ## [2.8.1] — 2026-09-02
 
 ### Corregido
