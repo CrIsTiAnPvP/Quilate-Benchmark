@@ -12,7 +12,7 @@ import platform
 # BRANDING
 # ------------------------------------------------------------------------------
 APP_NAME = "Quilate Suite"
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.8.1"
 AUTHOR = "Cristian Alonso"
 WEBSITE = "cristianac.es"
 WEBSITE_URL = "https://cristianac.es"

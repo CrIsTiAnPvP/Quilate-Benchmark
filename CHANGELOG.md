@@ -5,6 +5,35 @@ Este proyecto usa [versionado semántico](https://semver.org/lang/es/).
 
 ---
 
+## [2.8.1] — 2026-09-02
+
+### Corregido
+- **El resumen de la ejecución no llegaba a enviarse casi nunca.** El envío va
+  en un hilo demonio, y el programa no lo esperaba antes de cerrar: el
+  intérprete mata los hilos demonio en cuanto el proceso acaba, así que el POST
+  solo se completaba si algo mantenía la ventana viva por casualidad —el menú
+  final, que se para a leer una tecla—. Con la salida redirigida, en una tarea
+  programada, o simplemente pasando `--json` o `--html`, el envío moría a medias
+  y se perdía.
+
+  Con él se perdía también la anotación del fallo, así que **el backoff de 24 h
+  tampoco llegaba a escribirse** y un equipo sin conexión volvía a intentarlo en
+  cada arranque. Fallaban a la vez las dos cosas que la 2.8.0 prometía sobre el
+  envío: que ocurriera, y que no se repitiera más de una vez al día.
+
+  Ahora se espera al hilo con un tope de tres segundos y medio. Sigue siendo un
+  hilo demonio a propósito: cerrar la ventana a media espera mata el proceso en
+  ese momento, y pasado el tope se sigue adelante y el envío se pierde, que es
+  lo que ya estaba escrito que pasaría.
+
+### Sin cambios
+- **Lo que se envía no ha cambiado**: la lista cerrada de la 2.8.0, campo a
+  campo. Ver [PRIVACY.md](PRIVACY.md), que sigue vigente tal cual.
+- El aviso de primera ejecución sigue yendo **antes** del primer envío: si
+  actualizas desde la 2.7.0, la primera ejecución avisa y no manda nada.
+
+---
+
 ## [2.8.0] — 2026-08-18
 
 ### Cambio de política de datos — léelo antes de actualizar
