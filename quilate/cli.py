@@ -411,10 +411,11 @@ def main(args: argparse.Namespace | None = None) -> int:
     # colgarlas de la misma bandera daría a entender que hay un interruptor
     # donde no lo hay. Lo que sí lo detiene, en esta ejecución y solo en esta,
     # es que el aviso no se haya enseñado todavía.
+    global _envio
     if not telemetria.ya_avisado():
         _avisar_de_la_telemetria()
     elif payload:
-        telemetria.programar(payload)
+        _envio = telemetria.programar(payload)
 
     # --- Exportaciones ---
     outputs = _exportaciones(args, si, bench, auditor, projection)
@@ -440,6 +441,12 @@ DEFAULT_NAMES = {
 }
 
 _menu_shown = False   # lo consulta _wait_before_closing(): ver su docstring
+
+# El hilo del envío, para que `run` pueda esperarlo antes de que muera el
+# proceso. Es un global por el mismo motivo que `_menu_shown`: lo pone `main` y
+# lo lee `run`, que es quien controla el cierre, y devolverlo cambiaría la firma
+# de `main` sin que nadie más lo necesite.
+_envio = None
 
 
 def _menu_line(key: str, label: str, target: str, done: Path | None = None) -> None:
@@ -645,4 +652,9 @@ def run() -> int:
         print(f"\n{C.YELLOW}Cancelado por el usuario.{C.RESET}\n")
         return 130
     finally:
+        # Antes que `_wait_before_closing`, y antes de que el proceso muera: el
+        # hilo del envío es demonio y el intérprete lo mata sin esperarlo. Ver
+        # `telemetria.esperar`. Si el menú final llegó a salir, esto vuelve al
+        # instante porque al envío le sobró tiempo mientras se leía una tecla.
+        telemetria.esperar(_envio)
         _wait_before_closing()

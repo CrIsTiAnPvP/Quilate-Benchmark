@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,7 +27,8 @@ from unittest import mock
 from quilate import telemetria
 from quilate.const import TELEMETRIA_ESQUEMA
 from quilate.telemetria import (ROTACION, _storage_kind, construir, enviar,
-                                install_id, marcar_avisado, programar, ya_avisado)
+                                esperar, install_id, marcar_avisado, programar,
+                                ya_avisado)
 
 AHORA = datetime(2026, 8, 17, 12, 0, 0)
 
@@ -374,6 +377,68 @@ class Envio(_ConEstado):
             if hilo:
                 hilo.join(timeout=10)
         envio.assert_called_once()
+
+
+class SobrevivirAlCierre(_ConEstado):
+    """Que el envío llegue a ocurrir, y no lo mate el cierre del proceso.
+
+    El hilo es demonio, y el intérprete mata los hilos demonio sin esperarlos.
+    Sin un `join` acotado el POST solo se completaba cuando algo mantenía vivo el
+    proceso por casualidad —el menú final, que se para a leer una tecla— y se
+    perdía en toda ejecución con la salida redirigida, en tarea programada, o
+    simplemente con `--json`. Con él se perdía también el `failed_at`, así que
+    ni siquiera el backoff de 24 h llegaba a anotarse.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.escribir(install_id="9f2c0000-0000-4000-8000-000000000000",
+                      created_at=AHORA.isoformat(timespec="seconds"),
+                      notified_at=AHORA.isoformat(timespec="seconds"))
+
+    def test_esperar_deja_terminar_al_envio(self):
+        empezado, terminado = threading.Event(), threading.Event()
+
+        def lento(*_args, **_kwargs):
+            empezado.set()
+            time.sleep(0.3)          # el orden de magnitud de una petición real
+            terminado.set()
+            return True
+
+        with mock.patch.object(telemetria, "enviar", side_effect=lento):
+            hilo = programar(ejecucion(), self.estado, "https://ejemplo.invalid/", AHORA)
+            self.assertTrue(empezado.wait(2))
+            self.assertFalse(terminado.is_set())   # todavía a medias
+            esperar(hilo)
+            self.assertTrue(terminado.is_set())    # y `esperar` no volvió antes
+
+    def test_esperar_anota_el_fallo_antes_de_cerrar(self):
+        # La consecuencia que de verdad se notaba: sin esperar, el `failed_at` no
+        # llegaba al disco y el equipo sin conexión reintentaba en cada arranque.
+        with mock.patch.object(telemetria, "enviar", return_value=False):
+            esperar(programar(ejecucion(), self.estado, "https://ejemplo.invalid/", AHORA))
+        self.assertEqual(self.leer()["failed_at"], AHORA.isoformat(timespec="seconds"))
+
+    def test_esperar_no_cuelga_si_el_envio_se_atasca(self):
+        # El tope existe para que un servidor que acepta la conexión y luego
+        # calla no deje el programa sin cerrarse.
+        with mock.patch.object(telemetria, "enviar",
+                               side_effect=lambda *a, **k: time.sleep(30)):
+            hilo = programar(ejecucion(), self.estado, "https://ejemplo.invalid/", AHORA)
+            t = time.perf_counter()
+            esperar(hilo, timeout=0.2)
+            self.assertLess(time.perf_counter() - t, 2.0)
+
+    def test_esperar_sin_hilo_no_revienta(self):
+        # Es lo que recibe cuando no tocaba enviar: primera ejecución, o backoff.
+        esperar(None)
+
+    def test_el_hilo_sigue_siendo_demonio(self):
+        # El `join` acotado no puede convertirlo en un hilo que impida cerrar.
+        with mock.patch.object(telemetria, "enviar", return_value=True):
+            hilo = programar(ejecucion(), self.estado, "https://ejemplo.invalid/", AHORA)
+        self.assertTrue(hilo.daemon)
+        esperar(hilo)
 
 
 class AvisoDePrimeraEjecucion(_ConEstado):

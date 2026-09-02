@@ -412,6 +412,37 @@ def _enviar_y_anotar(cuerpo: dict, fichero: Path, url: str, timeout: float,
         pass
 
 
+def esperar(hilo: threading.Thread | None,
+            timeout: float = TIEMPO_LIMITE + 0.5) -> None:
+    """Le da al envío el tiempo justo de terminar antes de que muera el proceso.
+
+    Hace falta porque el hilo es demonio, y un hilo demonio **no se espera**: el
+    intérprete lo mata en cuanto el programa acaba. Sin esto, el envío solo
+    llegaba a completarse cuando algo posterior mantenía el proceso vivo por
+    casualidad —el menú final, que se para a leer una tecla—, y se perdía en
+    todas las demás: salida redirigida, tarea programada, o simplemente pasar
+    `--json` o `--html`, que es como lo ejecuta cualquiera desde la consola. Con
+    el envío moría también el `failed_at`, así que el backoff de 24 h tampoco
+    llegaba a anotarse y el equipo lo reintentaba en cada arranque.
+
+    Sigue siendo demonio a propósito, y por eso esto es un `join` con tope y no
+    un hilo normal: si alguien cierra la ventana a media espera, el proceso tiene
+    que poder morir en ese momento. Lo que se espera es el timeout del socket y
+    medio segundo de margen; pasado eso se sigue adelante y el envío se pierde,
+    que es lo que ya prometía el módulo.
+
+    Quien paga esta espera de verdad es el equipo sin conexión, y la paga una vez
+    al día: a la primera el fallo se anota y el backoff se encarga del resto.
+    """
+    if hilo is None:
+        return
+    try:
+        hilo.join(timeout)
+    except Exception:
+        # Ni siquiera esperar puede estropear una ejecución que ya está impresa.
+        pass
+
+
 def programar(payload: dict, destino: Path | None = None, url: str = TELEMETRIA_URL,
               ahora: datetime | None = None, timeout: float = TIEMPO_LIMITE
               ) -> threading.Thread | None:
